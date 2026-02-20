@@ -1,18 +1,16 @@
 //! End-to-end RLN proof demonstration.
 //!
-//! Run repeatedly with `cargo run --bin run_rln_proof` to register new memberships.
-//! First run deploys programs and initializes the tree; subsequent runs add members.
+//! Requires setup to have been run first (`cargo run --bin run_setup`).
+//! Each run creates a new identity, registers it, and generates + verifies an RLN proof.
 //!
-//! Build the guest programs first:
 //! ```bash
-//! cargo risczero build --manifest-path methods/guest/Cargo.toml
+//! source dev/env.sh && cargo run --bin run_rln_proof
 //! ```
 use logos_lez_rln::merkle_tree::{
     TREE_DEPTH, get_merkle_proof, proof_to_fr, wait_for_leaf,
 };
 use logos_lez_rln::rln::client::{
-    TREE_ID, init_wallet, load_programs, is_initialized,
-    run_setup, create_funded_user, register_identity,
+    TREE_ID, init_wallet, load_programs, create_funded_user, register_identity,
 };
 use rln::hashers::poseidon_hash;
 use rln::prelude::{hash_to_field_le, seeded_keygen, Fr, RLNWitnessInput, RLN};
@@ -33,17 +31,11 @@ const RLN_IDENTIFIER: &str = "rln/logos-rln-relay/v2.0.0";
 async fn main() {
     let mut wallet_core = init_wallet();
     let tree_id = TREE_ID;
-    let (registration_program, merkle_program) = load_programs();
+    let (registration_program, _merkle_program) = load_programs();
 
     println!("=== RLN Proof Demo ===\n");
 
-    let user_holding_id = if is_initialized(&wallet_core, &registration_program, &tree_id).await {
-        println!("Registration already initialized, creating new user...\n");
-        create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await
-    } else {
-        println!("First run, setting up...\n");
-        run_setup(&mut wallet_core, &registration_program, &merkle_program, &tree_id, USER_FUNDING).await
-    };
+    let user_holding_id = create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await;
 
     // Step 1: Create identity using zerokit
     println!("Step 1: Creating identity...");

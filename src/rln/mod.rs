@@ -18,6 +18,7 @@ pub mod client;
 pub mod constants;
 pub mod layouts;
 pub mod pda;
+pub mod service;
 
 // Re-export commonly used items at module root for convenience
 pub use constants::*;

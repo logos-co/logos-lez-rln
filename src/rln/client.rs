@@ -118,6 +118,32 @@ pub fn load_supply_holding(tree_id: &[u8; 24]) -> Option<AccountId> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// Get the path to the payment account file for a given tree_id.
+pub fn get_payment_account_path(tree_id: &[u8; 24]) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(DATA_DIR)
+        .join(format!("payment_account_{}.txt", hex::encode(tree_id)))
+}
+
+/// Save the payment account ID for later reuse.
+pub fn save_payment_account(tree_id: &[u8; 24], account_id: &AccountId) {
+    let path = get_payment_account_path(tree_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, account_id.to_string())
+        .expect("Failed to save payment account ID");
+}
+
+/// Load a previously saved payment account ID.
+pub fn load_payment_account(tree_id: &[u8; 24]) -> Option<AccountId> {
+    let path = get_payment_account_path(tree_id);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
 /// Check if a program is deployed by checking if an account owned by it exists.
 async fn is_program_deployed(
     wallet_core: &WalletCore,
