@@ -34,9 +34,18 @@ rln = "1.0.0"
 name = "run_rln_proof"
 path = "src/bin/run_rln_proof.rs"
 
+[[bin]]
+name = "run_query_root"
+path = "src/bin/run_query_root.rs"
+
+[[bin]]
+name = "bulk_register"
+path = "src/bin/bulk_register.rs"
+
 [workspace.dependencies]
 nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 risc0-build = "3.0.3"
 bytemuck = "1.24.0"
 rln-layouts = { path = "rln-layouts", default-features = false }
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
