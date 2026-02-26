@@ -1,0 +1,13 @@
+language = "C"
+include_guard = "LEZ_RLN_FFI_H"
+
+[export]
+include = ["Error"]
+prefix = "RlnFfi"
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true
+
+[fn]
+rename_args = "None"

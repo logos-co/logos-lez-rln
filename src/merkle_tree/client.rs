@@ -153,6 +153,34 @@ pub async fn fetch_root(
     ParsedTreeMain::from_bytes(account.data.as_ref()).root
 }
 
+/// Fetches the current root plus non-zero history entries from the main tree account.
+///
+/// Returns an array of roots newest-first: `[current_root, history[0], history[1], ...]`.
+/// Zero entries (unused history slots) are filtered out.
+pub async fn fetch_root_history(
+    wallet_core: &WalletCore,
+    program: &Program,
+    tree_id: &[u8; 24],
+) -> Vec<[u8; 32]> {
+    let main_account_id = derive_main_account(&program.id(), tree_id);
+
+    let account = wallet_core
+        .get_account_public(main_account_id)
+        .await
+        .expect("Failed to fetch main tree account");
+
+    let parsed = ParsedTreeMain::from_bytes(account.data.as_ref());
+    let zero = [0u8; 32];
+
+    let mut roots = vec![parsed.root];
+    for entry in &parsed.root_history {
+        if *entry != zero {
+            roots.push(*entry);
+        }
+    }
+    roots
+}
+
 /// Fetches the cached default hashes from the main tree account.
 pub async fn fetch_cached_defaults(
     wallet_core: &WalletCore,

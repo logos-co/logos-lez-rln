@@ -14,6 +14,7 @@
 //! Constants and layouts are shared between host and guest via the `rln-layouts` crate,
 //! which is `no_std` compatible for use in zkVM guest programs.
 
+pub mod client;
 pub mod constants;
 pub mod layouts;
 pub mod pda;

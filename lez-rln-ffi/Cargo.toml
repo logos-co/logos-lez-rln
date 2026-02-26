@@ -1,0 +1,13 @@
+[package]
+name = "lez-rln-ffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+rln-layouts = { path = "../rln-layouts" }
+
+[build-dependencies]
+cbindgen = "0.29"

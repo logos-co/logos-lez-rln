@@ -1,0 +1,3 @@
+[submodule "lssa"]
+	path = lssa
+	url = git@github.com:logos-blockchain/lssa.git

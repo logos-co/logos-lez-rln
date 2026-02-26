@@ -1,2 +1,9 @@
 /target
 Cargo.lock
+storage.json
+wallet_config.json
+dev/storage.json
+dev/wallet_config.json
+dev/logs/
+.DS_Store
+result
