@@ -260,10 +260,16 @@ pub const OFFSET_NEXT_INDEX: usize = 1;
 /// Offset of root hash in main account data (32 bytes).
 pub const OFFSET_ROOT: usize = 9;
 
-/// Offset of cached default hashes in main account data (32 bytes * (depth + 1)).
-pub const OFFSET_CACHED_NODES: usize = 41;
+/// Number of previous roots stored in the root history buffer.
+pub const ROOT_HISTORY_SIZE: usize = 4;
 
-/// Offset of top tree sparse data in main account data (after cached nodes: 41 + 21*32 = 713).
+/// Offset of root history in main account data (4 × 32 = 128 bytes).
+pub const OFFSET_ROOT_HISTORY: usize = 41;
+
+/// Offset of cached default hashes in main account data (32 bytes * (depth + 1)).
+pub const OFFSET_CACHED_NODES: usize = OFFSET_ROOT_HISTORY + ROOT_HISTORY_SIZE * 32;
+
+/// Offset of top tree sparse data in main account data.
 pub const OFFSET_TOP_TREE_DATA: usize = OFFSET_CACHED_NODES + (TREE_DEPTH + 1) * 32;
 
 // ============================================================================
@@ -315,7 +321,7 @@ pub fn credit_supply_seed(tree_id: &[u8; 24]) -> [u8; 32] {
 // Account Layouts (Tree)
 // ============================================================================
 
-/// Zero-copy layout for tree main account data (41 bytes).
+/// Zero-copy layout for tree main account header (169 bytes).
 ///
 /// ```text
 /// Offset  Size  Field
@@ -323,6 +329,7 @@ pub fn credit_supply_seed(tree_id: &[u8; 24]) -> [u8; 32] {
 /// 0       1     tree_depth
 /// 1       8     next_index (u64 le)
 /// 9       32    current_root
+/// 41      128   root_history (4 × 32 bytes, newest at [0])
 /// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -330,10 +337,11 @@ pub struct TreeMainLayout {
     pub tree_depth: u8,
     pub next_index: U64Le,
     pub current_root: [u8; 32],
+    pub root_history: [[u8; 32]; 4],
 }
 
 impl TreeMainLayout {
-    pub const SIZE: usize = 41;
+    pub const SIZE: usize = 169;
 
     #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
 

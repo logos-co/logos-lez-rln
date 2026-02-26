@@ -46,7 +46,8 @@ mod tests {
         Commitment, NullifierPublicKey, NullifierSecretKey,
     };
     use nssa_core::account::{Account, AccountWithMetadata, Data};
-    use nssa_core::encryption::IncomingViewingPublicKey;
+    use nssa_core::encryption::ViewingPublicKey;
+    use token_core::{TokenDefinition, TokenHolding};
     use std::collections::HashMap;
 
     // Import shared constants and PDA functions from rln module
@@ -311,17 +312,14 @@ mod tests {
     // private to nssa crate). These helpers create the data layouts for
     // verification after transactions.
 
-    const TOKEN_HOLDING_SIZE: usize = 49;
-
-    /// Creates token holding account data.
-    /// Layout: account_type(1) + definition_id(32) + balance(16)
+    /// Creates borsh-serialized token holding account data for a fungible token.
     #[allow(dead_code)]
     fn create_token_holding_data(definition_id: &AccountId, balance: u128) -> Vec<u8> {
-        let mut data = vec![0u8; TOKEN_HOLDING_SIZE];
-        data[0] = 1; // TOKEN_HOLDING_STANDARD
-        data[1..33].copy_from_slice(definition_id.value());
-        data[33..49].copy_from_slice(&balance.to_le_bytes());
-        data
+        let holding = TokenHolding::Fungible {
+            definition_id: *definition_id,
+            balance,
+        };
+        Data::from(&holding).as_ref().to_vec()
     }
 
     // ========================================================================
@@ -356,8 +354,8 @@ mod tests {
             NullifierPublicKey::from(&self.nsk)
         }
 
-        fn ivk(&self) -> IncomingViewingPublicKey {
-            IncomingViewingPublicKey::from_scalar(self.isk)
+        fn ivk(&self) -> ViewingPublicKey {
+            ViewingPublicKey::from_scalar(self.isk)
         }
 
         fn account_id(&self) -> AccountId {
@@ -376,12 +374,12 @@ mod tests {
     // Privacy-Preserving Token Transfer Helpers
     // ========================================================================
 
-    /// Serializes a token program instruction for use with execute_and_prove.
+    /// Serializes a token Transfer instruction for use with execute_and_prove.
     #[allow(dead_code)]
-    fn token_instruction_data(opcode: u8, amount: u128) -> Vec<u32> {
-        let mut instruction = vec![opcode];
-        instruction.extend_from_slice(&amount.to_le_bytes());
-        instruction.extend_from_slice(&[0u8; 6]); // padding
+    fn token_transfer_instruction_data(amount: u128) -> Vec<u32> {
+        let instruction = token_core::Instruction::Transfer {
+            amount_to_transfer: amount,
+        };
         Program::serialize_instruction(instruction).unwrap()
     }
 
@@ -410,7 +408,7 @@ mod tests {
         state: &V02State,
     ) -> (PrivacyPreservingTransaction, Account) {
         let sender = AccountWithMetadata::new(
-            state.get_account_by_id(sender_id),
+            state.get_account_by_id(sender_id.clone()),
             true,
             *sender_id,
         );
@@ -427,7 +425,7 @@ mod tests {
 
         let (output, proof) = execute_and_prove(
             vec![sender, recipient],
-            token_instruction_data(0x01, amount),
+            token_transfer_instruction_data(amount),
             vec![0, 2], // sender=public, recipient=new_private
             vec![recipient_nonce],
             vec![(recipient_keys.npk(), shared_secret)],
@@ -449,9 +447,10 @@ mod tests {
         let tx = PrivacyPreservingTransaction::new(message, witness_set);
 
         // Compute the recipient's post-state (what the token program produces)
-        let sender_account = state.get_account_by_id(sender_id);
-        let definition_id_bytes: [u8; 32] = sender_account.data[1..33].try_into().unwrap();
-        let definition_id = AccountId::new(definition_id_bytes);
+        let sender_account = state.get_account_by_id(sender_id.clone());
+        let sender_holding = TokenHolding::try_from(&sender_account.data)
+            .expect("Sender should have valid token holding");
+        let definition_id = sender_holding.definition_id();
         let recipient_post = Account {
             program_owner: Program::token().id(),
             balance: 0,
@@ -492,7 +491,7 @@ mod tests {
 
         let (output, proof) = execute_and_prove(
             vec![sender, recipient],
-            token_instruction_data(0x01, amount),
+            token_transfer_instruction_data(amount),
             vec![1, 2], // sender=private_auth, recipient=new_private
             vec![sender_new_nonce, recipient_nonce],
             vec![
@@ -521,11 +520,13 @@ mod tests {
         let tx = PrivacyPreservingTransaction::new(message, witness_set);
 
         // Compute post-states
-        let sender_balance = u128::from_le_bytes(
-            sender_account.data[33..49].try_into().unwrap()
-        );
-        let definition_id_bytes: [u8; 32] = sender_account.data[1..33].try_into().unwrap();
-        let definition_id = AccountId::new(definition_id_bytes);
+        let sender_holding = TokenHolding::try_from(&sender_account.data)
+            .expect("Sender should have valid token holding");
+        let definition_id = sender_holding.definition_id();
+        let sender_balance = match &sender_holding {
+            TokenHolding::Fungible { balance, .. } => *balance,
+            _ => panic!("Expected fungible token holding"),
+        };
 
         let sender_post = Account {
             program_owner: sender_account.program_owner,
@@ -564,7 +565,7 @@ mod tests {
             sender_account.clone(), true, &sender_keys.npk(),
         );
         let recipient = AccountWithMetadata::new(
-            state.get_account_by_id(recipient_id), false, *recipient_id,
+            state.get_account_by_id(recipient_id.clone()), false, *recipient_id,
         );
 
         let esk = [6; 32];
@@ -573,7 +574,7 @@ mod tests {
 
         let (output, proof) = execute_and_prove(
             vec![sender, recipient],
-            token_instruction_data(0x01, amount),
+            token_transfer_instruction_data(amount),
             vec![1, 0], // sender=private_auth, recipient=public
             vec![sender_new_nonce],
             vec![(sender_keys.npk(), shared_secret)],
@@ -593,11 +594,13 @@ mod tests {
         let tx = PrivacyPreservingTransaction::new(message, witness_set);
 
         // Compute sender post-state
-        let sender_balance = u128::from_le_bytes(
-            sender_account.data[33..49].try_into().unwrap()
-        );
-        let definition_id_bytes: [u8; 32] = sender_account.data[1..33].try_into().unwrap();
-        let definition_id = AccountId::new(definition_id_bytes);
+        let sender_holding = TokenHolding::try_from(&sender_account.data)
+            .expect("Sender should have valid token holding");
+        let definition_id = sender_holding.definition_id();
+        let sender_balance = match &sender_holding {
+            TokenHolding::Fungible { balance, .. } => *balance,
+            _ => panic!("Expected fungible token holding"),
+        };
         let sender_post = Account {
             program_owner: sender_account.program_owner,
             balance: 0,
@@ -634,16 +637,16 @@ mod tests {
 
         // Build pre_states: [config, credit_def, user_payment, treasury, user_credit]
         let config = AccountWithMetadata::new(
-            state.get_account_by_id(&config_id), false, config_id,
+            state.get_account_by_id(config_id.clone()), false, config_id,
         );
         let credit_def = AccountWithMetadata::new(
-            state.get_account_by_id(&credit_token_id), false, credit_token_id,
+            state.get_account_by_id(credit_token_id.clone()), false, credit_token_id,
         );
         let user_payment = AccountWithMetadata::new(
             payment_account.clone(), true, &payment_keys.npk(),
         );
         let treasury = AccountWithMetadata::new(
-            state.get_account_by_id(&setup.treasury_id), false, setup.treasury_id,
+            state.get_account_by_id(setup.treasury_id.clone()), false, setup.treasury_id,
         );
         let user_credit = AccountWithMetadata::new(
             Account::default(), false, &credit_keys.npk(),
@@ -706,11 +709,13 @@ mod tests {
 
         // Compute private account post-states
         let payment_cost = price_per_unit * amount;
-        let payment_balance = u128::from_le_bytes(
-            payment_account.data[33..49].try_into().unwrap()
-        );
-        let payment_def_bytes: [u8; 32] = payment_account.data[1..33].try_into().unwrap();
-        let payment_def_id = AccountId::new(payment_def_bytes);
+        let payment_holding = TokenHolding::try_from(&payment_account.data)
+            .expect("Payment account should have valid token holding");
+        let payment_def_id = payment_holding.definition_id();
+        let payment_balance = match &payment_holding {
+            TokenHolding::Fungible { balance, .. } => *balance,
+            _ => panic!("Expected fungible token holding"),
+        };
 
         let payment_post = Account {
             program_owner: payment_account.program_owner,
@@ -750,9 +755,10 @@ mod tests {
         total_supply: u128,
         name: &[u8; 6],
     ) -> PublicTransaction {
-        let mut instruction = vec![0x00]; // opcode 0 = create
-        instruction.extend_from_slice(&total_supply.to_le_bytes());
-        instruction.extend_from_slice(name);
+        let instruction = token_core::Instruction::NewFungibleDefinition {
+            name: String::from_utf8_lossy(name).to_string(),
+            total_supply,
+        };
 
         let message = Message::try_new(
             Program::token().id(),
@@ -767,9 +773,6 @@ mod tests {
         )
     }
 
-    /// Builds a token transfer transaction.
-    ///
-    /// Instruction format: opcode(1) + amount(16) + padding(6) = 23 bytes
     #[allow(dead_code)]
     fn build_token_transfer_tx(
         from_id: &AccountId,
@@ -778,9 +781,9 @@ mod tests {
         from_nonce: u128,
         amount: u128,
     ) -> PublicTransaction {
-        let mut instruction = vec![0x01]; // opcode 1 = transfer
-        instruction.extend_from_slice(&amount.to_le_bytes());
-        instruction.extend_from_slice(&[0u8; 6]); // padding
+        let instruction = token_core::Instruction::Transfer {
+            amount_to_transfer: amount,
+        };
 
         let message = Message::try_new(
             Program::token().id(),
@@ -951,7 +954,7 @@ mod tests {
     #[allow(dead_code)]
     fn get_total_registrations(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
         let config_id = derive_config_pda(registration.id(), tree_id);
-        let config = state.get_account_by_id(&config_id);
+        let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(config.data.as_ref()[168..176].try_into().unwrap())
     }
 
@@ -959,7 +962,7 @@ mod tests {
     #[allow(dead_code)]
     fn get_current_total_rate_limit(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
         let config_id = derive_config_pda(registration.id(), tree_id);
-        let config = state.get_account_by_id(&config_id);
+        let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(
             config.data.as_ref()[CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT..CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT + 8]
                 .try_into().unwrap()
@@ -970,7 +973,7 @@ mod tests {
     #[allow(dead_code)]
     fn get_tree_next_index(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-        let tree = state.get_account_by_id(&tree_main_id);
+        let tree = state.get_account_by_id(tree_main_id);
         u64::from_le_bytes(tree.data.as_ref()[1..9].try_into().unwrap())
     }
 
@@ -978,33 +981,40 @@ mod tests {
     #[allow(dead_code)]
     fn get_tree_root(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> [u8; 32] {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-        let tree = state.get_account_by_id(&tree_main_id);
+        let tree = state.get_account_by_id(tree_main_id);
         tree.data.as_ref()[9..41].try_into().unwrap()
     }
 
     /// Gets token balance from a holding account.
     #[allow(dead_code)]
     fn get_token_balance(state: &V02State, account_id: &AccountId) -> u128 {
-        let account = state.get_account_by_id(account_id);
-        let data = account.data.as_ref();
-        if data.len() < 49 { return 0; }
-        u128::from_le_bytes(data[33..49].try_into().unwrap())
+        let account = state.get_account_by_id(account_id.clone());
+        let holding = TokenHolding::try_from(&account.data)
+            .expect("Failed to deserialize token holding");
+        match holding {
+            TokenHolding::Fungible { balance, .. } => balance,
+            TokenHolding::NftMaster { print_balance, .. } => print_balance,
+            TokenHolding::NftPrintedCopy { .. } => 0,
+        }
     }
 
     /// Gets token total supply from a definition account.
     #[allow(dead_code)]
     fn get_token_supply(state: &V02State, definition_id: &AccountId) -> u128 {
-        let account = state.get_account_by_id(definition_id);
-        let data = account.data.as_ref();
-        if data.len() < 23 { return 0; }
-        u128::from_le_bytes(data[7..23].try_into().unwrap())
+        let account = state.get_account_by_id(definition_id.clone());
+        let definition = TokenDefinition::try_from(&account.data)
+            .expect("Failed to deserialize token definition");
+        match definition {
+            TokenDefinition::Fungible { total_supply, .. } => total_supply,
+            TokenDefinition::NonFungible { printable_supply, .. } => printable_supply,
+        }
     }
 
     /// Checks if a membership PDA exists (has non-empty data).
     #[allow(dead_code)]
     fn membership_exists(state: &V02State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> bool {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
-        let membership = state.get_account_by_id(&membership_id);
+        let membership = state.get_account_by_id(membership_id);
         !membership.data.as_ref().is_empty()
     }
 
@@ -1021,7 +1031,7 @@ mod tests {
     #[allow(dead_code)]
     fn get_membership_data(state: &V02State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> Option<MembershipData> {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
-        let membership = state.get_account_by_id(&membership_id);
+        let membership = state.get_account_by_id(membership_id);
         let data = membership.data.as_ref();
         if data.is_empty() || data.len() < MEMBERSHIP_SIZE { return None; }
         Some(MembershipData {
@@ -1306,7 +1316,7 @@ mod tests {
 
         // Verify config account was created
         let config_id = derive_config_pda(registration.id(), &TREE_ID);
-        let config_account = state.get_account_by_id(&config_id);
+        let config_account = state.get_account_by_id(config_id);
 
         // Config should exist and have data
         assert!(
@@ -1383,7 +1393,7 @@ mod tests {
 
         // Verify tree main account was created via chained call
         let tree_main_id = derive_tree_main_pda(registration.id(), &TREE_ID);
-        let tree_main = state.get_account_by_id(&tree_main_id);
+        let tree_main = state.get_account_by_id(tree_main_id);
 
         assert!(
             !tree_main.data.as_ref().is_empty(),
@@ -1433,26 +1443,22 @@ mod tests {
 
         // Verify credit token definition was created
         let credit_token_id = derive_credit_token_pda(registration.id(), &TREE_ID);
-        let credit_token = state.get_account_by_id(&credit_token_id);
+        let credit_token = state.get_account_by_id(credit_token_id);
 
         assert!(
             !credit_token.data.as_ref().is_empty(),
             "Credit token definition should have data"
         );
 
-        // Token definition format: account_type(1) + name(6) + total_supply(16) + metadata_id(32)
-        let data = credit_token.data.as_ref();
-        assert_eq!(
-            data[0], 0,
-            "Token type should be 0 (fungible)"
-        );
-
-        // Initial supply should be 0
-        let total_supply = u128::from_le_bytes(data[7..23].try_into().unwrap());
-        assert_eq!(
-            total_supply, 0,
-            "Initial credit token supply should be 0"
-        );
+        // Verify it's a fungible token with zero supply
+        let definition = TokenDefinition::try_from(&credit_token.data)
+            .expect("Credit token definition should deserialize");
+        match definition {
+            TokenDefinition::Fungible { total_supply, .. } => {
+                assert_eq!(total_supply, 0, "Initial credit token supply should be 0");
+            }
+            _ => panic!("Credit token should be fungible"),
+        }
     }
 
     #[test]
@@ -1509,14 +1515,11 @@ mod tests {
         assert!(result.is_ok(), "Token create should succeed: {:?}", result);
 
         // Verify definition was created
-        let def_account = state.get_account_by_id(&definition_id);
+        let def_account = state.get_account_by_id(definition_id);
         assert!(!def_account.data.as_ref().is_empty(), "Definition should have data");
 
         // Verify supply holder was created with balance
-        let holder_account = state.get_account_by_id(&supply_holder_id);
-        let balance = u128::from_le_bytes(
-            holder_account.data.as_ref()[33..49].try_into().unwrap()
-        );
+        let balance = get_token_balance(&state, &supply_holder_id);
         assert_eq!(balance, 1_000_000, "Supply holder should have full supply");
     }
 
@@ -1547,16 +1550,10 @@ mod tests {
         assert!(result.is_ok(), "Transfer should succeed: {:?}", result);
 
         // Verify balances
-        let from_account = state.get_account_by_id(&from_id);
-        let from_balance = u128::from_le_bytes(
-            from_account.data.as_ref()[33..49].try_into().unwrap()
-        );
+        let from_balance = get_token_balance(&state, &from_id);
         assert_eq!(from_balance, 900_000, "From should have 900k");
 
-        let to_account = state.get_account_by_id(&to_id);
-        let to_balance = u128::from_le_bytes(
-            to_account.data.as_ref()[33..49].try_into().unwrap()
-        );
+        let to_balance = get_token_balance(&state, &to_id);
         assert_eq!(to_balance, 100_000, "To should have 100k");
     }
 
@@ -1871,7 +1868,7 @@ mod tests {
 
         // Verify membership PDA was created
         let membership_id = derive_membership_pda(setup.registration.id(), &TREE_ID, &id_commitment);
-        let membership = setup.state.get_account_by_id(&membership_id);
+        let membership = setup.state.get_account_by_id(membership_id);
 
         assert!(
             !membership.data.as_ref().is_empty(),
@@ -2152,7 +2149,7 @@ mod tests {
         if level <= TOP_DEPTH {
             // Node is in top tree (sparse format in main account after OFFSET_TOP_TREE_DATA)
             let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-            let main_account = state.get_account_by_id(&tree_main_id);
+            let main_account = state.get_account_by_id(tree_main_id);
             let data = main_account.data.as_ref();
 
             let top_tree_data = if data.len() > OFFSET_TOP_TREE_DATA {
@@ -2169,7 +2166,7 @@ mod tests {
             let local_index = node_index as usize % nodes_per_subtree_at_level;
 
             let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
-            let subtree_account = state.get_account_by_id(&subtree_account_id);
+            let subtree_account = state.get_account_by_id(subtree_account_id);
             let data = subtree_account.data.as_ref();
 
             read_sparse_node(data, bottom_level, local_index, &cached_defaults[level])
@@ -2184,7 +2181,7 @@ mod tests {
         leaf_index: u64,
     ) -> (Vec<[u8; 32]>, Vec<u8>, [u8; 32], [u8; 32]) {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-        let tree_main = state.get_account_by_id(&tree_main_id);
+        let tree_main = state.get_account_by_id(tree_main_id);
         let main_data = tree_main.data.as_ref();
 
         let depth = main_data[OFFSET_DEPTH] as usize;
@@ -2481,7 +2478,7 @@ mod tests {
 
         // Get root before slash
         let tree_main_id = derive_tree_main_pda(setup.registration.id(), &TREE_ID);
-        let tree_before = setup.state.get_account_by_id(&tree_main_id);
+        let tree_before = setup.state.get_account_by_id(tree_main_id.clone());
         let root_before: [u8; 32] = tree_before.data.as_ref()[9..41].try_into().unwrap();
 
         // Slash the member
@@ -2492,7 +2489,7 @@ mod tests {
             .expect("Slash should succeed");
 
         // Get root after slash
-        let tree_after = setup.state.get_account_by_id(&tree_main_id);
+        let tree_after = setup.state.get_account_by_id(tree_main_id);
         let root_after: [u8; 32] = tree_after.data.as_ref()[9..41].try_into().unwrap();
 
         // Root should have changed after slash
