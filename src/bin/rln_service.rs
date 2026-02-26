@@ -140,6 +140,7 @@ async fn handle_request(
     let response = match rpc_req.method.as_str() {
         "rln_register" => handle_register(&service, rpc_req.id, rpc_req.params).await,
         "rln_getRoot" => handle_get_root(&service, rpc_req.id).await,
+        "rln_getRoots" => handle_get_roots(&service, rpc_req.id).await,
         "rln_getMerkleProof" => {
             handle_get_merkle_proof(&service, rpc_req.id, rpc_req.params).await
         }
@@ -212,6 +213,16 @@ async fn handle_get_root(service: &RlnService, id: serde_json::Value) -> JsonRpc
     let root = service.get_root().await;
     println!("    root=0x{:.16}...", hex::encode(root));
     success(id, serde_json::Value::String(format!("0x{}", hex::encode(root))))
+}
+
+async fn handle_get_roots(service: &RlnService, id: serde_json::Value) -> JsonRpcResponse {
+    let roots = service.get_root_history().await;
+    let hex_roots: Vec<String> = roots
+        .iter()
+        .map(|r| format!("0x{}", hex::encode(r)))
+        .collect();
+    println!("    roots={} entries", hex_roots.len());
+    success(id, serde_json::json!(hex_roots))
 }
 
 async fn handle_get_merkle_proof(
@@ -338,7 +349,7 @@ async fn main() {
         .unwrap_or_else(|e| panic!("Failed to bind to {listen_addr}: {e}"));
 
     println!("RLN service listening on http://{listen_addr}");
-    println!("Methods: rln_register, rln_getRoot, rln_getMerkleProof");
+    println!("Methods: rln_register, rln_getRoot, rln_getRoots, rln_getMerkleProof");
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();

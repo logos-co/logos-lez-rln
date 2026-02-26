@@ -140,7 +140,8 @@ impl RlnService {
         let witness_set = WitnessSet::for_message(&message, &[&self.signing_key]);
         let tx = PublicTransaction::new(message, witness_set);
 
-        self.wallet_core
+        let response = self
+            .wallet_core
             .sequencer_client
             .send_tx_public(tx)
             .await
@@ -150,12 +151,32 @@ impl RlnService {
         state.nonce += 1;
         state.next_index += 1;
 
+        // Drop the lock before polling — no further state mutation needed
+        drop(state);
+
+        // Wait for the transaction to be included in a block so that
+        // subsequent queries (getRoots, getMerkleProof) see the updated state.
+        self.wallet_core
+            .poll_native_token_transfer(response.tx_hash)
+            .await
+            .map_err(|e| format!("Transaction sent but not confirmed: {e:?}"))?;
+
         Ok(leaf_index)
     }
 
     /// Get the current merkle root.
     pub async fn get_root(&self) -> [u8; 32] {
         merkle_tree::fetch_root(
+            &self.wallet_core,
+            &self.registration_program,
+            &self.tree_id,
+        )
+        .await
+    }
+
+    /// Get the current root plus recent previous roots (newest first, non-zero only).
+    pub async fn get_root_history(&self) -> Vec<[u8; 32]> {
+        merkle_tree::fetch_root_history(
             &self.wallet_core,
             &self.registration_program,
             &self.tree_id,
