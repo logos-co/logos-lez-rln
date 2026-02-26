@@ -31,7 +31,8 @@ use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::AccountPostState;
 pub use rln_layouts::{
     TREE_DEPTH, TOP_DEPTH, BOTTOM_DEPTH, SUBTREE_LEAVES,
-    OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_CACHED_NODES, OFFSET_TOP_TREE_DATA,
+    OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE,
+    OFFSET_CACHED_NODES, OFFSET_TOP_TREE_DATA,
 };
 
 // ============================================================================
@@ -262,7 +263,7 @@ pub fn insert_leaf(
     let mut main_post_data = main_data[..OFFSET_TOP_TREE_DATA].to_vec();
     main_post_data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
         .copy_from_slice(&((next_index + 1) as u64).to_le_bytes());
-    main_post_data[OFFSET_ROOT..OFFSET_ROOT + 32].copy_from_slice(&new_root);
+    push_root_history(&mut main_post_data, &new_root);
     main_post_data.extend_from_slice(&top_tree_data);
 
     let mut main_post_account = main_account.account.clone();
@@ -354,7 +355,7 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
 
     // Build updated main account data (only root changes, NOT next_index)
     let mut main_post_data = main_data[..OFFSET_TOP_TREE_DATA].to_vec();
-    main_post_data[OFFSET_ROOT..OFFSET_ROOT + 32].copy_from_slice(&new_root);
+    push_root_history(&mut main_post_data, &new_root);
     main_post_data.extend_from_slice(&top_tree_data);
 
     let mut main_post_account = main_account.account.clone();
@@ -432,7 +433,7 @@ pub fn remove_leaf(
 
     // Build updated main account data (only root changes, NOT next_index)
     let mut main_post_data = main_data[..OFFSET_TOP_TREE_DATA].to_vec();
-    main_post_data[OFFSET_ROOT..OFFSET_ROOT + 32].copy_from_slice(&new_root);
+    push_root_history(&mut main_post_data, &new_root);
     main_post_data.extend_from_slice(&top_tree_data);
 
     let mut main_post_account = main_account.account.clone();
@@ -452,6 +453,23 @@ pub fn remove_leaf(
 // ============================================================================
 // Internal Helpers
 // ============================================================================
+
+/// Shift root history down and write the new root.
+///
+/// Copies `history[0..2]` → `history[1..3]` (dropping oldest), moves old
+/// `current_root` into `history[0]`, then writes `new_root` as current.
+fn push_root_history(data: &mut [u8], new_root: &[u8; 32]) {
+    let old_root: [u8; 32] = data[OFFSET_ROOT..OFFSET_ROOT + 32].try_into().unwrap();
+    // Shift history entries down (drop oldest)
+    data.copy_within(
+        OFFSET_ROOT_HISTORY..OFFSET_ROOT_HISTORY + (ROOT_HISTORY_SIZE - 1) * 32,
+        OFFSET_ROOT_HISTORY + 32,
+    );
+    // Old root becomes newest history entry
+    data[OFFSET_ROOT_HISTORY..OFFSET_ROOT_HISTORY + 32].copy_from_slice(&old_root);
+    // Write new root
+    data[OFFSET_ROOT..OFFSET_ROOT + 32].copy_from_slice(new_root);
+}
 
 /// Extract cached default hashes from main account data.
 fn extract_cached_nodes(main_data: &[u8], depth: usize) -> Vec<[u8; 32]> {

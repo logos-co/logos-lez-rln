@@ -17,7 +17,7 @@ use wallet::WalletCore;
 
 use super::{
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
-    OFFSET_TOP_TREE_DATA, TREE_DEPTH, TOP_DEPTH,
+    OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE, OFFSET_TOP_TREE_DATA, TREE_DEPTH, TOP_DEPTH,
     derive_main_account, derive_subtree_account,
 };
 
@@ -31,6 +31,7 @@ pub struct ParsedTreeMain {
     pub depth: u8,
     pub next_index: u64,
     pub root: [u8; 32],
+    pub root_history: Vec<[u8; 32]>,
 }
 
 impl ParsedTreeMain {
@@ -40,11 +41,18 @@ impl ParsedTreeMain {
     /// Panics if data is too short.
     pub fn from_bytes(data: &[u8]) -> Self {
         assert!(
-            data.len() >= OFFSET_ROOT + 32,
+            data.len() >= OFFSET_ROOT_HISTORY + ROOT_HISTORY_SIZE * 32,
             "Tree main data too short: need at least {} bytes, got {}",
-            OFFSET_ROOT + 32,
+            OFFSET_ROOT_HISTORY + ROOT_HISTORY_SIZE * 32,
             data.len()
         );
+
+        let root_history = (0..ROOT_HISTORY_SIZE)
+            .map(|i| {
+                let start = OFFSET_ROOT_HISTORY + i * 32;
+                data[start..start + 32].try_into().unwrap()
+            })
+            .collect();
 
         Self {
             depth: data[OFFSET_DEPTH],
@@ -52,6 +60,7 @@ impl ParsedTreeMain {
                 data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8].try_into().unwrap()
             ),
             root: data[OFFSET_ROOT..OFFSET_ROOT + 32].try_into().unwrap(),
+            root_history,
         }
     }
 }

@@ -310,19 +310,9 @@ pub fn read_tree_next_index(tree_main_data: &[u8]) -> u64 {
 // Chained Call Helpers
 // ============================================================================
 
-/// Token program opcodes used in chained calls.
-pub const TOKEN_OPCODE_TRANSFER: u8 = 0x01;
-pub const TOKEN_OPCODE_BURN: u8 = 0x03;
-pub const TOKEN_OPCODE_MINT: u8 = 0x04;
-
-/// Build a token instruction for a chained call.
-///
-/// Format: `[opcode(1), amount(16), padding(6)]` = 23 bytes.
-pub fn build_token_instruction(opcode: u8, amount: u128) -> Vec<u8> {
-    let mut instruction = vec![0u8; 23];
-    instruction[0] = opcode;
-    instruction[1..17].copy_from_slice(&amount.to_le_bytes());
-    instruction
+/// Serialize a token instruction for use in a chained call.
+pub fn serialize_token_instruction(instruction: &token_core::Instruction) -> Vec<u32> {
+    risc0_zkvm::serde::to_vec(instruction).unwrap()
 }
 
 /// Clone an account with `is_authorized` set to true.

@@ -56,8 +56,7 @@ use logos_lez_rln_guest::registration::{
     // Membership operations
     create_membership_data, MembershipData,
     // Chained call helpers
-    TOKEN_OPCODE_TRANSFER, TOKEN_OPCODE_BURN, TOKEN_OPCODE_MINT,
-    build_token_instruction, authorize,
+    serialize_token_instruction, authorize,
     build_merkle_insert_instruction, build_merkle_remove_instruction,
     prepare_merkle_accounts,
 };
@@ -185,13 +184,14 @@ fn initialize(
     let mut config_post = config.account.clone();
     config_post.data = config_data.try_into().unwrap();
 
-    let mut token_create_instruction = vec![0u8; 23];
-    token_create_instruction[0] = 0x00;
-    token_create_instruction[17..23].copy_from_slice(b"RLNREC");
+    let token_create_instruction = token_core::Instruction::NewFungibleDefinition {
+        name: "RLNREC".to_string(),
+        total_supply: 0,
+    };
 
     let token_create_call = ChainedCall {
         program_id: bytemuck::cast(token_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&token_create_instruction).unwrap(),
+        instruction_data: serialize_token_instruction(&token_create_instruction),
         pre_states: vec![authorize(&credit_token_def), authorize(&credit_supply)],
         pda_seeds: vec![
             derive_credit_token_seed(&tree_id),
@@ -279,10 +279,10 @@ fn register(
         pda_seeds,
     };
 
-    let token_instruction = build_token_instruction(TOKEN_OPCODE_TRANSFER, payment_amount);
+    let token_instruction = token_core::Instruction::Transfer { amount_to_transfer: payment_amount };
     let token_call = ChainedCall {
         program_id: token_program_id,
-        instruction_data: risc0_zkvm::serde::to_vec(&token_instruction).unwrap(),
+        instruction_data: serialize_token_instruction(&token_instruction),
         pre_states: vec![authorize(user_holding), treasury_holding.clone()],
         pda_seeds: vec![],
     };
@@ -345,18 +345,18 @@ fn buy_credits(
 
     let token_program_id = user_payment_holding.account.program_owner;
 
-    let transfer_instruction = build_token_instruction(TOKEN_OPCODE_TRANSFER, payment_amount);
+    let transfer_instruction = token_core::Instruction::Transfer { amount_to_transfer: payment_amount };
     let transfer_call = ChainedCall {
         program_id: token_program_id,
-        instruction_data: risc0_zkvm::serde::to_vec(&transfer_instruction).unwrap(),
+        instruction_data: serialize_token_instruction(&transfer_instruction),
         pre_states: vec![authorize(user_payment_holding), treasury_holding.clone()],
         pda_seeds: vec![],
     };
 
-    let mint_instruction = build_token_instruction(TOKEN_OPCODE_MINT, amount);
+    let mint_instruction = token_core::Instruction::Mint { amount_to_mint: amount };
     let mint_call = ChainedCall {
         program_id: token_program_id,
-        instruction_data: risc0_zkvm::serde::to_vec(&mint_instruction).unwrap(),
+        instruction_data: serialize_token_instruction(&mint_instruction),
         pre_states: vec![authorize(credit_token_def), user_credit_holding.clone()],
         pda_seeds: vec![derive_credit_token_seed(&config.tree_id)],
     };
@@ -421,10 +421,10 @@ fn register_with_credits(
 
     let token_program_id = user_credit_holding.account.program_owner;
 
-    let burn_instruction = build_token_instruction(TOKEN_OPCODE_BURN, rate_limit as u128);
+    let burn_instruction = token_core::Instruction::Burn { amount_to_burn: rate_limit as u128 };
     let burn_call = ChainedCall {
         program_id: token_program_id,
-        instruction_data: risc0_zkvm::serde::to_vec(&burn_instruction).unwrap(),
+        instruction_data: serialize_token_instruction(&burn_instruction),
         pre_states: vec![credit_token_def.clone(), authorize(user_credit_holding)],
         pda_seeds: vec![],
     };

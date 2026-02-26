@@ -34,9 +34,13 @@ rln = "1.0.0"
 name = "run_rln_proof"
 path = "src/bin/run_rln_proof.rs"
 
+[dev-dependencies]
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
+
 [workspace.dependencies]
 nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
-risc0-zkvm = { version = "3.0.3", features = ["std"] }
-risc0-build = "3.0.3"
+risc0-zkvm = { version = "3.0.5", features = ["std"] }
+risc0-build = "3.0.5"
 bytemuck = "1.24.0"
 rln-layouts = { path = "rln-layouts", default-features = false }
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }

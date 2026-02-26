@@ -11,6 +11,7 @@ nssa_core = { workspace = true }
 bytemuck = { workspace = true }
 risc0-zkvm = { workspace = true }
 rln-layouts = { workspace = true }
+token_core = { workspace = true }
 rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
 
 [[bin]]
