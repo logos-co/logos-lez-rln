@@ -13,6 +13,7 @@ extern "C" {
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 
 class LogosRlnModule : public QObject, public PluginInterface, public ILogosRlnModule {
     Q_OBJECT
@@ -26,6 +27,18 @@ public:
     [[nodiscard]] QString version() const override;
     Q_INVOKABLE void initLogos(LogosAPI* logosApiInstance) override;
     Q_INVOKABLE QString get_valid_roots(const QString& rln_account_id_hex) override;
+    Q_INVOKABLE void start_root_broadcast(const QString& rln_account_id) override;
+
+signals:
+    void eventResponse(const QString& eventName, const QVariantList& data);
+
+private slots:
+    void onBroadcastTimer();
+
+private:
+    static constexpr int BROADCAST_INTERVAL_MS = 10000;
+    QTimer* m_broadcastTimer = nullptr;
+    QString m_broadcastAccountId;
 };
 
 #endif

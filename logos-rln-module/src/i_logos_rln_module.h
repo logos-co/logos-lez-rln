@@ -10,6 +10,9 @@ public:
 
     /// Returns JSON array string of hex-encoded 32-byte roots, or empty on failure.
     virtual QString get_valid_roots(const QString& rln_account_id_hex) = 0;
+
+    /// Start periodic broadcasting of valid roots as "valid_roots" events.
+    virtual void start_root_broadcast(const QString& rln_account_id) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

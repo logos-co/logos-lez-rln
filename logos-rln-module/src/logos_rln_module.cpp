@@ -42,6 +42,31 @@ void LogosRlnModule::initLogos(LogosAPI* logosApiInstance) {
     logosAPI = logosApiInstance;
 }
 
+void LogosRlnModule::start_root_broadcast(const QString& rln_account_id) {
+    m_broadcastAccountId = rln_account_id;
+
+    if (!m_broadcastTimer) {
+        m_broadcastTimer = new QTimer(this);
+        connect(m_broadcastTimer, &QTimer::timeout, this, &LogosRlnModule::onBroadcastTimer);
+    }
+
+    m_broadcastTimer->start(BROADCAST_INTERVAL_MS);
+    // Fire immediately as well
+    onBroadcastTimer();
+}
+
+void LogosRlnModule::onBroadcastTimer() {
+    const QString roots = get_valid_roots(m_broadcastAccountId);
+    if (roots.isEmpty()) {
+        qWarning() << "root broadcast: failed to fetch roots";
+        return;
+    }
+
+    QVariantList data;
+    data << roots;
+    emit eventResponse("valid_roots", data);
+}
+
 QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
     if (!logosAPI) {
         qWarning() << "get_valid_roots: logosAPI not initialized";
