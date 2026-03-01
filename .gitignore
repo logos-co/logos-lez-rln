@@ -7,3 +7,5 @@ dev/wallet_config.json
 dev/logs/
 .DS_Store
 result
+.mcp.json
+.mcp_data/

@@ -44,7 +44,21 @@
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          src = ./.;
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              let
+                relPath = pkgs.lib.removePrefix (toString ./. + "/") (toString path);
+                topDir = builtins.head (pkgs.lib.splitString "/" relPath);
+              in
+              # Exclude directories not needed for building lez-rln-ffi
+              topDir != "lssa"
+              && topDir != "dev"
+              && topDir != "logos-rln-module"
+              && (craneLib.filterCargoSources path type
+                  || pkgs.lib.hasSuffix ".toml" path
+                  || pkgs.lib.hasSuffix ".h" path);
+          };
 
           lezRlnFfiPackage = craneLib.buildPackage {
             inherit src;

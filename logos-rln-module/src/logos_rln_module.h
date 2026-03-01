@@ -28,6 +28,8 @@ public:
     Q_INVOKABLE void initLogos(LogosAPI* logosApiInstance) override;
     Q_INVOKABLE QString get_valid_roots(const QString& rln_account_id_hex) override;
     Q_INVOKABLE void start_root_broadcast(const QString& rln_account_id) override;
+    Q_INVOKABLE QString get_merkle_proofs(const QString& config_account_id,
+                                          const QString& leaf_indices_json) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& data);

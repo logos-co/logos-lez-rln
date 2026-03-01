@@ -56,6 +56,10 @@ path = "src/bin/run_setup.rs"
 name = "rln_service"
 path = "src/bin/rln_service.rs"
 
+[[bin]]
+name = "register_member"
+path = "src/bin/register_member.rs"
+
 [dev-dependencies]
 token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd" }
 

@@ -13,6 +13,10 @@ public:
 
     /// Start periodic broadcasting of valid roots as "valid_roots" events.
     virtual void start_root_broadcast(const QString& rln_account_id) = 0;
+
+    /// Returns JSON array of merkle proofs for the given leaf indices.
+    virtual QString get_merkle_proofs(const QString& config_account_id,
+                                      const QString& leaf_indices_json) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

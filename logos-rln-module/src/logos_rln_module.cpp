@@ -5,7 +5,6 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
-#include <QtCore/QVariantMap>
 
 static const char* WALLET_MODULE = "liblogos_execution_zone_wallet_module";
 
@@ -67,6 +66,18 @@ void LogosRlnModule::onBroadcastTimer() {
     emit eventResponse("valid_roots", data);
 }
 
+static QString resolveAccountId(LogosAPIClient* walletClient, const QString& id) {
+    const QString trimmed = id.trimmed();
+    const QString stripped = trimmed.startsWith("0x", Qt::CaseInsensitive)
+        ? trimmed.mid(2) : trimmed;
+    if (stripped.size() == 64)
+        return stripped;
+
+    const QVariant hexResult = walletClient->invokeRemoteMethod(
+        WALLET_MODULE, "account_id_from_base58", QVariant(id));
+    return hexResult.toString();
+}
+
 QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
     if (!logosAPI) {
         qWarning() << "get_valid_roots: logosAPI not initialized";
@@ -80,20 +91,10 @@ QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
         return {};
     }
 
-    // Convert base58 account ID to hex if needed (not a 64-char hex string)
-    QString accountIdHex = rln_account_id_hex;
-    const QString trimmed = rln_account_id_hex.trimmed();
-    const QString stripped = trimmed.startsWith("0x", Qt::CaseInsensitive)
-        ? trimmed.mid(2) : trimmed;
-    if (stripped.size() != 64) {
-        // Assume base58, convert via wallet module
-        const QVariant hexResult = walletClient->invokeRemoteMethod(
-            WALLET_MODULE, "account_id_from_base58", QVariant(rln_account_id_hex));
-        accountIdHex = hexResult.toString();
-        if (accountIdHex.isEmpty()) {
-            qWarning() << "get_valid_roots: failed to convert base58 account ID";
-            return {};
-        }
+    const QString accountIdHex = resolveAccountId(walletClient, rln_account_id_hex);
+    if (accountIdHex.isEmpty()) {
+        qWarning() << "get_valid_roots: failed to resolve account ID";
+        return {};
     }
 
     const QVariant result = walletClient->invokeRemoteMethod(
@@ -149,4 +150,153 @@ QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
 
     // 6. Return compact JSON string
     return QJsonDocument(array).toJson(QJsonDocument::Compact);
+}
+
+static bool fetchAccountData(LogosAPIClient* walletClient,
+                              const QString& accountIdHex,
+                              QByteArray& outData,
+                              QByteArray* outProgramOwner = nullptr) {
+    const QVariant result = walletClient->invokeRemoteMethod(
+        WALLET_MODULE, "get_account_public", QVariant(accountIdHex));
+    const QString json = result.toString();
+    if (json.isEmpty()) {
+        qWarning() << "fetchAccountData failed: empty response for" << accountIdHex;
+        return false;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+    if (!doc.isObject()) {
+        qWarning() << "fetchAccountData failed: not a JSON object for" << accountIdHex
+                 << "got:" << json.left(200);
+        return false;
+    }
+
+    const QJsonObject obj = doc.object();
+    const QString dataHex = obj.value("data").toString();
+    if (dataHex.isEmpty()) {
+        qWarning() << "fetchAccountData failed: empty data for" << accountIdHex;
+        return false;
+    }
+
+    if (outProgramOwner) {
+        const QString ownerHex = obj.value("program_owner").toString();
+        if (!ownerHex.isEmpty()) {
+            if (!hexToBytes(ownerHex, *outProgramOwner, 32)) {
+                qWarning() << "fetchAccountData: malformed program_owner hex:" << ownerHex.left(80);
+                return false;
+            }
+        }
+    }
+
+    return hexToBytes(dataHex, outData);
+}
+
+QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
+                                           const QString& leaf_indices_json) {
+    if (!logosAPI) {
+        qWarning() << "get_merkle_proofs: logosAPI not initialized";
+        return {};
+    }
+
+    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
+    if (!walletClient) {
+        qWarning() << "get_merkle_proofs: wallet module not available";
+        return {};
+    }
+
+    // 1. Parse leaf indices from JSON array
+    const QJsonDocument indicesDoc = QJsonDocument::fromJson(leaf_indices_json.toUtf8());
+    if (!indicesDoc.isArray()) {
+        qWarning() << "get_merkle_proofs: leaf_indices_json is not a JSON array";
+        return {};
+    }
+    const QJsonArray indicesArray = indicesDoc.array();
+    if (indicesArray.isEmpty()) {
+        return QStringLiteral("[]");
+    }
+
+    QVector<uint64_t> leafIndices;
+    for (const auto& val : indicesArray) {
+        if (!val.isDouble()) {
+            qWarning() << "get_merkle_proofs: leaf index is not a number";
+            return {};
+        }
+        leafIndices.append(static_cast<uint64_t>(val.toDouble()));
+    }
+
+    // 2. Resolve config account ID and fetch config data
+    const QString configHex = resolveAccountId(walletClient, config_account_id);
+    if (configHex.isEmpty()) {
+        qWarning() << "get_merkle_proofs: failed to resolve config account ID";
+        return {};
+    }
+
+    QByteArray configData;
+    QByteArray programOwnerBytes;
+    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)) {
+        qWarning() << "get_merkle_proofs: failed to fetch config account";
+        return {};
+    }
+    if (programOwnerBytes.size() != 32) {
+        qWarning() << "get_merkle_proofs: invalid program_owner size" << programOwnerBytes.size();
+        return {};
+    }
+
+    // 3. Phase 1: ask Rust which accounts we need to fetch
+    RlnFfiMerkleProofsPlan plan = {};
+    RlnFfiError err = rln_ffi_merkle_proofs_plan(
+        reinterpret_cast<const uint8_t*>(configData.constData()),
+        static_cast<size_t>(configData.size()),
+        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        leafIndices.constData(),
+        static_cast<size_t>(leafIndices.size()),
+        &plan);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "get_merkle_proofs: plan FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    // 4. Fetch main account
+    const QString mainHex = bytesToHex(plan.main_account_id, 32);
+    QByteArray mainData;
+    if (!fetchAccountData(walletClient, mainHex, mainData)) {
+        qWarning() << "get_merkle_proofs: failed to fetch main account" << mainHex;
+        return {};
+    }
+
+    // 5. Fetch subtree accounts
+    QVector<QByteArray> subtreeDataBufs(static_cast<int>(plan.subtree_count));
+    QVector<RlnFfiSubtreeEntry> subtreeEntries(static_cast<int>(plan.subtree_count));
+    for (uint32_t i = 0; i < plan.subtree_count; ++i) {
+        const QString subtreeHex = bytesToHex(plan.subtree_account_ids[i], 32);
+        fetchAccountData(walletClient, subtreeHex, subtreeDataBufs[i]);
+        // Empty data is OK — subtree may not exist yet
+
+        subtreeEntries[i].subtree_id = plan.subtree_ids[i];
+        subtreeEntries[i].data_ptr = subtreeDataBufs[i].isEmpty()
+            ? nullptr
+            : reinterpret_cast<const uint8_t*>(subtreeDataBufs[i].constData());
+        subtreeEntries[i].data_len = static_cast<size_t>(subtreeDataBufs[i].size());
+    }
+
+    // 6. Phase 2: build all proofs in Rust, get JSON back
+    uint8_t* jsonPtr = nullptr;
+    size_t jsonLen = 0;
+    err = rln_ffi_merkle_proofs_exec(
+        reinterpret_cast<const uint8_t*>(mainData.constData()),
+        static_cast<size_t>(mainData.size()),
+        subtreeEntries.isEmpty() ? nullptr : subtreeEntries.constData(),
+        static_cast<size_t>(subtreeEntries.size()),
+        leafIndices.constData(),
+        static_cast<size_t>(leafIndices.size()),
+        &jsonPtr, &jsonLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "get_merkle_proofs: exec FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    const QString result = QString::fromUtf8(reinterpret_cast<const char*>(jsonPtr),
+                                              static_cast<int>(jsonLen));
+    rln_ffi_free_string(jsonPtr, jsonLen);
+    return result;
 }
