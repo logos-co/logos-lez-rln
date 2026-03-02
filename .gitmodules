@@ -1,3 +1,6 @@
 [submodule "lssa"]
 	path = lssa
 	url = git@github.com:logos-blockchain/lssa.git
+[submodule "logos-delivery-module"]
+	path = logos-delivery-module
+	url = git@github.com:logos-co/logos-delivery-module.git
