@@ -4,3 +4,7 @@
 [submodule "logos-delivery-module"]
 	path = logos-delivery-module
 	url = git@github.com:logos-co/logos-delivery-module.git
+[submodule "logos-delivery"]
+	path = logos-delivery
+	url = git@github.com:logos-messaging/logos-delivery.git
+	branch = poc/lez-rln-module

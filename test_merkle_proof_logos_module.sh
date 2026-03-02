@@ -25,6 +25,7 @@ echo "=== E2E Test: Merkle Proofs & Delivery Event Subscription ==="
 echo "[1/8] Starting sequencer..."
 
 git submodule update --init lssa
+git submodule update --init --recursive logos-delivery
 
 if nc -z 127.0.0.1 3040 2>/dev/null; then
     OLD_PID=$(lsof -ti tcp:3040 2>/dev/null || true)
@@ -81,7 +82,7 @@ if [ "${SKIP_BUILD:-0}" = "1" ] && [ -e logos-delivery-module/result ]; then
     echo "  Skipping delivery build (SKIP_BUILD=1, result exists)"
 else
     echo "  Building delivery module..."
-    (cd logos-delivery-module && nix build)
+    (cd logos-delivery-module && nix build --override-input logos-delivery path:../logos-delivery)
     echo "  Delivery module built."
 fi
 
