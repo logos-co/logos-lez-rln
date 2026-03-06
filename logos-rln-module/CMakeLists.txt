@@ -46,7 +46,7 @@ else()
 endif()
 
 # ---- Qt ----
-find_package(Qt6 REQUIRED COMPONENTS Core RemoteObjects)
+find_package(Qt6 REQUIRED COMPONENTS Core RemoteObjects Network)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
@@ -164,6 +164,7 @@ target_include_directories(${PLUGIN_TARGET} PRIVATE
 target_link_libraries(${PLUGIN_TARGET} PRIVATE
         Qt6::Core
         Qt6::RemoteObjects
+        Qt6::Network
         lez_rln_ffi
         logos_cpp_sdk
         logos_core

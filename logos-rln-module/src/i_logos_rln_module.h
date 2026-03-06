@@ -17,6 +17,13 @@ public:
     /// Returns JSON array of merkle proofs for the given leaf indices.
     virtual QString get_merkle_proofs(const QString& config_account_id,
                                       const QString& leaf_indices_json) = 0;
+
+    /// Start periodic broadcasting of a merkle proof as "merkle_proof" events.
+    virtual void start_merkle_proof_broadcast(const QString& config_account_id,
+                                               int leaf_index) = 0;
+
+    /// Start an HTTP JSON-RPC server for rln_getRoots and rln_getMerkleProof.
+    virtual void start_http_service(int port, const QString& config_account) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

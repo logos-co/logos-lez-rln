@@ -29,7 +29,7 @@ async fn main() {
 
     let user_holding_id = create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await;
 
-    let (_, id_commitment_bytes, leaf_bytes) =
+    let (_, id_commitment_bytes, leaf_bytes, id_secret_hash_hex) =
         create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
 
     let leaf_index = register_identity(
@@ -60,13 +60,14 @@ async fn main() {
     // Print parseable output for the test script
     println!("CONFIG_ACCOUNT={}", config_account_id);
     println!("LEAF_INDEX={}", leaf_index);
+    println!("IDENTITY_SECRET_HASH={}", id_secret_hash_hex);
 }
 
 /// Create a new RLN identity and compute the rate commitment (leaf value).
 async fn create_identity(
     wallet_core: &mut wallet::WalletCore,
     user_message_limit: u64,
-) -> (IdSecret, [u8; 32], [u8; 32]) {
+) -> (IdSecret, [u8; 32], [u8; 32], String) {
     let (account_id, _chain_index) = wallet_core.create_new_account_public(None);
     wallet_core
         .store_persistent_data()
@@ -83,6 +84,12 @@ async fn create_identity(
     let (mut identity_secret_fr, id_commitment) =
         seeded_keygen(seed).expect("seeded_keygen should succeed");
 
+    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
+    let id_secret_hash_hex: String = id_secret_hash_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
     let identity_secret = IdSecret::from(&mut identity_secret_fr);
     let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment).try_into().unwrap();
 
@@ -91,5 +98,5 @@ async fn create_identity(
         .expect("Failed to compute rate commitment");
     let leaf_bytes: [u8; 32] = fr_to_bytes_le(&rate_commitment).try_into().unwrap();
 
-    (identity_secret, id_commitment_bytes, leaf_bytes)
+    (identity_secret, id_commitment_bytes, leaf_bytes, id_secret_hash_hex)
 }
