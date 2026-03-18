@@ -110,84 +110,103 @@ static QString resolveAccountId(LogosAPIClient* walletClient, const QString& id)
     return hexResult.toString();
 }
 
+static bool fetchAccountData(LogosAPIClient* walletClient,
+                              const QString& accountIdHex,
+                              QByteArray& outData,
+                              QByteArray* outProgramOwner = nullptr);
+
 QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
+    qDebug() << "get_valid_roots: called with" << rln_account_id_hex;
     if (!logosAPI) {
-        qWarning() << "get_valid_roots: logosAPI not initialized";
+        qDebug() << "get_valid_roots: FAIL logosAPI not initialized";
         return {};
     }
 
-    // 1. Call wallet module's get_account_public via inter-module RPC
     auto* walletClient = logosAPI->getClient(WALLET_MODULE);
     if (!walletClient) {
-        qWarning() << "get_valid_roots: wallet module not available";
+        qDebug() << "get_valid_roots: FAIL wallet module not available";
         return {};
     }
 
-    const QString accountIdHex = resolveAccountId(walletClient, rln_account_id_hex);
-    if (accountIdHex.isEmpty()) {
-        qWarning() << "get_valid_roots: failed to resolve account ID";
+    const QString configHex = resolveAccountId(walletClient, rln_account_id_hex);
+    qDebug() << "get_valid_roots: configHex=" << configHex;
+    if (configHex.isEmpty()) {
+        qDebug() << "get_valid_roots: FAIL resolve account ID";
         return {};
     }
 
-    const QVariant result = walletClient->invokeRemoteMethod(
-        WALLET_MODULE, "get_account_public", QVariant(accountIdHex));
-    const QString accountJson = result.toString();
-
-    if (accountJson.isEmpty()) {
-        qWarning() << "get_valid_roots: empty response from wallet module";
+    // 1. Fetch config account to get program_owner and tree_id
+    QByteArray configData;
+    QByteArray programOwnerBytes;
+    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)) {
+        qDebug() << "get_valid_roots: FAIL fetch config account";
+        return {};
+    }
+    qDebug() << "get_valid_roots: configData.size=" << configData.size()
+             << "programOwner.size=" << programOwnerBytes.size();
+    if (programOwnerBytes.size() != 32) {
+        qDebug() << "get_valid_roots: FAIL program_owner size" << programOwnerBytes.size();
         return {};
     }
 
-    // 2. Parse JSON response and extract "data" hex string
-    const QJsonDocument doc = QJsonDocument::fromJson(accountJson.toUtf8());
-    if (!doc.isObject()) {
-        qWarning() << "get_valid_roots: invalid JSON from wallet module";
+    // 2. Parse config to get tree_id, then derive tree main account
+    uint8_t merkleProgramId[32] = {};
+    uint8_t treeId[24] = {};
+    RlnFfiError err = rln_ffi_parse_config(
+        reinterpret_cast<const uint8_t*>(configData.constData()),
+        static_cast<size_t>(configData.size()),
+        merkleProgramId, treeId);
+    qDebug() << "get_valid_roots: parse_config result=" << static_cast<int>(err);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qDebug() << "get_valid_roots: FAIL parse_config FFI error" << static_cast<int>(err);
         return {};
     }
 
-    const QString dataHex = doc.object().value("data").toString();
-    if (dataHex.isEmpty()) {
-        qWarning() << "get_valid_roots: no data field in account";
+    uint8_t mainAccountId[32] = {};
+    err = rln_ffi_derive_main_account_id(
+        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        treeId, mainAccountId);
+    qDebug() << "get_valid_roots: derive_main result=" << static_cast<int>(err);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qDebug() << "get_valid_roots: FAIL derive_main FFI error" << static_cast<int>(err);
         return {};
     }
 
-    // 3. Hex-decode to raw bytes
-    QByteArray rawData;
-    if (!hexToBytes(dataHex, rawData)) {
-        qWarning() << "get_valid_roots: failed to decode data hex";
+    // 3. Fetch tree main account data
+    const QString mainHex = bytesToHex(mainAccountId, 32);
+    qDebug() << "get_valid_roots: mainAccountHex=" << mainHex;
+    QByteArray mainData;
+    if (!fetchAccountData(walletClient, mainHex, mainData)) {
+        qDebug() << "get_valid_roots: FAIL fetch tree main account" << mainHex;
         return {};
     }
+    qDebug() << "get_valid_roots: mainData.size=" << mainData.size();
 
-    // 4. Call FFI to parse roots from tree main layout
-    // Buffer for up to 5 roots (1 current + 4 history), each 32 bytes = 160 bytes
+    // 4. Extract roots from tree main data
     uint8_t rootsBuf[160] = {};
     uint32_t count = 0;
-
-    const RlnFfiError err = rln_ffi_get_valid_roots(
-        reinterpret_cast<const uint8_t*>(rawData.constData()),
-        static_cast<size_t>(rawData.size()),
-        rootsBuf,
-        &count);
-
+    err = rln_ffi_get_valid_roots(
+        reinterpret_cast<const uint8_t*>(mainData.constData()),
+        static_cast<size_t>(mainData.size()),
+        rootsBuf, &count);
+    qDebug() << "get_valid_roots: ffi_get_valid_roots result=" << static_cast<int>(err) << "count=" << count;
     if (err != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "get_valid_roots: FFI error" << static_cast<int>(err);
+        qDebug() << "get_valid_roots: FAIL FFI error" << static_cast<int>(err);
         return {};
     }
 
-    // 5. Convert each 32-byte root to hex and build JSON array
+    // 5. Build JSON array of hex root strings
     QJsonArray array;
     for (uint32_t i = 0; i < count; ++i) {
         array.append(bytesToHex(rootsBuf + i * 32, 32));
     }
-
-    // 6. Return compact JSON string
     return QJsonDocument(array).toJson(QJsonDocument::Compact);
 }
 
 static bool fetchAccountData(LogosAPIClient* walletClient,
                               const QString& accountIdHex,
                               QByteArray& outData,
-                              QByteArray* outProgramOwner = nullptr) {
+                              QByteArray* outProgramOwner /* = nullptr */) {
     const QVariant result = walletClient->invokeRemoteMethod(
         WALLET_MODULE, "get_account_public", QVariant(accountIdHex));
     const QString json = result.toString();

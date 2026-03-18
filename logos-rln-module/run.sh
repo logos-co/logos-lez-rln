@@ -29,9 +29,9 @@ WALLET_STORAGE="${WALLET_STORAGE:-$WALLET_HOME/storage.json}"
 fail() { echo "Error: $1"; echo "$2"; exit 1; }
 
 [ -f "$RLN_MODULE" ] || fail "RLN module not found at $RLN_MODULE" \
-  "Run: nix build .#lib --override-input logos-lez-rln path:../ -o result-rln"
+  "Run from repo root: nix build .#logos-rln-module -o logos-rln-module/result-rln"
 [ -f "$WALLET_MODULE" ] || fail "Wallet module not found at $WALLET_MODULE" \
-  "Run: nix build .#wallet-module --override-input logos-lez-rln path:../ -o result-wallet"
+  "Run from repo root: bash build_modules.sh"
 [ -f "$WALLET_CONFIG" ] || fail "Wallet config not found at $WALLET_CONFIG" \
   "Run: source dev/env.sh && cargo run --bin run_setup"
 [ -f "$WALLET_STORAGE" ] || fail "Wallet storage not found at $WALLET_STORAGE" \
