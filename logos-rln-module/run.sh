@@ -14,10 +14,9 @@ esac
 
 # --- Paths (all overridable via env vars) ---
 LOGOSCORE="$(nix build github:logos-co/logos-liblogos --no-link --print-out-paths)/bin/logoscore"
-CAPABILITY_MODULE_PATH="$(nix build github:logos-co/logos-capability-module --no-link --print-out-paths)/lib"
 
-RLN_MODULE="$SCRIPT_DIR/result/lib/liblogos_rln_module.$EXT"
-WALLET_MODULE_RESULT="${WALLET_MODULE_RESULT:-$HOME/Waku/Logos/logos-execution-zone-module/result}"
+RLN_MODULE="$SCRIPT_DIR/result-rln/lib/liblogos_rln_module.$EXT"
+WALLET_MODULE_RESULT="${WALLET_MODULE_RESULT:-$SCRIPT_DIR/result-wallet}"
 WALLET_MODULE="$WALLET_MODULE_RESULT/lib/liblogos_execution_zone_wallet_module.$EXT"
 
 # Wallet config & storage: use NSSA_WALLET_HOME_DIR if set (same as dev/env.sh),
@@ -30,9 +29,9 @@ WALLET_STORAGE="${WALLET_STORAGE:-$WALLET_HOME/storage.json}"
 fail() { echo "Error: $1"; echo "$2"; exit 1; }
 
 [ -f "$RLN_MODULE" ] || fail "RLN module not found at $RLN_MODULE" \
-  "Run: nix build --override-input logos-lez-rln path:../"
+  "Run: nix build .#lib --override-input logos-lez-rln path:../ -o result-rln"
 [ -f "$WALLET_MODULE" ] || fail "Wallet module not found at $WALLET_MODULE" \
-  "Set WALLET_MODULE_RESULT to the wallet module result dir"
+  "Run: nix build .#wallet-module --override-input logos-lez-rln path:../ -o result-wallet"
 [ -f "$WALLET_CONFIG" ] || fail "Wallet config not found at $WALLET_CONFIG" \
   "Run: source dev/env.sh && cargo run --bin run_setup"
 [ -f "$WALLET_STORAGE" ] || fail "Wallet storage not found at $WALLET_STORAGE" \
@@ -42,20 +41,8 @@ fail() { echo "Error: $1"; echo "$2"; exit 1; }
 MODULES_DIR=$(mktemp -d)
 trap 'rm -rf "$MODULES_DIR"' EXIT
 
-# Capability module (needed for inter-module auth tokens)
-CAP_DIR="$MODULES_DIR/capability_module"
-mkdir -p "$CAP_DIR"
-cp -L "$CAPABILITY_MODULE_PATH/capability_module_plugin.$EXT" "$CAP_DIR/"
-cat > "$CAP_DIR/manifest.json" <<EOF
-{
-  "name": "capability_module",
-  "version": "1.0.0",
-  "type": "core",
-  "main": { "$PLATFORM": "capability_module_plugin.$EXT" },
-  "dependencies": [],
-  "capabilities": []
-}
-EOF
+# NOTE: capability_module is NOT staged — logoscore bundles it from the nix store.
+# Staging a duplicate causes token exchange failures.
 
 # Wallet module
 WALLET_DIR="$MODULES_DIR/liblogos_execution_zone_wallet_module"
@@ -98,7 +85,11 @@ echo "Wallet storage: $WALLET_STORAGE"
 echo ""
 
 # --- Run ---
-LOAD_FLAGS="-l capability_module,liblogos_execution_zone_wallet_module,liblogos_rln_module"
+# Use /tmp for Qt Remote Objects Unix domain sockets to avoid macOS 104-char path limit
+# (default TMPDIR at /var/folders/.../ is too long for liblogos_execution_zone_wallet_module)
+export TMPDIR=/tmp
+
+LOAD_FLAGS="-l liblogos_execution_zone_wallet_module,liblogos_rln_module"
 INIT_WALLET="-c liblogos_execution_zone_wallet_module.open($WALLET_CONFIG,$WALLET_STORAGE)"
 
 if [ $# -gt 0 ]; then

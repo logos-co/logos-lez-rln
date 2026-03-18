@@ -15,9 +15,8 @@ use wallet::program_facades::token::Token;
 
 use crate::merkle_tree::SUBTREE_LEAVES;
 use crate::rln::{
-    CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
-    derive_config_account, derive_subtree_account, derive_tree_main_account,
-    layouts::Instruction,
+    CONFIG_OFFSET_TREASURY_ACCOUNT_ID, derive_config_account, derive_subtree_account,
+    derive_tree_main_account, layouts::Instruction,
 };
 
 // Setup constants
@@ -25,12 +24,12 @@ pub const PRICE_PER_UNIT: u128 = 10_000;
 pub const TOKEN_SUPPLY: u128 = 1_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
-pub const REGISTRATION_BINARY: &str =
-    "target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
+pub const REGISTRATION_BINARY: &str = "target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
 pub const MERKLE_TREE_BINARY: &str =
     "target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
-pub const TREE_ID: [u8; 24] =
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+pub const TREE_ID: [u8; 24] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+];
 pub const DATA_DIR: &str = ".logos-lez-rln";
 
 /// Initialize a WalletCore, creating storage if it doesn't exist.
@@ -55,8 +54,8 @@ pub fn init_wallet() -> WalletCore {
 
 /// Load registration and merkle programs from default binary paths.
 pub fn load_programs() -> (Program, Program) {
-    let registration_bytecode = std::fs::read(REGISTRATION_BINARY)
-        .expect("Failed to read registration program binary");
+    let registration_bytecode =
+        std::fs::read(REGISTRATION_BINARY).expect("Failed to read registration program binary");
     let registration_program =
         Program::new(registration_bytecode).expect("Failed to parse registration program");
 
@@ -69,7 +68,11 @@ pub fn load_programs() -> (Program, Program) {
 }
 
 /// Check if the registration program is already initialized on-chain.
-pub async fn is_initialized(wallet_core: &WalletCore, registration_program: &Program, tree_id: &[u8; 24]) -> bool {
+pub async fn is_initialized(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 24],
+) -> bool {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
     wallet_core
         .get_account_public(config_id)
@@ -114,8 +117,7 @@ pub fn save_supply_holding(tree_id: &[u8; 24], supply_holding_id: &AccountId) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&path, supply_holding_id.to_string())
-        .expect("Failed to save supply holding ID");
+    std::fs::write(&path, supply_holding_id.to_string()).expect("Failed to save supply holding ID");
 }
 
 /// Load a previously saved supply holding account ID.
@@ -140,8 +142,7 @@ pub fn save_payment_account(tree_id: &[u8; 24], account_id: &AccountId) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&path, account_id.to_string())
-        .expect("Failed to save payment account ID");
+    std::fs::write(&path, account_id.to_string()).expect("Failed to save payment account ID");
 }
 
 /// Load a previously saved payment account ID.
@@ -205,7 +206,11 @@ pub async fn ensure_program_deployed(
     let deploy_msg = program_deployment_transaction::Message::new(bytecode);
     let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
 
-    match wallet_core.sequencer_client.send_tx_program(deploy_tx).await {
+    match wallet_core
+        .sequencer_client
+        .send_tx_program(deploy_tx)
+        .await
+    {
         Ok(_) => {
             println!(
                 "  {} deployed (program ID: {:?})",
@@ -240,7 +245,11 @@ pub async fn deploy_builtin_program(
     let deploy_msg = program_deployment_transaction::Message::new(program.elf().to_vec());
     let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
 
-    match wallet_core.sequencer_client.send_tx_program(deploy_tx).await {
+    match wallet_core
+        .sequencer_client
+        .send_tx_program(deploy_tx)
+        .await
+    {
         Ok(_) => println!(
             "  {} deployed (program ID: {:?})",
             program_name,
@@ -456,8 +465,7 @@ pub async fn register_identity(
     let next_index = u64::from_le_bytes(tree_data[1..9].try_into().unwrap());
 
     let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
-    let subtree_account =
-        derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
+    let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
 
     let accounts = vec![
         config_account,

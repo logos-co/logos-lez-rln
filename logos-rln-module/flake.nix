@@ -5,7 +5,12 @@
     nixpkgs.follows = "logos-core/nixpkgs";
 
     logos-lez-rln.url = "github:logos-blockchain/logos-lez-rln";
-    logos-core.url = "github:logos-co/logos-cpp-sdk";
+    logos-core.url = "github:logos-co/logos-cpp-sdk/a4bd66c";
+
+    logos-wallet-module = {
+      url = "github:logos-blockchain/logos-execution-zone-module";
+      inputs.logos-core.follows = "logos-core";
+    };
 
     logos-module-viewer.url = "github:logos-co/logos-module-viewer";
   };
@@ -16,6 +21,7 @@
       nixpkgs,
       logos-core,
       logos-lez-rln,
+      logos-wallet-module,
       logos-module-viewer,
       ...
     }:
@@ -42,6 +48,7 @@
 
           logosCore = logos-core.packages.${system}.default;
           lezRlnFfiPackage = logos-lez-rln.packages.${system}.lez-rln-ffi;
+          walletModulePackage = logos-wallet-module.packages.${system}.default;
 
           logosRlnModulePackage = pkgs.stdenv.mkDerivation {
             pname = "logos-rln-module";
@@ -81,6 +88,7 @@
         in
         {
           lib = logosRlnModulePackage;
+          wallet-module = walletModulePackage;
           default = logosRlnModulePackage;
         }
       );

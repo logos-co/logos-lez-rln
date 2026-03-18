@@ -99,9 +99,8 @@ esac
 
 LOGOSCORE_PATH="$(nix build github:logos-co/logos-liblogos --no-link --print-out-paths)"
 LOGOSCORE="$LOGOSCORE_PATH/bin/logoscore"
-CAPABILITY_MODULE_PATH="$(nix build github:logos-co/logos-capability-module --no-link --print-out-paths)/lib"
 
-WALLET_MODULE_RESULT="${WALLET_MODULE_RESULT:-$HOME/Waku/Logos/logos-execution-zone-module/result}"
+WALLET_MODULE_RESULT="${WALLET_MODULE_RESULT:-logos-rln-module/result-wallet}"
 WALLET_MODULE="$WALLET_MODULE_RESULT/lib/liblogos_execution_zone_wallet_module.$EXT"
 
 [ -f "$WALLET_MODULE" ] || { echo "Wallet module not found at $WALLET_MODULE"; exit 1; }
@@ -116,15 +115,9 @@ stage_modules() {
     local mdir
     mdir=$(mktemp -d)
 
-    local RLN_MODULE="logos-rln-module/result/lib/liblogos_rln_module.$EXT"
+    local RLN_MODULE="logos-rln-module/result-rln/lib/liblogos_rln_module.$EXT"
 
-    # Capability module
-    local cap_dir="$mdir/capability_module"
-    mkdir -p "$cap_dir"
-    cp -L "$CAPABILITY_MODULE_PATH/capability_module_plugin.$EXT" "$cap_dir/"
-    cat > "$cap_dir/manifest.json" <<MEOF
-{"name":"capability_module","version":"1.0.0","type":"core","main":{"$PLATFORM":"capability_module_plugin.$EXT"},"dependencies":[],"capabilities":[]}
-MEOF
+    # NOTE: capability_module is NOT staged — logoscore bundles it from the nix store.
 
     # Wallet module
     local wallet_dir="$mdir/liblogos_execution_zone_wallet_module"
@@ -148,7 +141,7 @@ MEOF
 {"name":"liblogos_rln_module","version":"1.0.0","type":"core","main":{"$PLATFORM":"liblogos_rln_module.$EXT"},"dependencies":["liblogos_execution_zone_wallet_module"],"capabilities":[]}
 MEOF
 
-    local load_order="capability_module,liblogos_execution_zone_wallet_module,liblogos_rln_module"
+    local load_order="liblogos_execution_zone_wallet_module,liblogos_rln_module"
 
     # Delivery module (optional)
     if [ "$with_delivery" -eq 1 ]; then
@@ -192,7 +185,8 @@ run_logoscore() {
 
     local wallet_call="liblogos_execution_zone_wallet_module.open($WALLET_CONFIG,$WALLET_STORAGE)"
 
-    "$LOGOSCORE" -m "$modules_dir" -l "$load_order" -c "$wallet_call" "$@" </dev/null >"$tmpfile" 2>&1 &
+    # Use /tmp for Qt Remote Objects sockets to avoid macOS 104-char path limit
+    TMPDIR=/tmp "$LOGOSCORE" -m "$modules_dir" -l "$load_order" -c "$wallet_call" "$@" </dev/null >"$tmpfile" 2>&1 &
     local pid=$!
 
     local count=0
