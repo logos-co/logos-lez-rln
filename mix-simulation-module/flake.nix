@@ -2,11 +2,12 @@
   description = "Mix Simulation Module - Orchestrates delivery and RLN modules for mix network simulations";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    logos-liblogos.url = "github:logos-co/logos-liblogos/7df6195";
+    nixpkgs.follows = "logos-liblogos/nixpkgs";
     logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk/a4bd66c";
   };
 
-  outputs = { self, nixpkgs, logos-cpp-sdk }:
+  outputs = { self, nixpkgs, logos-cpp-sdk, logos-liblogos }:
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {

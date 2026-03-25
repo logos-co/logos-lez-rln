@@ -1,0 +1,22 @@
+[package]
+name = "mix-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Mix network simulation TUI for logoscore instances"
+
+[[bin]]
+name = "mix-sim"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "process", "signal", "sync"] }
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+color-eyre = "0.6"
+dirs = "5"

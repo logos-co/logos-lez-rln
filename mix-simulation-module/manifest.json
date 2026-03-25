@@ -6,10 +6,10 @@
   "type": "core",
   "category": "simulation",
   "main": {
-    "darwin-arm64": "libmix_simulation_module.dylib",
-    "linux-x86_64": "libmix_simulation_module.so",
-    "linux-amd64": "libmix_simulation_module.so",
-    "linux-aarch64": "libmix_simulation_module.so"
+    "darwin-arm64-dev": "libmix_simulation_module.dylib",
+    "linux-x86_64-dev": "libmix_simulation_module.so",
+    "linux-amd64-dev": "libmix_simulation_module.so",
+    "linux-aarch64-dev": "libmix_simulation_module.so"
   },
   "dependencies": ["delivery_module", "liblogos_rln_module"],
   "capabilities": []

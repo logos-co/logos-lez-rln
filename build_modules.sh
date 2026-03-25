@@ -24,28 +24,28 @@ echo ""
 
 # --- RLN module ---
 if need_build "logos-rln-module/result-rln/lib/liblogos_rln_module.$EXT"; then
-    echo "[1/3] Building RLN module..."
+    echo "[1/4] Building RLN module..."
     nix build .#logos-rln-module -o logos-rln-module/result-rln
     echo "  Done: logos-rln-module/result-rln"
 else
-    echo "[1/3] RLN module: already built"
+    echo "[1/4] RLN module: already built"
 fi
 
 # --- Wallet module ---
 if need_build "logos-rln-module/result-wallet/lib/liblogos_execution_zone_wallet_module.$EXT"; then
-    echo "[2/3] Building wallet module..."
+    echo "[2/4] Building wallet module..."
     git submodule update --init lssa
     LSSA_PATH="$(cd lssa && pwd)"
     nix build .#wallet-module -o logos-rln-module/result-wallet \
         --override-input logos-wallet-module/logos-execution-zone "git+file://$LSSA_PATH"
     echo "  Done: logos-rln-module/result-wallet"
 else
-    echo "[2/3] Wallet module: already built"
+    echo "[2/4] Wallet module: already built"
 fi
 
 # --- Delivery module ---
 if need_build "logos-delivery-module/result/lib/delivery_module_plugin.$EXT"; then
-    echo "[3/3] Building delivery module..."
+    echo "[3/4] Building delivery module..."
     echo "  Initializing delivery submodules (needed by nix)..."
     git submodule update --init --recursive logos-delivery logos-delivery-module
     DELIVERY_PATH="$(cd logos-delivery && pwd)"
@@ -53,7 +53,16 @@ if need_build "logos-delivery-module/result/lib/delivery_module_plugin.$EXT"; th
         --override-input logos-delivery "git+file://$DELIVERY_PATH?submodules=1")
     echo "  Done: logos-delivery-module/result"
 else
-    echo "[3/3] Delivery module: already built"
+    echo "[3/4] Delivery module: already built"
+fi
+
+# --- Mix simulation module ---
+if need_build "mix-simulation-module/result/lib/libmix_simulation_module.$EXT"; then
+    echo "[4/4] Building mix simulation module..."
+    (cd mix-simulation-module && nix build -o result)
+    echo "  Done: mix-simulation-module/result"
+else
+    echo "[4/4] Mix simulation module: already built"
 fi
 
 echo ""
