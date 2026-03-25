@@ -1,0 +1,16 @@
+{
+  "name": "mix_simulation_module",
+  "version": "1.0.0",
+  "description": "Mix Network Simulation Orchestrator Module",
+  "author": "Logos Core Team",
+  "type": "core",
+  "category": "simulation",
+  "main": {
+    "darwin-arm64": "libmix_simulation_module.dylib",
+    "linux-x86_64": "libmix_simulation_module.so",
+    "linux-amd64": "libmix_simulation_module.so",
+    "linux-aarch64": "libmix_simulation_module.so"
+  },
+  "dependencies": ["delivery_module", "liblogos_rln_module"],
+  "capabilities": []
+}
