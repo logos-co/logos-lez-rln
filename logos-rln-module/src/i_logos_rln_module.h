@@ -21,6 +21,21 @@ public:
     /// Start periodic broadcasting of a merkle proof as "merkle_proof" events.
     virtual void start_merkle_proof_broadcast(const QString& config_account_id,
                                                int leaf_index) = 0;
+
+    /// Generate an RLN identity from a wallet account's signing key.
+    /// Returns JSON: {"id_commitment": "hex...", "id_secret_hash": "hex..."} or empty on failure.
+    virtual QString generate_identity(const QString& wallet_account_id) = 0;
+
+    /// Compute the rate commitment (leaf value) for a given id_commitment and rate_limit.
+    /// Returns hex-encoded 32-byte rate commitment, or empty on failure.
+    virtual QString compute_rate_commitment(const QString& id_commitment_hex, quint64 rate_limit) = 0;
+
+    /// Register a membership on the RLN tree.
+    /// Returns JSON: {"leaf_index": N} on success, or empty on failure.
+    virtual QString register_member(const QString& config_account_id,
+                                    const QString& user_holding_account_id,
+                                    const QString& id_commitment_hex,
+                                    quint64 rate_limit) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

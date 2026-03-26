@@ -1,7 +1,7 @@
 use rln_layouts::{
     ConfigLayout, TreeMainLayout, ROOT_HISTORY_SIZE,
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA,
-    TOP_DEPTH, TREE_DEPTH,
+    TOP_DEPTH, TREE_DEPTH, SUBTREE_LEAVES,
 };
 use serde::Serialize;
 use sha2::{Sha256, Digest};
@@ -14,6 +14,9 @@ pub enum Error {
     InvalidConfig = 3,
     InvalidLeafIndex = 4,
     SerializationError = 5,
+    KeygenFailed = 6,
+    HashFailed = 7,
+    TransactionBuildFailed = 8,
 }
 
 /// Maximum tree depth for proof arrays.
@@ -509,6 +512,223 @@ pub unsafe extern "C" fn rln_ffi_free_string(ptr: *mut u8, len: usize) {
             drop(Vec::from_raw_parts(ptr, len, len));
         }
     }
+}
+
+// ============================================================================
+// Registration Support
+// ============================================================================
+
+/// Plan for a registration transaction, containing derived account IDs.
+#[repr(C)]
+pub struct RlnRegisterPlan {
+    pub config_account_id: [u8; 32],
+    pub tree_main_account_id: [u8; 32],
+    pub treasury_account_id: [u8; 32],
+    pub subtree_account_id: [u8; 32],
+    pub subtree_id: u32,
+    pub next_leaf_index: u64,
+}
+
+/// Generate an RLN identity from a 32-byte seed.
+///
+/// Uses zerokit's seeded_keygen to derive identity_secret and id_commitment.
+/// The seed should be derived from a wallet signing key or similar entropy source.
+///
+/// `seed_ptr`: 32-byte input seed
+/// `out_id_commitment`: 32-byte output (the public commitment)
+/// `out_id_secret_hash`: 32-byte output (the secret, needed for RLN proofs)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_generate_identity(
+    seed_ptr: *const u8,
+    out_id_commitment: *mut u8,
+    out_id_secret_hash: *mut u8,
+) -> Error {
+    if seed_ptr.is_null() || out_id_commitment.is_null() || out_id_secret_hash.is_null() {
+        return Error::NullPointer;
+    }
+
+    let seed = unsafe { &*(seed_ptr as *const [u8; 32]) };
+
+    let keygen_result = rln::prelude::seeded_keygen(seed);
+    let (mut identity_secret_fr, id_commitment_fr) = match keygen_result {
+        Ok(result) => result,
+        Err(_) => return Error::KeygenFailed,
+    };
+
+    let id_commitment_bytes = rln::utils::fr_to_bytes_le(&id_commitment_fr);
+    let id_secret_hash_bytes = rln::utils::fr_to_bytes_le(&identity_secret_fr);
+
+    // Zero the secret field element after extracting bytes
+    identity_secret_fr = rln::prelude::Fr::from(0u64);
+    let _ = identity_secret_fr; // silence unused warning
+
+    let out_commit = unsafe { core::slice::from_raw_parts_mut(out_id_commitment, 32) };
+    out_commit.copy_from_slice(&id_commitment_bytes);
+
+    let out_secret = unsafe { core::slice::from_raw_parts_mut(out_id_secret_hash, 32) };
+    out_secret.copy_from_slice(&id_secret_hash_bytes);
+
+    Error::Success
+}
+
+/// Compute rate_commitment = poseidon(id_commitment, rate_limit).
+///
+/// This is the leaf value stored in the merkle tree for rate-limited membership.
+///
+/// `id_commitment_ptr`: 32-byte id_commitment
+/// `rate_limit`: the user's rate limit (message limit)
+/// `out_leaf`: 32-byte output (the rate commitment / leaf value)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_compute_rate_commitment(
+    id_commitment_ptr: *const u8,
+    rate_limit: u64,
+    out_leaf: *mut u8,
+) -> Error {
+    if id_commitment_ptr.is_null() || out_leaf.is_null() {
+        return Error::NullPointer;
+    }
+
+    let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
+
+    let (id_commitment_fr, _) = match rln::utils::bytes_le_to_fr(id_commitment) {
+        Ok(result) => result,
+        Err(_) => return Error::HashFailed,
+    };
+
+    let rate_limit_fr = rln::prelude::Fr::from(rate_limit);
+
+    let rate_commitment_fr = match rln::hashers::poseidon_hash(&[id_commitment_fr, rate_limit_fr]) {
+        Ok(hash) => hash,
+        Err(_) => return Error::HashFailed,
+    };
+
+    let leaf_bytes = rln::utils::fr_to_bytes_le(&rate_commitment_fr);
+
+    let out = unsafe { core::slice::from_raw_parts_mut(out_leaf, 32) };
+    out.copy_from_slice(&leaf_bytes);
+
+    Error::Success
+}
+
+/// Plan a registration transaction by deriving all required account IDs.
+///
+/// Given config account data, tree main account data, and the registration program ID,
+/// computes which accounts are needed for the registration transaction.
+///
+/// `config_data_ptr`/`config_data_len`: raw bytes of config account
+/// `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account
+/// `program_owner_ptr`: 32-byte registration program ID
+/// `tree_id_ptr`: 24-byte tree ID
+/// `out_plan`: pointer to caller-allocated RlnRegisterPlan
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_register_plan(
+    config_data_ptr: *const u8,
+    config_data_len: usize,
+    tree_main_data_ptr: *const u8,
+    tree_main_data_len: usize,
+    program_owner_ptr: *const u8,
+    tree_id_ptr: *const u8,
+    out_plan: *mut RlnRegisterPlan,
+) -> Error {
+    if config_data_ptr.is_null()
+        || tree_main_data_ptr.is_null()
+        || program_owner_ptr.is_null()
+        || tree_id_ptr.is_null()
+        || out_plan.is_null()
+    {
+        return Error::NullPointer;
+    }
+    if config_data_len < ConfigLayout::SIZE {
+        return Error::InvalidConfig;
+    }
+    if tree_main_data_len < TreeMainLayout::SIZE {
+        return Error::DataTooShort;
+    }
+
+    let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
+    let tree_main_data = unsafe { core::slice::from_raw_parts(tree_main_data_ptr, tree_main_data_len) };
+    let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
+    let tree_id = unsafe { &*(tree_id_ptr as *const [u8; 24]) };
+
+    let config = ConfigLayout::parse(config_data);
+    let tree_main = TreeMainLayout::parse(tree_main_data);
+
+    // Derive account IDs
+    let config_seed = rln_layouts::config_seed(tree_id);
+    let config_account_id = derive_pda(program_owner, &config_seed);
+
+    let main_seed = rln_layouts::main_seed(tree_id);
+    let tree_main_account_id = derive_pda(program_owner, &main_seed);
+
+    let next_leaf_index = tree_main.next_index();
+    let subtree_id = (next_leaf_index / SUBTREE_LEAVES as u64) as u32;
+
+    let subtree_seed = rln_layouts::subtree_seed(tree_id, subtree_id);
+    let subtree_account_id = derive_pda(program_owner, &subtree_seed);
+
+    let plan = unsafe { &mut *out_plan };
+    plan.config_account_id = config_account_id;
+    plan.tree_main_account_id = tree_main_account_id;
+    plan.treasury_account_id = config.treasury_account_id;
+    plan.subtree_account_id = subtree_account_id;
+    plan.subtree_id = subtree_id;
+    plan.next_leaf_index = next_leaf_index;
+
+    Error::Success
+}
+
+/// Build the serialized instruction data for a Register transaction.
+///
+/// Returns a borsh-serialized instruction payload that can be used
+/// to construct the transaction message.
+///
+/// `registration_program_id_ptr`: 32-byte registration program ID
+/// `id_commitment_ptr`: 32-byte id_commitment
+/// `rate_limit`: the user's rate limit
+/// `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
+/// Caller must free with `rln_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_register_build_instruction(
+    registration_program_id_ptr: *const u8,
+    id_commitment_ptr: *const u8,
+    rate_limit: u64,
+    out_data_ptr: *mut *mut u8,
+    out_data_len: *mut usize,
+) -> Error {
+    if registration_program_id_ptr.is_null()
+        || id_commitment_ptr.is_null()
+        || out_data_ptr.is_null()
+        || out_data_len.is_null()
+    {
+        return Error::NullPointer;
+    }
+
+    let registration_program_id = unsafe { &*(registration_program_id_ptr as *const [u8; 32]) };
+    let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
+
+    let instruction = rln_layouts::Instruction::Register {
+        registration_program_id: *registration_program_id,
+        id_commitment: *id_commitment,
+        rate_limit,
+    };
+
+    let json = match serde_json::to_string(&instruction) {
+        Ok(s) => s,
+        Err(_) => return Error::SerializationError,
+    };
+
+    let mut bytes = json.into_bytes();
+    bytes.shrink_to_fit();
+    let ptr = bytes.as_mut_ptr();
+    let len = bytes.len();
+    core::mem::forget(bytes);
+
+    unsafe {
+        *out_data_ptr = ptr;
+        *out_data_len = len;
+    }
+
+    Error::Success
 }
 
 #[cfg(test)]

@@ -20,6 +20,9 @@ typedef enum RlnFfiError {
   RLN_FFI_ERROR_INVALID_CONFIG = 3,
   RLN_FFI_ERROR_INVALID_LEAF_INDEX = 4,
   RLN_FFI_ERROR_SERIALIZATION_ERROR = 5,
+  RLN_FFI_ERROR_KEYGEN_FAILED = 6,
+  RLN_FFI_ERROR_HASH_FAILED = 7,
+  RLN_FFI_ERROR_TRANSACTION_BUILD_FAILED = 8,
 } RlnFfiError;
 
 typedef struct RlnFfiRlnMerkleProof {
@@ -43,6 +46,18 @@ typedef struct RlnFfiSubtreeEntry {
   const uint8_t *data_ptr;
   uintptr_t data_len;
 } RlnFfiSubtreeEntry;
+
+/**
+ * Plan for a registration transaction, containing derived account IDs.
+ */
+typedef struct RlnFfiRlnRegisterPlan {
+  uint8_t config_account_id[32];
+  uint8_t tree_main_account_id[32];
+  uint8_t treasury_account_id[32];
+  uint8_t subtree_account_id[32];
+  uint32_t subtree_id;
+  uint64_t next_leaf_index;
+} RlnFfiRlnRegisterPlan;
 
 /**
  * Parse tree-main account data and write valid roots into `out_roots`.
@@ -136,5 +151,70 @@ enum RlnFfiError rln_ffi_merkle_proofs_exec(const uint8_t *main_data_ptr,
  * Free a string previously returned by `rln_ffi_merkle_proofs_exec`.
  */
 void rln_ffi_free_string(uint8_t *ptr, uintptr_t len);
+
+/**
+ * Generate an RLN identity from a 32-byte seed.
+ *
+ * Uses zerokit's seeded_keygen to derive identity_secret and id_commitment.
+ * The seed should be derived from a wallet signing key or similar entropy source.
+ *
+ * `seed_ptr`: 32-byte input seed
+ * `out_id_commitment`: 32-byte output (the public commitment)
+ * `out_id_secret_hash`: 32-byte output (the secret, needed for RLN proofs)
+ */
+enum RlnFfiError rln_ffi_generate_identity(const uint8_t *seed_ptr,
+                                           uint8_t *out_id_commitment,
+                                           uint8_t *out_id_secret_hash);
+
+/**
+ * Compute rate_commitment = poseidon(id_commitment, rate_limit).
+ *
+ * This is the leaf value stored in the merkle tree for rate-limited membership.
+ *
+ * `id_commitment_ptr`: 32-byte id_commitment
+ * `rate_limit`: the user's rate limit (message limit)
+ * `out_leaf`: 32-byte output (the rate commitment / leaf value)
+ */
+enum RlnFfiError rln_ffi_compute_rate_commitment(const uint8_t *id_commitment_ptr,
+                                                 uint64_t rate_limit,
+                                                 uint8_t *out_leaf);
+
+/**
+ * Plan a registration transaction by deriving all required account IDs.
+ *
+ * Given config account data, tree main account data, and the registration program ID,
+ * computes which accounts are needed for the registration transaction.
+ *
+ * `config_data_ptr`/`config_data_len`: raw bytes of config account
+ * `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account
+ * `program_owner_ptr`: 32-byte registration program ID
+ * `tree_id_ptr`: 24-byte tree ID
+ * `out_plan`: pointer to caller-allocated RlnRegisterPlan
+ */
+enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
+                                       uintptr_t config_data_len,
+                                       const uint8_t *tree_main_data_ptr,
+                                       uintptr_t tree_main_data_len,
+                                       const uint8_t *program_owner_ptr,
+                                       const uint8_t *tree_id_ptr,
+                                       struct RlnFfiRlnRegisterPlan *out_plan);
+
+/**
+ * Build the serialized instruction data for a Register transaction.
+ *
+ * Returns a borsh-serialized instruction payload that can be used
+ * to construct the transaction message.
+ *
+ * `registration_program_id_ptr`: 32-byte registration program ID
+ * `id_commitment_ptr`: 32-byte id_commitment
+ * `rate_limit`: the user's rate limit
+ * `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
+ * Caller must free with `rln_ffi_free_string`.
+ */
+enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *registration_program_id_ptr,
+                                                    const uint8_t *id_commitment_ptr,
+                                                    uint64_t rate_limit,
+                                                    uint8_t **out_data_ptr,
+                                                    uintptr_t *out_data_len);
 
 #endif  /* LEZ_RLN_FFI_H */

@@ -242,6 +242,212 @@ static bool fetchAccountData(LogosAPIClient* walletClient,
     return hexToBytes(dataHex, outData);
 }
 
+QString LogosRlnModule::generate_identity(const QString& wallet_account_id) {
+    if (!logosAPI) {
+        qWarning() << "generate_identity: logosAPI not initialized";
+        return {};
+    }
+
+    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
+    if (!walletClient) {
+        qWarning() << "generate_identity: wallet module not available";
+        return {};
+    }
+
+    const QString accountHex = resolveAccountId(walletClient, wallet_account_id);
+    if (accountHex.isEmpty()) {
+        qWarning() << "generate_identity: failed to resolve account ID";
+        return {};
+    }
+
+    const QVariant keyResult = walletClient->invokeRemoteMethod(
+        WALLET_MODULE, "get_pub_account_signing_key", QVariant(accountHex));
+    const QString keyHex = keyResult.toString();
+    if (keyHex.isEmpty()) {
+        qWarning() << "generate_identity: failed to get signing key for" << accountHex;
+        return {};
+    }
+
+    QByteArray seedBytes;
+    if (!hexToBytes(keyHex, seedBytes, 32)) {
+        qWarning() << "generate_identity: invalid signing key format";
+        return {};
+    }
+
+    uint8_t idCommitment[32] = {};
+    uint8_t idSecretHash[32] = {};
+    RlnFfiError err = rln_ffi_generate_identity(
+        reinterpret_cast<const uint8_t*>(seedBytes.constData()),
+        idCommitment, idSecretHash);
+
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "generate_identity: FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    QJsonObject result;
+    result["id_commitment"] = bytesToHex(idCommitment, 32);
+    result["id_secret_hash"] = bytesToHex(idSecretHash, 32);
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
+QString LogosRlnModule::compute_rate_commitment(const QString& id_commitment_hex, quint64 rate_limit) {
+    QByteArray idCommitmentBytes;
+    if (!hexToBytes(id_commitment_hex, idCommitmentBytes, 32)) {
+        qWarning() << "compute_rate_commitment: invalid id_commitment hex";
+        return {};
+    }
+
+    uint8_t leaf[32] = {};
+    RlnFfiError err = rln_ffi_compute_rate_commitment(
+        reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
+        rate_limit, leaf);
+
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "compute_rate_commitment: FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    return bytesToHex(leaf, 32);
+}
+
+QString LogosRlnModule::register_member(const QString& config_account_id,
+                                         const QString& user_holding_account_id,
+                                         const QString& id_commitment_hex,
+                                         quint64 rate_limit) {
+    if (!logosAPI) {
+        qWarning() << "register_member: logosAPI not initialized";
+        return {};
+    }
+
+    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
+    if (!walletClient) {
+        qWarning() << "register_member: wallet module not available";
+        return {};
+    }
+
+    // Resolve account IDs
+    const QString configHex = resolveAccountId(walletClient, config_account_id);
+    const QString userHoldingHex = resolveAccountId(walletClient, user_holding_account_id);
+    if (configHex.isEmpty() || userHoldingHex.isEmpty()) {
+        qWarning() << "register_member: failed to resolve account IDs";
+        return {};
+    }
+
+    QByteArray idCommitmentBytes;
+    if (!hexToBytes(id_commitment_hex, idCommitmentBytes, 32)) {
+        qWarning() << "register_member: invalid id_commitment hex";
+        return {};
+    }
+
+    // Fetch config account
+    QByteArray configData;
+    QByteArray programOwnerBytes;
+    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)) {
+        qWarning() << "register_member: failed to fetch config account";
+        return {};
+    }
+    if (programOwnerBytes.size() != 32) {
+        qWarning() << "register_member: invalid program_owner size";
+        return {};
+    }
+
+    // Parse config to get tree_id
+    uint8_t merkleProgramId[32] = {};
+    uint8_t treeId[24] = {};
+    RlnFfiError err = rln_ffi_parse_config(
+        reinterpret_cast<const uint8_t*>(configData.constData()),
+        static_cast<size_t>(configData.size()),
+        merkleProgramId, treeId);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "register_member: failed to parse config";
+        return {};
+    }
+
+    // Derive tree main account and fetch it
+    uint8_t treeMainAccountId[32] = {};
+    err = rln_ffi_derive_main_account_id(
+        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        treeId, treeMainAccountId);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "register_member: failed to derive tree main account";
+        return {};
+    }
+
+    const QString treeMainHex = bytesToHex(treeMainAccountId, 32);
+    QByteArray treeMainData;
+    if (!fetchAccountData(walletClient, treeMainHex, treeMainData)) {
+        qWarning() << "register_member: failed to fetch tree main account";
+        return {};
+    }
+
+    // Plan the registration
+    RlnFfiRlnRegisterPlan plan = {};
+    err = rln_ffi_register_plan(
+        reinterpret_cast<const uint8_t*>(configData.constData()),
+        static_cast<size_t>(configData.size()),
+        reinterpret_cast<const uint8_t*>(treeMainData.constData()),
+        static_cast<size_t>(treeMainData.size()),
+        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        treeId,
+        &plan);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "register_member: register_plan FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    // Build instruction JSON
+    uint8_t* instrPtr = nullptr;
+    size_t instrLen = 0;
+    err = rln_ffi_register_build_instruction(
+        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
+        rate_limit,
+        &instrPtr, &instrLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "register_member: build_instruction FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    const QString instructionJson = QString::fromUtf8(
+        reinterpret_cast<const char*>(instrPtr), static_cast<int>(instrLen));
+    rln_ffi_free_string(instrPtr, instrLen);
+
+    // Build accounts list for the transaction
+    QJsonArray accountsList;
+    accountsList.append(bytesToHex(plan.config_account_id, 32));
+    accountsList.append(bytesToHex(plan.tree_main_account_id, 32));
+    accountsList.append(userHoldingHex);
+    accountsList.append(bytesToHex(plan.treasury_account_id, 32));
+    accountsList.append(bytesToHex(plan.subtree_account_id, 32));
+
+    // Build transaction request for wallet module
+    QJsonObject txRequest;
+    txRequest["program_id"] = bytesToHex(
+        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()), 32);
+    txRequest["accounts"] = accountsList;
+    txRequest["instruction"] = QJsonDocument::fromJson(instructionJson.toUtf8()).object();
+    txRequest["signer_account"] = userHoldingHex;
+
+    const QString txRequestJson = QJsonDocument(txRequest).toJson(QJsonDocument::Compact);
+
+    // Send the transaction via wallet module
+    const QVariant sendResult = walletClient->invokeRemoteMethod(
+        WALLET_MODULE, "send_public_transaction", QVariant(txRequestJson));
+    const QString sendResultStr = sendResult.toString();
+
+    if (sendResultStr.isEmpty()) {
+        qWarning() << "register_member: transaction failed";
+        return {};
+    }
+
+    // Return result with leaf index
+    QJsonObject result;
+    result["leaf_index"] = static_cast<qint64>(plan.next_leaf_index);
+    result["tx_result"] = sendResultStr;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
 QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
                                            const QString& leaf_indices_json) {
     if (!logosAPI) {
