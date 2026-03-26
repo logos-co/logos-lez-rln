@@ -91,10 +91,12 @@ else
 fi
 
 # Wait for all parallel builds
-if [ ${#PIDS[@]} -gt 0 ]; then
+set +u  # bash 3 compat: array access with -u is unreliable
+if [ "${#PIDS[@]}" -gt 0 ]; then
     echo ""
     echo "Waiting for ${#PIDS[@]} parallel builds..."
-    for i in $(seq 0 $((${#PIDS[@]} - 1))); do
+    i=0
+    while [ "$i" -lt "${#PIDS[@]}" ]; do
         if wait "${PIDS[$i]}"; then
             echo "  ${NAMES[$i]}: done"
         else
@@ -103,8 +105,10 @@ if [ ${#PIDS[@]} -gt 0 ]; then
             FAILED=1
         fi
         rm -f "${LOGS[$i]}"
+        i=$((i + 1))
     done
 fi
+set -u
 
 [ "$FAILED" -eq 1 ] && { echo "FATAL: One or more builds failed"; exit 1; }
 
