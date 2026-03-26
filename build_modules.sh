@@ -29,53 +29,63 @@ PIDS=()
 LOGS=()
 NAMES=()
 FAILED=0
+IDX=0
 
-# --- RLN module (parallel) ---
+start_build() {
+    local name=$1 log
+    log=$(mktemp)
+    NAMES[$IDX]="$name"
+    LOGS[$IDX]="$log"
+    echo "$log"
+}
+
+finish_build() {
+    PIDS[$IDX]=$1
+    IDX=$((IDX + 1))
+}
+
+# --- RLN module ---
 if need_build "logos-rln-module/result-rln/lib/liblogos_rln_module.$EXT"; then
     echo "[1/4] Building RLN module..."
-    LOGS+=("$(mktemp)")
-    NAMES+=("RLN module")
-    (nix build .#logos-rln-module -o logos-rln-module/result-rln > "${LOGS[-1]}" 2>&1) &
-    PIDS+=($!)
+    LOG=$(start_build "RLN module")
+    (nix build .#logos-rln-module -o logos-rln-module/result-rln > "$LOG" 2>&1) &
+    finish_build $!
 else
     echo "[1/4] RLN module: already built"
 fi
 
-# --- Wallet module (parallel) ---
+# --- Wallet module ---
 if need_build "logos-rln-module/result-wallet/lib/liblogos_execution_zone_wallet_module.$EXT"; then
     echo "[2/4] Building wallet module..."
     LSSA_PATH="$(cd lssa && pwd)"
-    LOGS+=("$(mktemp)")
-    NAMES+=("Wallet module")
+    LOG=$(start_build "Wallet module")
     (nix build .#wallet-module -o logos-rln-module/result-wallet \
         --override-input logos-wallet-module/logos-execution-zone "git+file://$LSSA_PATH" \
-        > "${LOGS[-1]}" 2>&1) &
-    PIDS+=($!)
+        > "$LOG" 2>&1) &
+    finish_build $!
 else
     echo "[2/4] Wallet module: already built"
 fi
 
-# --- Delivery module (parallel) ---
+# --- Delivery module ---
 if need_build "logos-delivery-module/result/lib/delivery_module_plugin.$EXT"; then
     echo "[3/4] Building delivery module..."
     DELIVERY_PATH="$(cd logos-delivery && pwd)"
-    LOGS+=("$(mktemp)")
-    NAMES+=("Delivery module")
+    LOG=$(start_build "Delivery module")
     (cd logos-delivery-module && nix build -o result \
         --override-input logos-delivery "git+file://$DELIVERY_PATH?submodules=1" \
-        > "${LOGS[-1]}" 2>&1) &
-    PIDS+=($!)
+        > "$LOG" 2>&1) &
+    finish_build $!
 else
     echo "[3/4] Delivery module: already built"
 fi
 
-# --- Mix simulation module (parallel) ---
+# --- Mix simulation module ---
 if need_build "mix-simulation-module/result/lib/libmix_simulation_module.$EXT"; then
     echo "[4/4] Building mix simulation module..."
-    LOGS+=("$(mktemp)")
-    NAMES+=("Mix simulation module")
-    (cd mix-simulation-module && nix build -o result > "${LOGS[-1]}" 2>&1) &
-    PIDS+=($!)
+    LOG=$(start_build "Mix simulation module")
+    (cd mix-simulation-module && nix build -o result > "$LOG" 2>&1) &
+    finish_build $!
 else
     echo "[4/4] Mix simulation module: already built"
 fi
@@ -84,7 +94,7 @@ fi
 if [ ${#PIDS[@]} -gt 0 ]; then
     echo ""
     echo "Waiting for ${#PIDS[@]} parallel builds..."
-    for i in "${!PIDS[@]}"; do
+    for i in $(seq 0 $((${#PIDS[@]} - 1))); do
         if wait "${PIDS[$i]}"; then
             echo "  ${NAMES[$i]}: done"
         else
