@@ -1,0 +1,17 @@
+{
+  "name": "liblogos_rln_module",
+  "version": "1.0.0",
+  "description": "RLN Merkle Root Provider Module",
+  "author": "Logos Blockchain Team",
+  "type": "core",
+  "category": "blockchain",
+  "main": {
+    "darwin-arm64": "liblogos_rln_module.dylib",
+    "linux-x86_64": "liblogos_rln_module.so",
+    "linux-amd64": "liblogos_rln_module.so",
+    "linux-aarch64": "liblogos_rln_module.so"
+  },
+  "dependencies": ["liblogos_execution_zone_wallet_module"],
+  "capabilities": [],
+  "include": ["liblez_rln_ffi.dylib"]
+}

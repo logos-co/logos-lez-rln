@@ -1,0 +1,12 @@
+[package]
+name = "rln-layouts"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
