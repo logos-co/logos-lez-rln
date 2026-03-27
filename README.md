@@ -62,7 +62,7 @@ The tree is divided at level 10 into a **top tree** and **1024 bottom subtrees**
     ...  ...     ...              each in its own PDA account
 ```
 
-- **Main account** (`tree_id + "__main__"`): Tree metadata (depth, next_index, root, 21 cached default hashes) + top tree nodes in sparse format. Starts at 713 bytes, grows as nodes are added.
+- **Main account** (`tree_id + "__main__"`): Tree metadata (depth, next_index, root, 4 previous roots, 21 cached default hashes) + top tree nodes in sparse format. Starts at 841 bytes, grows as nodes are added.
 - **Subtree accounts** (`tree_id + 0xFF + subtree_id`): Each stores a depth-10 subtree in sparse format.
 
 Each insert or remove touches exactly **2 accounts**: the main account and one bottom subtree.

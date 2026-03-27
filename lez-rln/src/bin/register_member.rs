@@ -1,0 +1,119 @@
+//! Register one or more RLN memberships and print config account IDs and leaf indices.
+//!
+//! ```bash
+//! source dev/env.sh && cargo run --bin register_member          # single
+//! source dev/env.sh && cargo run --bin register_member -- --count 5  # batch
+//! ```
+
+use logos_lez_rln::merkle_tree::wait_for_leaf;
+use logos_lez_rln::rln::client::{
+    TREE_ID, init_wallet, load_programs, create_funded_user, register_identity,
+};
+use logos_lez_rln::rln::derive_config_account;
+use rln::hashers::poseidon_hash;
+use rln::prelude::{seeded_keygen, Fr};
+use rln::utils::{fr_to_bytes_le, IdSecret};
+use std::time::Duration;
+
+const USER_FUNDING: u128 = 100_000_000;
+const USER_MESSAGE_LIMIT: u64 = 100;
+
+#[tokio::main]
+async fn main() {
+    let count = parse_count();
+
+    let mut wallet_core = init_wallet();
+    let tree_id = TREE_ID;
+    let (registration_program, _merkle_program) = load_programs();
+    let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
+
+    for i in 0..count {
+        let user_holding_id = create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await;
+
+        let (_, id_commitment_bytes, leaf_bytes, id_secret_hash_hex) =
+            create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
+
+        let leaf_index = register_identity(
+            &wallet_core,
+            &registration_program,
+            &tree_id,
+            &id_commitment_bytes,
+            &user_holding_id,
+            USER_MESSAGE_LIMIT,
+            None,
+        )
+        .await;
+
+        let finalized = wait_for_leaf(
+            &wallet_core,
+            &registration_program,
+            &tree_id,
+            leaf_index,
+            &leaf_bytes,
+            30,
+            Duration::from_millis(500),
+        )
+        .await;
+        if !finalized {
+            panic!("Timeout waiting for leaf {} to appear on-chain", leaf_index);
+        }
+
+        println!("CONFIG_ACCOUNT={}", config_account_id);
+        println!("LEAF_INDEX={}", leaf_index);
+        println!("IDENTITY_SECRET_HASH={}", id_secret_hash_hex);
+
+        if count > 1 {
+            eprintln!("  Registered member {}/{}: leaf={}", i + 1, count, leaf_index);
+        }
+    }
+}
+
+fn parse_count() -> usize {
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--count" {
+            if let Some(n) = args.get(i + 1) {
+                return n.parse().expect("--count must be a positive integer");
+            }
+        }
+    }
+    1
+}
+
+/// Create a new RLN identity and compute the rate commitment (leaf value).
+async fn create_identity(
+    wallet_core: &mut wallet::WalletCore,
+    user_message_limit: u64,
+) -> (IdSecret, [u8; 32], [u8; 32], String) {
+    let (account_id, _chain_index) = wallet_core.create_new_account_public(None);
+    wallet_core
+        .store_persistent_data()
+        .await
+        .expect("Failed to store wallet");
+
+    let signing_key = wallet_core
+        .storage()
+        .user_data
+        .get_pub_account_signing_key(account_id)
+        .expect("Account should be self-owned public");
+
+    let seed = signing_key.value();
+    let (mut identity_secret_fr, id_commitment) =
+        seeded_keygen(seed).expect("seeded_keygen should succeed");
+
+    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
+    let id_secret_hash_hex: String = id_secret_hash_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    let identity_secret = IdSecret::from(&mut identity_secret_fr);
+    let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment).try_into().unwrap();
+
+    let user_message_limit_fr = Fr::from(user_message_limit);
+    let rate_commitment = poseidon_hash(&[id_commitment, user_message_limit_fr])
+        .expect("Failed to compute rate commitment");
+    let leaf_bytes: [u8; 32] = fr_to_bytes_le(&rate_commitment).try_into().unwrap();
+
+    (identity_secret, id_commitment_bytes, leaf_bytes, id_secret_hash_hex)
+}

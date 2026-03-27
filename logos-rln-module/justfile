@@ -1,0 +1,15 @@
+default: build
+
+configure:
+    cmake -S . -B build -G Ninja \
+      ${LOGOS_CORE_ROOT:+-DLOGOS_CORE_ROOT="$LOGOS_CORE_ROOT"} \
+      ${LEZ_RLN_FFI_LIB:+-DLEZ_RLN_FFI_LIB="$LEZ_RLN_FFI_LIB"} \
+      ${LEZ_RLN_FFI_INCLUDE:+-DLEZ_RLN_FFI_INCLUDE="$LEZ_RLN_FFI_INCLUDE"}
+
+build: configure
+    cmake --build build --parallel --target logos_rln_module
+
+clean:
+    rm -rf build result
+
+rebuild: clean build
