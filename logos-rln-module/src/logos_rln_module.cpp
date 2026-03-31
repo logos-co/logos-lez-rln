@@ -242,37 +242,9 @@ static bool fetchAccountData(LogosAPIClient* walletClient,
     return hexToBytes(dataHex, outData);
 }
 
-QString LogosRlnModule::generate_identity(const QString& wallet_account_id) {
-    if (!logosAPI) {
-        qWarning() << "generate_identity: logosAPI not initialized";
-        return {};
-    }
-
-    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
-    if (!walletClient) {
-        qWarning() << "generate_identity: wallet module not available";
-        return {};
-    }
-
-    const QString accountHex = resolveAccountId(walletClient, wallet_account_id);
-    if (accountHex.isEmpty()) {
-        qWarning() << "generate_identity: failed to resolve account ID";
-        return {};
-    }
-
-    const QVariant keyResult = walletClient->invokeRemoteMethod(
-        WALLET_MODULE, "get_pub_account_signing_key", QVariant(accountHex));
-    const QString keyHex = keyResult.toString();
-    if (keyHex.isEmpty()) {
-        qWarning() << "generate_identity: failed to get signing key for" << accountHex;
-        return {};
-    }
-
+QString LogosRlnModule::generate_identity(const QString& seed_or_account_id) {
     QByteArray seedBytes;
-    if (!hexToBytes(keyHex, seedBytes, 32)) {
-        qWarning() << "generate_identity: invalid signing key format";
-        return {};
-    }
+    hexToBytes(seed_or_account_id, seedBytes, 32);
 
     uint8_t idCommitment[32] = {};
     uint8_t idSecretHash[32] = {};

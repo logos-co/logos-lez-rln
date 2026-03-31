@@ -11,7 +11,7 @@ use logos_lez_rln::rln::client::{
     TREE_ID, init_wallet, load_programs, is_initialized,
     run_setup, create_funded_user, save_payment_account,
 };
-use logos_lez_rln::rln::derive_tree_main_account;
+use logos_lez_rln::rln::{derive_config_account, derive_tree_main_account};
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -39,8 +39,10 @@ async fn main() {
     };
 
     let tree_main_id = derive_tree_main_account(&registration_program.id(), &tree_id);
+    let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 
     save_payment_account(&tree_id, &user_holding_id);
     println!("Payment account saved: {}", user_holding_id);
     println!("Tree main account:    {}", tree_main_id);
+    println!("Config account:       {}", config_account_id);
 }
