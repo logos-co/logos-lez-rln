@@ -712,12 +712,17 @@ pub unsafe extern "C" fn rln_ffi_register_build_instruction(
         rate_limit,
     };
 
-    let json = match serde_json::to_string(&instruction) {
-        Ok(s) => s,
+    // Serialize using risc0 serde (same format the on-chain program expects)
+    let u32_vec = match risc0_zkvm::serde::to_vec(&instruction) {
+        Ok(v) => v,
         Err(_) => return Error::SerializationError,
     };
 
-    let mut bytes = json.into_bytes();
+    // Convert Vec<u32> to Vec<u8> (LE bytes)
+    let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
+    for word in &u32_vec {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
     bytes.shrink_to_fit();
     let ptr = bytes.as_mut_ptr();
     let len = bytes.len();

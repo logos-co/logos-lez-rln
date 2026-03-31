@@ -2628,6 +2628,7 @@ name = "lez-rln-ffi"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
+ "risc0-zkvm",
  "rln",
  "rln-layouts",
  "serde",

@@ -381,8 +381,7 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
         return {};
     }
 
-    const QString instructionJson = QString::fromUtf8(
-        reinterpret_cast<const char*>(instrPtr), static_cast<int>(instrLen));
+    const QString instructionHex = bytesToHex(instrPtr, instrLen);
     rln_ffi_free_string(instrPtr, instrLen);
 
     // Build accounts list for the transaction
@@ -398,7 +397,7 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     txRequest["program_id"] = bytesToHex(
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()), 32);
     txRequest["accounts"] = accountsList;
-    txRequest["instruction"] = QJsonDocument::fromJson(instructionJson.toUtf8()).object();
+    txRequest["instruction"] = instructionHex;
     txRequest["signer_account"] = userHoldingHex;
 
     const QString txRequestJson = QJsonDocument(txRequest).toJson(QJsonDocument::Compact);

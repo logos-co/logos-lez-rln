@@ -8,3 +8,6 @@
 	path = logos-delivery
 	url = git@github.com:logos-messaging/logos-delivery.git
 	branch = feat/rln-spam-protection
+[submodule "logos-execution-zone-module"]
+	path = logos-execution-zone-module
+	url = git@github.com:logos-blockchain/logos-execution-zone-module.git
