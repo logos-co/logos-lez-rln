@@ -34,11 +34,11 @@ public:
                                                     int leaf_index) override;
     Q_INVOKABLE QString generate_identity(const QString& wallet_account_id) override;
     Q_INVOKABLE QString compute_rate_commitment(const QString& id_commitment_hex,
-                                                 quint64 rate_limit) override;
+                                                 int rate_limit) override;
     Q_INVOKABLE QString register_member(const QString& config_account_id,
                                          const QString& user_holding_account_id,
                                          const QString& id_commitment_hex,
-                                         quint64 rate_limit) override;
+                                         int rate_limit) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& data);

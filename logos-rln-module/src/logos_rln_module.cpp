@@ -263,7 +263,7 @@ QString LogosRlnModule::generate_identity(const QString& seed_or_account_id) {
     return QJsonDocument(result).toJson(QJsonDocument::Compact);
 }
 
-QString LogosRlnModule::compute_rate_commitment(const QString& id_commitment_hex, quint64 rate_limit) {
+QString LogosRlnModule::compute_rate_commitment(const QString& id_commitment_hex, int rate_limit) {
     QByteArray idCommitmentBytes;
     if (!hexToBytes(id_commitment_hex, idCommitmentBytes, 32)) {
         qWarning() << "compute_rate_commitment: invalid id_commitment hex";
@@ -286,7 +286,7 @@ QString LogosRlnModule::compute_rate_commitment(const QString& id_commitment_hex
 QString LogosRlnModule::register_member(const QString& config_account_id,
                                          const QString& user_holding_account_id,
                                          const QString& id_commitment_hex,
-                                         quint64 rate_limit) {
+                                         int rate_limit) {
     if (!logosAPI) {
         qWarning() << "register_member: logosAPI not initialized";
         return {};
