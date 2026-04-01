@@ -2,14 +2,12 @@
 //!
 //! Used by both `run_rln_proof` and `bulk_register` binaries.
 
-use common::transaction::NSSATransaction;
 use nssa::{
     AccountId, ProgramDeploymentTransaction, PublicTransaction,
     program::Program,
     program_deployment_transaction,
     public_transaction::{Message, WitnessSet},
 };
-use sequencer_service_rpc::RpcClient as _;
 use std::path::PathBuf;
 use std::time::Duration;
 use wallet::WalletCore;
@@ -210,7 +208,7 @@ pub async fn ensure_program_deployed(
 
     match wallet_core
         .sequencer_client
-        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
+        .send_tx_program(deploy_tx)
         .await
     {
         Ok(_) => {
@@ -249,7 +247,7 @@ pub async fn deploy_builtin_program(
 
     match wallet_core
         .sequencer_client
-        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
+        .send_tx_program(deploy_tx)
         .await
     {
         Ok(_) => println!(
@@ -359,7 +357,7 @@ pub async fn run_setup(
     let tx = PublicTransaction::new(message, witness_set);
     wallet_core
         .sequencer_client
-        .send_transaction(NSSATransaction::Public(tx))
+        .send_tx_public(tx)
         .await
         .expect("Failed to initialize registration");
     wait_for_account_data(wallet_core, &config_id, 30).await;
@@ -441,7 +439,7 @@ pub async fn register_identity(
     id_commitment: &[u8; 32],
     user_holding_id: &AccountId,
     rate_limit: u64,
-    nonce_override: Option<nssa_core::account::Nonce>,
+    nonce_override: Option<u128>,
 ) -> u64 {
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
@@ -505,7 +503,7 @@ pub async fn register_identity(
 
     wallet_core
         .sequencer_client
-        .send_transaction(NSSATransaction::Public(tx))
+        .send_tx_public(tx)
         .await
         .expect("Failed to register identity");
 
