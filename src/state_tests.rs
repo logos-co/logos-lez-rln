@@ -29,7 +29,7 @@ mod tests {
     use nssa::program_deployment_transaction::{Message as DeployMessage, ProgramDeploymentTransaction};
     use nssa::public_transaction::{Message, WitnessSet};
     use nssa::{PrivateKey, PublicKey};
-    use nssa::{PublicTransaction, V02State};
+    use nssa::{PublicTransaction, V03State};
     use nssa_core::account::AccountId;
     use std::fs;
 
@@ -46,7 +46,7 @@ mod tests {
         Commitment, NullifierPublicKey, NullifierSecretKey,
     };
     use nssa_core::account::{Account, AccountWithMetadata, Data};
-    use nssa_core::encryption::IncomingViewingPublicKey;
+    use nssa_core::encryption::ViewingPublicKey;
     use std::collections::HashMap;
 
     // Import shared constants and PDA functions from rln module
@@ -148,14 +148,14 @@ mod tests {
 
     /// Creates a fresh state with both programs deployed.
     /// Returns (state, merkle_program, registration_program).
-    fn state_with_programs() -> Option<(V02State, Program, Program)> {
+    fn state_with_programs() -> Option<(V03State, Program, Program)> {
         let merkle_bytecode = fs::read(merkle_tree_binary_path()).ok()?;
         let registration_bytecode = fs::read(rln_registration_binary_path()).ok()?;
 
         let merkle_program = Program::new(merkle_bytecode.clone()).ok()?;
         let registration_program = Program::new(registration_bytecode.clone()).ok()?;
 
-        let mut state = V02State::new_with_genesis_accounts(&[], &[]);
+        let mut state = V03State::new_with_genesis_accounts(&[], &[]);
 
         // Deploy merkle tree program
         let merkle_deploy_tx = ProgramDeploymentTransaction::new(
@@ -286,7 +286,7 @@ mod tests {
 
         // Try to initialize merkle tree directly (not through registration program)
         let init_tx = build_merkle_init_tx(&merkle, &TREE_ID);
-        let result = state.transition_from_public_transaction(&init_tx);
+        let result = state.transition_from_public_transaction(&init_tx, 0, 0);
         assert!(result.is_err(), "Direct merkle tree init should fail due to authorization");
     }
 
@@ -298,7 +298,7 @@ mod tests {
         // Try to insert into merkle tree directly (not through registration program)
         let leaf_value = [0x42u8; 32];
         let insert_tx = build_merkle_insert_tx(&merkle, &TREE_ID, 0, leaf_value);
-        let result = state.transition_from_public_transaction(&insert_tx);
+        let result = state.transition_from_public_transaction(&insert_tx, 0, 0);
 
         assert!(result.is_err(), "Direct merkle tree insert should fail due to authorization");
     }
@@ -356,8 +356,8 @@ mod tests {
             NullifierPublicKey::from(&self.nsk)
         }
 
-        fn ivk(&self) -> IncomingViewingPublicKey {
-            IncomingViewingPublicKey::from_scalar(self.isk)
+        fn ivk(&self) -> ViewingPublicKey {
+            ViewingPublicKey::from_scalar(self.isk)
         }
 
         fn account_id(&self) -> AccountId {
@@ -392,7 +392,7 @@ mod tests {
         Account {
             program_owner: Program::token().id(),
             balance: 0,
-            nonce: 0,
+            nonce: 0.into(),
             data: Data::try_from(create_token_holding_data(definition_id, balance)).unwrap(),
         }
     }
@@ -407,10 +407,10 @@ mod tests {
         recipient_keys: &PrivateAccountKeys,
         amount: u128,
         recipient_nonce: u128,
-        state: &V02State,
+        state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account) {
         let sender = AccountWithMetadata::new(
-            state.get_account_by_id(sender_id),
+            state.get_account_by_id(sender_id.clone()),
             true,
             *sender_id,
         );
@@ -429,7 +429,6 @@ mod tests {
             vec![sender, recipient],
             token_instruction_data(0x01, amount),
             vec![0, 2], // sender=public, recipient=new_private
-            vec![recipient_nonce],
             vec![(recipient_keys.npk(), shared_secret)],
             vec![],
             vec![None],
@@ -449,13 +448,13 @@ mod tests {
         let tx = PrivacyPreservingTransaction::new(message, witness_set);
 
         // Compute the recipient's post-state (what the token program produces)
-        let sender_account = state.get_account_by_id(sender_id);
+        let sender_account = state.get_account_by_id(sender_id.clone());
         let definition_id_bytes: [u8; 32] = sender_account.data[1..33].try_into().unwrap();
         let definition_id = AccountId::new(definition_id_bytes);
         let recipient_post = Account {
             program_owner: Program::token().id(),
             balance: 0,
-            nonce: recipient_nonce,
+            nonce: recipient_nonce.into(),
             data: Data::try_from(create_token_holding_data(&definition_id, amount)).unwrap(),
         };
 
@@ -473,7 +472,7 @@ mod tests {
         amount: u128,
         sender_new_nonce: u128,
         recipient_nonce: u128,
-        state: &V02State,
+        state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account, Account) {
         let sender_commitment = Commitment::new(&sender_keys.npk(), sender_account);
         let sender = AccountWithMetadata::new(
@@ -494,7 +493,6 @@ mod tests {
             vec![sender, recipient],
             token_instruction_data(0x01, amount),
             vec![1, 2], // sender=private_auth, recipient=new_private
-            vec![sender_new_nonce, recipient_nonce],
             vec![
                 (sender_keys.npk(), shared_secret_sender),
                 (recipient_keys.npk(), shared_secret_recipient),
@@ -530,7 +528,7 @@ mod tests {
         let sender_post = Account {
             program_owner: sender_account.program_owner,
             balance: 0,
-            nonce: sender_new_nonce,
+            nonce: sender_new_nonce.into(),
             data: Data::try_from(
                 create_token_holding_data(&definition_id, sender_balance - amount)
             ).unwrap(),
@@ -538,7 +536,7 @@ mod tests {
         let recipient_post = Account {
             program_owner: Program::token().id(),
             balance: 0,
-            nonce: recipient_nonce,
+            nonce: recipient_nonce.into(),
             data: Data::try_from(
                 create_token_holding_data(&definition_id, amount)
             ).unwrap(),
@@ -557,14 +555,14 @@ mod tests {
         recipient_id: &AccountId,
         amount: u128,
         sender_new_nonce: u128,
-        state: &V02State,
+        state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account) {
         let sender_commitment = Commitment::new(&sender_keys.npk(), sender_account);
         let sender = AccountWithMetadata::new(
             sender_account.clone(), true, &sender_keys.npk(),
         );
         let recipient = AccountWithMetadata::new(
-            state.get_account_by_id(recipient_id), false, *recipient_id,
+            state.get_account_by_id(recipient_id.clone()), false, *recipient_id,
         );
 
         let esk = [6; 32];
@@ -575,7 +573,6 @@ mod tests {
             vec![sender, recipient],
             token_instruction_data(0x01, amount),
             vec![1, 0], // sender=private_auth, recipient=public
-            vec![sender_new_nonce],
             vec![(sender_keys.npk(), shared_secret)],
             vec![sender_keys.nsk],
             vec![state.get_proof_for_commitment(&sender_commitment)],
@@ -601,7 +598,7 @@ mod tests {
         let sender_post = Account {
             program_owner: sender_account.program_owner,
             balance: 0,
-            nonce: sender_new_nonce,
+            nonce: sender_new_nonce.into(),
             data: Data::try_from(
                 create_token_holding_data(&definition_id, sender_balance - amount)
             ).unwrap(),
@@ -627,23 +624,23 @@ mod tests {
         price_per_unit: u128,
         payment_new_nonce: u128,
         credit_nonce: u128,
-        state: &V02State,
+        state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account, Account) {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let credit_token_id = derive_credit_token_pda(setup.registration.id(), tree_id);
 
         // Build pre_states: [config, credit_def, user_payment, treasury, user_credit]
         let config = AccountWithMetadata::new(
-            state.get_account_by_id(&config_id), false, config_id,
+            state.get_account_by_id(config_id.clone()), false, config_id,
         );
         let credit_def = AccountWithMetadata::new(
-            state.get_account_by_id(&credit_token_id), false, credit_token_id,
+            state.get_account_by_id(credit_token_id.clone()), false, credit_token_id,
         );
         let user_payment = AccountWithMetadata::new(
             payment_account.clone(), true, &payment_keys.npk(),
         );
         let treasury = AccountWithMetadata::new(
-            state.get_account_by_id(&setup.treasury_id), false, setup.treasury_id,
+            state.get_account_by_id(setup.treasury_id.clone()), false, setup.treasury_id,
         );
         let user_credit = AccountWithMetadata::new(
             Account::default(), false, &credit_keys.npk(),
@@ -676,7 +673,6 @@ mod tests {
             vec![config, credit_def, user_payment, treasury, user_credit],
             instruction_data,
             vec![0, 0, 1, 0, 2],
-            vec![payment_new_nonce, credit_nonce],
             vec![
                 (payment_keys.npk(), shared_secret_payment),
                 (credit_keys.npk(), shared_secret_credit),
@@ -715,7 +711,7 @@ mod tests {
         let payment_post = Account {
             program_owner: payment_account.program_owner,
             balance: 0,
-            nonce: payment_new_nonce,
+            nonce: payment_new_nonce.into(),
             data: Data::try_from(
                 create_token_holding_data(&payment_def_id, payment_balance - payment_cost)
             ).unwrap(),
@@ -725,7 +721,7 @@ mod tests {
         let credit_post = Account {
             program_owner: Program::token().id(),
             balance: 0,
-            nonce: credit_nonce,
+            nonce: credit_nonce.into(),
             data: Data::try_from(
                 create_token_holding_data(&credit_token_id, amount)
             ).unwrap(),
@@ -757,7 +753,7 @@ mod tests {
         let message = Message::try_new(
             Program::token().id(),
             vec![definition_id.clone(), supply_holder_id.clone()],
-            vec![0], // nonce for supply_holder
+            vec![0u128.into()], // nonce for supply_holder
             instruction,
         ).expect("valid message");
 
@@ -785,7 +781,7 @@ mod tests {
         let message = Message::try_new(
             Program::token().id(),
             vec![from_id.clone(), to_id.clone()],
-            vec![from_nonce],
+            vec![from_nonce.into()],
             instruction,
         ).expect("valid message");
 
@@ -863,7 +859,7 @@ mod tests {
     /// Test setup with programs deployed, tokens created, and registration initialized.
     #[allow(dead_code)]
     struct TestSetup {
-        state: V02State,
+        state: V03State,
         merkle: Program,
         registration: Program,
         // Token accounts
@@ -896,7 +892,7 @@ mod tests {
             total_supply,
             b"PAYTKN",
         );
-        state.transition_from_public_transaction(&create_tx).ok()?;
+        state.transition_from_public_transaction(&create_tx, 0, 0).ok()?;
 
         // 3. Transfer tokens to user
         let user_amount: u128 = 10_000_000;
@@ -907,7 +903,7 @@ mod tests {
             1,
             user_amount,
         );
-        state.transition_from_public_transaction(&transfer_tx).ok()?;
+        state.transition_from_public_transaction(&transfer_tx, 0, 0).ok()?;
 
         // 4. Initialize registration with custom config
         let init_tx = build_registration_init_tx_with_config(
@@ -919,7 +915,7 @@ mod tests {
             &treasury_id,
             max_total_rate_limit,
         );
-        state.transition_from_public_transaction(&init_tx).ok()?;
+        state.transition_from_public_transaction(&init_tx, 0, 0).ok()?;
 
         Some(TestSetup {
             state,
@@ -949,17 +945,17 @@ mod tests {
 
     /// Gets total_registrations from config account.
     #[allow(dead_code)]
-    fn get_total_registrations(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
+    fn get_total_registrations(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
         let config_id = derive_config_pda(registration.id(), tree_id);
-        let config = state.get_account_by_id(&config_id);
+        let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(config.data.as_ref()[168..176].try_into().unwrap())
     }
 
     /// Gets current_total_rate_limit from config account.
     #[allow(dead_code)]
-    fn get_current_total_rate_limit(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
+    fn get_current_total_rate_limit(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
         let config_id = derive_config_pda(registration.id(), tree_id);
-        let config = state.get_account_by_id(&config_id);
+        let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(
             config.data.as_ref()[CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT..CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT + 8]
                 .try_into().unwrap()
@@ -968,24 +964,24 @@ mod tests {
 
     /// Gets next_index from tree main account.
     #[allow(dead_code)]
-    fn get_tree_next_index(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
+    fn get_tree_next_index(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-        let tree = state.get_account_by_id(&tree_main_id);
+        let tree = state.get_account_by_id(tree_main_id);
         u64::from_le_bytes(tree.data.as_ref()[1..9].try_into().unwrap())
     }
 
     /// Gets merkle root from tree main account.
     #[allow(dead_code)]
-    fn get_tree_root(state: &V02State, registration: &Program, tree_id: &[u8; 24]) -> [u8; 32] {
+    fn get_tree_root(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> [u8; 32] {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-        let tree = state.get_account_by_id(&tree_main_id);
+        let tree = state.get_account_by_id(tree_main_id);
         tree.data.as_ref()[9..41].try_into().unwrap()
     }
 
     /// Gets token balance from a holding account.
     #[allow(dead_code)]
-    fn get_token_balance(state: &V02State, account_id: &AccountId) -> u128 {
-        let account = state.get_account_by_id(account_id);
+    fn get_token_balance(state: &V03State, account_id: &AccountId) -> u128 {
+        let account = state.get_account_by_id(account_id.clone());
         let data = account.data.as_ref();
         if data.len() < 49 { return 0; }
         u128::from_le_bytes(data[33..49].try_into().unwrap())
@@ -993,8 +989,8 @@ mod tests {
 
     /// Gets token total supply from a definition account.
     #[allow(dead_code)]
-    fn get_token_supply(state: &V02State, definition_id: &AccountId) -> u128 {
-        let account = state.get_account_by_id(definition_id);
+    fn get_token_supply(state: &V03State, definition_id: &AccountId) -> u128 {
+        let account = state.get_account_by_id(definition_id.clone());
         let data = account.data.as_ref();
         if data.len() < 23 { return 0; }
         u128::from_le_bytes(data[7..23].try_into().unwrap())
@@ -1002,9 +998,9 @@ mod tests {
 
     /// Checks if a membership PDA exists (has non-empty data).
     #[allow(dead_code)]
-    fn membership_exists(state: &V02State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> bool {
+    fn membership_exists(state: &V03State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> bool {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
-        let membership = state.get_account_by_id(&membership_id);
+        let membership = state.get_account_by_id(membership_id);
         !membership.data.as_ref().is_empty()
     }
 
@@ -1019,9 +1015,9 @@ mod tests {
 
     /// Gets membership data from PDA. Returns None if membership doesn't exist.
     #[allow(dead_code)]
-    fn get_membership_data(state: &V02State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> Option<MembershipData> {
+    fn get_membership_data(state: &V03State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> Option<MembershipData> {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
-        let membership = state.get_account_by_id(&membership_id);
+        let membership = state.get_account_by_id(membership_id);
         let data = membership.data.as_ref();
         if data.is_empty() || data.len() < MEMBERSHIP_SIZE { return None; }
         Some(MembershipData {
@@ -1103,7 +1099,7 @@ mod tests {
         let message = Message::try_new(
             setup.registration.id(),
             account_ids,
-            vec![user_nonce], // nonce for user_payment account (index 2)
+            vec![user_nonce.into()], // nonce for user_payment account (index 2)
             instruction,
         ).expect("valid message");
 
@@ -1147,7 +1143,7 @@ mod tests {
                 setup.treasury_id.clone(),
                 user_credit_id.clone(),
             ],
-            vec![user_payment_nonce], // nonce for user_payment (index 2)
+            vec![user_payment_nonce.into()], // nonce for user_payment (index 2)
             instruction,
         ).expect("valid message");
 
@@ -1201,7 +1197,7 @@ mod tests {
         let message = Message::try_new(
             setup.registration.id(),
             account_ids,
-            vec![user_credit_nonce], // nonce for user_credit (index 3)
+            vec![user_credit_nonce.into()], // nonce for user_credit (index 3)
             instruction,
         ).expect("valid message");
 
@@ -1276,7 +1272,7 @@ mod tests {
             &treasury_id,
         );
 
-        let result = state.transition_from_public_transaction(&init_tx);
+        let result = state.transition_from_public_transaction(&init_tx, 0, 0);
 
         assert!(
             result.is_ok(),
@@ -1301,12 +1297,12 @@ mod tests {
             &treasury_id,
         );
 
-        state.transition_from_public_transaction(&init_tx)
+        state.transition_from_public_transaction(&init_tx, 0, 0)
             .expect("Init should succeed");
 
         // Verify config account was created
         let config_id = derive_config_pda(registration.id(), &TREE_ID);
-        let config_account = state.get_account_by_id(&config_id);
+        let config_account = state.get_account_by_id(config_id);
 
         // Config should exist and have data
         assert!(
@@ -1378,12 +1374,12 @@ mod tests {
             &treasury_id,
         );
 
-        state.transition_from_public_transaction(&init_tx)
+        state.transition_from_public_transaction(&init_tx, 0, 0)
             .expect("Init should succeed");
 
         // Verify tree main account was created via chained call
         let tree_main_id = derive_tree_main_pda(registration.id(), &TREE_ID);
-        let tree_main = state.get_account_by_id(&tree_main_id);
+        let tree_main = state.get_account_by_id(tree_main_id);
 
         assert!(
             !tree_main.data.as_ref().is_empty(),
@@ -1428,12 +1424,12 @@ mod tests {
             &treasury_id,
         );
 
-        state.transition_from_public_transaction(&init_tx)
+        state.transition_from_public_transaction(&init_tx, 0, 0)
             .expect("Init should succeed");
 
         // Verify credit token definition was created
         let credit_token_id = derive_credit_token_pda(registration.id(), &TREE_ID);
-        let credit_token = state.get_account_by_id(&credit_token_id);
+        let credit_token = state.get_account_by_id(credit_token_id);
 
         assert!(
             !credit_token.data.as_ref().is_empty(),
@@ -1474,11 +1470,11 @@ mod tests {
         );
 
         // First init should succeed
-        state.transition_from_public_transaction(&init_tx.clone())
+        state.transition_from_public_transaction(&init_tx.clone(), 0, 0)
             .expect("First init should succeed");
 
         // Second init should fail because credit token definition is no longer default
-        let result = state.transition_from_public_transaction(&init_tx);
+        let result = state.transition_from_public_transaction(&init_tx, 0, 0);
         assert!(
             result.is_err(),
             "Re-initialization should fail (credit token already exists)"
@@ -1505,15 +1501,15 @@ mod tests {
             b"TESTOK",
         );
 
-        let result = state.transition_from_public_transaction(&create_tx);
+        let result = state.transition_from_public_transaction(&create_tx, 0, 0);
         assert!(result.is_ok(), "Token create should succeed: {:?}", result);
 
         // Verify definition was created
-        let def_account = state.get_account_by_id(&definition_id);
+        let def_account = state.get_account_by_id(definition_id);
         assert!(!def_account.data.as_ref().is_empty(), "Definition should have data");
 
         // Verify supply holder was created with balance
-        let holder_account = state.get_account_by_id(&supply_holder_id);
+        let holder_account = state.get_account_by_id(supply_holder_id);
         let balance = u128::from_le_bytes(
             holder_account.data.as_ref()[33..49].try_into().unwrap()
         );
@@ -1534,7 +1530,7 @@ mod tests {
             &definition_id, &from_id, &from_key,
             1_000_000, b"TESTOK",
         );
-        state.transition_from_public_transaction(&create_tx)
+        state.transition_from_public_transaction(&create_tx, 0, 0)
             .expect("Create should succeed");
 
         // Transfer
@@ -1543,17 +1539,17 @@ mod tests {
             1, // nonce after create
             100_000,
         );
-        let result = state.transition_from_public_transaction(&transfer_tx);
+        let result = state.transition_from_public_transaction(&transfer_tx, 0, 0);
         assert!(result.is_ok(), "Transfer should succeed: {:?}", result);
 
         // Verify balances
-        let from_account = state.get_account_by_id(&from_id);
+        let from_account = state.get_account_by_id(from_id);
         let from_balance = u128::from_le_bytes(
             from_account.data.as_ref()[33..49].try_into().unwrap()
         );
         assert_eq!(from_balance, 900_000, "From should have 900k");
 
-        let to_account = state.get_account_by_id(&to_id);
+        let to_account = state.get_account_by_id(to_id);
         let to_balance = u128::from_le_bytes(
             to_account.data.as_ref()[33..49].try_into().unwrap()
         );
@@ -1581,7 +1577,7 @@ mod tests {
             0, // next_index
         );
 
-        let result = setup.state.transition_from_public_transaction(&register_tx);
+        let result = setup.state.transition_from_public_transaction(&register_tx, 0, 0);
         assert!(
             result.is_ok(),
             "Register should succeed: {:?}",
@@ -1601,7 +1597,7 @@ mod tests {
         );
 
         let register_tx = build_register_tx(&setup, &TREE_ID, [0x42u8; 32], 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -1623,7 +1619,7 @@ mod tests {
         );
 
         let register_tx = build_register_tx(&setup, &TREE_ID, [0x42u8; 32], 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -1653,7 +1649,7 @@ mod tests {
             0,   // user's payment nonce
         );
 
-        let result = setup.state.transition_from_public_transaction(&buy_tx);
+        let result = setup.state.transition_from_public_transaction(&buy_tx, 0, 0);
         assert!(
             result.is_ok(),
             "Buy credits should succeed: {:?}",
@@ -1669,7 +1665,7 @@ mod tests {
         let (_user_credit_key, user_credit_id) = create_test_keypair(10);
 
         let buy_tx = build_buy_credits_tx(&setup, &TREE_ID, &user_credit_id, 300, 0);
-        setup.state.transition_from_public_transaction(&buy_tx)
+        setup.state.transition_from_public_transaction(&buy_tx, 0, 0)
             .expect("Buy should succeed");
 
         assert_eq!(
@@ -1697,7 +1693,7 @@ mod tests {
         // Buy 300 credits at PRICE_PER_UNIT = 10,000 per unit
         // Total cost = 300 * 10,000 = 3,000,000
         let buy_tx = build_buy_credits_tx(&setup, &TREE_ID, &user_credit_id, 300, 0);
-        setup.state.transition_from_public_transaction(&buy_tx)
+        setup.state.transition_from_public_transaction(&buy_tx, 0, 0)
             .expect("Buy should succeed");
 
         let balance_after = get_token_balance(&setup.state, &setup.user_payment_id);
@@ -1720,7 +1716,7 @@ mod tests {
         let buy_tx = build_buy_credits_tx(
             &setup, &TREE_ID, &user_credit_id, 300, 0,
         );
-        setup.state.transition_from_public_transaction(&buy_tx)
+        setup.state.transition_from_public_transaction(&buy_tx, 0, 0)
             .expect("Buy should succeed");
 
         // Now register with credits
@@ -1736,7 +1732,7 @@ mod tests {
             0,   // next_index
         );
 
-        let result = setup.state.transition_from_public_transaction(&register_tx);
+        let result = setup.state.transition_from_public_transaction(&register_tx, 0, 0);
         assert!(
             result.is_ok(),
             "Register with credits should succeed: {:?}",
@@ -1751,14 +1747,14 @@ mod tests {
 
         let (user_credit_key, user_credit_id) = create_test_keypair(10);
         let buy_tx = build_buy_credits_tx(&setup, &TREE_ID, &user_credit_id, 500, 0);
-        setup.state.transition_from_public_transaction(&buy_tx)
+        setup.state.transition_from_public_transaction(&buy_tx, 0, 0)
             .expect("Buy should succeed");
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
             [0x42u8; 32], 300, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -1782,14 +1778,14 @@ mod tests {
 
         let (user_credit_key, user_credit_id) = create_test_keypair(10);
         let buy_tx = build_buy_credits_tx(&setup, &TREE_ID, &user_credit_id, 300, 0);
-        setup.state.transition_from_public_transaction(&buy_tx)
+        setup.state.transition_from_public_transaction(&buy_tx, 0, 0)
             .expect("Buy should succeed");
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
             [0x42u8; 32], 300, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -1817,7 +1813,7 @@ mod tests {
         let rate_limit = 300u64;
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, rate_limit, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         let membership = get_membership_data(&setup.state, &setup.registration, &TREE_ID, &id_commitment)
@@ -1836,13 +1832,13 @@ mod tests {
         let id_commitment = [0x42u8; 32];
 
         let register_tx1 = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx1)
+        setup.state.transition_from_public_transaction(&register_tx1, 0, 0)
             .expect("First register should succeed");
 
         assert!(membership_exists(&setup.state, &setup.registration, &TREE_ID, &id_commitment));
 
         let register_tx2 = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 1, 1);
-        let result = setup.state.transition_from_public_transaction(&register_tx2);
+        let result = setup.state.transition_from_public_transaction(&register_tx2, 0, 0);
         assert!(result.is_err(), "Second registration with same id_commitment should fail");
     }
 
@@ -1859,19 +1855,19 @@ mod tests {
         let buy_tx = build_buy_credits_tx(
             &setup, &TREE_ID, &user_credit_id, rate_limit as u128, 0,
         );
-        setup.state.transition_from_public_transaction(&buy_tx)
+        setup.state.transition_from_public_transaction(&buy_tx, 0, 0)
             .expect("Buy should succeed");
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
             id_commitment, rate_limit, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         // Verify membership PDA was created
         let membership_id = derive_membership_pda(setup.registration.id(), &TREE_ID, &id_commitment);
-        let membership = setup.state.get_account_by_id(&membership_id);
+        let membership = setup.state.get_account_by_id(membership_id);
 
         assert!(
             !membership.data.as_ref().is_empty(),
@@ -1897,13 +1893,13 @@ mod tests {
         let (identity_secret, id_commitment) = create_slashable_identity(0x42);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert!(membership_exists(&setup.state, &setup.registration, &TREE_ID, &id_commitment));
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        let result = setup.state.transition_from_public_transaction(&slash_tx);
+        let result = setup.state.transition_from_public_transaction(&slash_tx, 0, 0);
         assert!(result.is_ok(), "Slash should succeed: {:?}", result);
     }
 
@@ -1915,11 +1911,11 @@ mod tests {
         let (identity_secret, id_commitment) = create_slashable_identity(0x42);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("Slash should succeed");
 
         assert!(
@@ -1936,7 +1932,7 @@ mod tests {
         let (identity_secret, id_commitment) = create_slashable_identity(0x42);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -1946,7 +1942,7 @@ mod tests {
         );
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("Slash should succeed");
 
         assert_eq!(
@@ -1965,14 +1961,14 @@ mod tests {
         let root_before_register = get_tree_root(&setup.state, &setup.registration, &TREE_ID);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         let root_after_register = get_tree_root(&setup.state, &setup.registration, &TREE_ID);
         assert_ne!(root_after_register, root_before_register, "Root should change after register");
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("Slash should succeed");
 
         let root_after_slash = get_tree_root(&setup.state, &setup.registration, &TREE_ID);
@@ -1987,7 +1983,7 @@ mod tests {
         let (identity_secret, id_commitment) = create_slashable_identity(0x42);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -1997,7 +1993,7 @@ mod tests {
         );
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("Slash should succeed");
 
         assert_eq!(
@@ -2015,14 +2011,14 @@ mod tests {
         let (_, id_commitment) = create_slashable_identity(0x42);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         // Try to slash with a DIFFERENT identity_secret
         let (wrong_secret, _) = create_slashable_identity(0x99);
         let slash_tx = build_slash_tx(&setup, &TREE_ID, wrong_secret, id_commitment, 0);
 
-        let result = setup.state.transition_from_public_transaction(&slash_tx);
+        let result = setup.state.transition_from_public_transaction(&slash_tx, 0, 0);
         assert!(result.is_err(), "Slash with wrong identity_secret should fail");
     }
 
@@ -2034,17 +2030,17 @@ mod tests {
         let (identity_secret, id_commitment) = create_slashable_identity(0x42);
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("First slash should succeed");
 
         assert!(!membership_exists(&setup.state, &setup.registration, &TREE_ID, &id_commitment));
 
         let slash_tx2 = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        let result = setup.state.transition_from_public_transaction(&slash_tx2);
+        let result = setup.state.transition_from_public_transaction(&slash_tx2, 0, 0);
         assert!(result.is_err(), "Double slash should fail");
     }
 
@@ -2062,13 +2058,13 @@ mod tests {
         // First registration with rate_limit=300 should succeed
         let id_commitment1 = [0x01u8; 32];
         let register_tx1 = build_register_tx(&setup, &TREE_ID, id_commitment1, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx1)
+        setup.state.transition_from_public_transaction(&register_tx1, 0, 0)
             .expect("First registration should succeed");
 
         // Second registration with rate_limit=300 should fail (would exceed 500 cap)
         let id_commitment2 = [0x02u8; 32];
         let register_tx2 = build_register_tx(&setup, &TREE_ID, id_commitment2, 300, 1, 1);
-        let result = setup.state.transition_from_public_transaction(&register_tx2);
+        let result = setup.state.transition_from_public_transaction(&register_tx2, 0, 0);
         assert!(result.is_err(), "Second registration should fail (exceeds max_total_rate_limit)");
     }
 
@@ -2085,7 +2081,7 @@ mod tests {
 
         let (identity_secret, id_commitment) = create_slashable_identity(0x42);
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, 0, 0);
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         assert_eq!(
@@ -2095,7 +2091,7 @@ mod tests {
         );
 
         let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("Slash should succeed");
 
         assert_eq!(
@@ -2114,7 +2110,7 @@ mod tests {
     // 2. RLN proofs can be generated using zerokit
     // 3. Proofs verify correctly against the on-chain root
     //
-    // The flow mirrors run_rln_proof.rs but operates directly on V02State
+    // The flow mirrors run_rln_proof.rs but operates directly on V03State
     // instead of fetching from a live network.
 
     use crate::merkle_tree::{
@@ -2140,7 +2136,7 @@ mod tests {
     /// For levels > TOP_DEPTH, nodes are in bottom subtree accounts (sparse format).
     /// Returns the cached default if the node doesn't exist.
     fn fetch_node_from_state(
-        state: &V02State,
+        state: &V03State,
         registration: &Program,
         tree_id: &[u8; 24],
         level: u8,
@@ -2152,7 +2148,7 @@ mod tests {
         if level <= TOP_DEPTH {
             // Node is in top tree (sparse format in main account after OFFSET_TOP_TREE_DATA)
             let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-            let main_account = state.get_account_by_id(&tree_main_id);
+            let main_account = state.get_account_by_id(tree_main_id);
             let data = main_account.data.as_ref();
 
             let top_tree_data = if data.len() > OFFSET_TOP_TREE_DATA {
@@ -2169,22 +2165,22 @@ mod tests {
             let local_index = node_index as usize % nodes_per_subtree_at_level;
 
             let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
-            let subtree_account = state.get_account_by_id(&subtree_account_id);
+            let subtree_account = state.get_account_by_id(subtree_account_id);
             let data = subtree_account.data.as_ref();
 
             read_sparse_node(data, bottom_level, local_index, &cached_defaults[level])
         }
     }
 
-    /// Extracts merkle proof from V02State for a given leaf index.
+    /// Extracts merkle proof from V03State for a given leaf index.
     fn get_merkle_proof_from_state(
-        state: &V02State,
+        state: &V03State,
         registration: &Program,
         tree_id: &[u8; 24],
         leaf_index: u64,
     ) -> (Vec<[u8; 32]>, Vec<u8>, [u8; 32], [u8; 32]) {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
-        let tree_main = state.get_account_by_id(&tree_main_id);
+        let tree_main = state.get_account_by_id(tree_main_id);
         let main_data = tree_main.data.as_ref();
 
         let depth = main_data[OFFSET_DEPTH] as usize;
@@ -2265,7 +2261,7 @@ mod tests {
         let register_tx = build_register_tx(
             &setup, &TREE_ID, id_commitment, rate_limit, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         // Extract merkle proof
@@ -2304,7 +2300,7 @@ mod tests {
         let register_tx = build_register_tx(
             &setup, &TREE_ID, id_commitment, rate_limit, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         // Extract merkle proof from state
@@ -2384,7 +2380,7 @@ mod tests {
         let register_tx1 = build_register_tx(
             &setup, &TREE_ID, id_commitment1, 100, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx1)
+        setup.state.transition_from_public_transaction(&register_tx1, 0, 0)
             .expect("First register should succeed");
 
         // Register second identity (this is the one we'll prove)
@@ -2398,7 +2394,7 @@ mod tests {
         let register_tx2 = build_register_tx(
             &setup, &TREE_ID, id_commitment2, rate_limit2, 1, 1,
         );
-        setup.state.transition_from_public_transaction(&register_tx2)
+        setup.state.transition_from_public_transaction(&register_tx2, 0, 0)
             .expect("Second register should succeed");
 
         // Register third identity
@@ -2411,7 +2407,7 @@ mod tests {
         let register_tx3 = build_register_tx(
             &setup, &TREE_ID, id_commitment3, 100, 2, 2,
         );
-        setup.state.transition_from_public_transaction(&register_tx3)
+        setup.state.transition_from_public_transaction(&register_tx3, 0, 0)
             .expect("Third register should succeed");
 
         // Extract merkle proof for second identity (index 1)
@@ -2476,23 +2472,23 @@ mod tests {
         let register_tx = build_register_tx(
             &setup, &TREE_ID, id_commitment, rate_limit, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         // Get root before slash
         let tree_main_id = derive_tree_main_pda(setup.registration.id(), &TREE_ID);
-        let tree_before = setup.state.get_account_by_id(&tree_main_id);
+        let tree_before = setup.state.get_account_by_id(tree_main_id.clone());
         let root_before: [u8; 32] = tree_before.data.as_ref()[9..41].try_into().unwrap();
 
         // Slash the member
         let slash_tx = build_slash_tx(
             &setup, &TREE_ID, identity_secret_bytes, id_commitment, 0,
         );
-        setup.state.transition_from_public_transaction(&slash_tx)
+        setup.state.transition_from_public_transaction(&slash_tx, 0, 0)
             .expect("Slash should succeed");
 
         // Get root after slash
-        let tree_after = setup.state.get_account_by_id(&tree_main_id);
+        let tree_after = setup.state.get_account_by_id(tree_main_id);
         let root_after: [u8; 32] = tree_after.data.as_ref()[9..41].try_into().unwrap();
 
         // Root should have changed after slash
@@ -2530,7 +2526,7 @@ mod tests {
         let register_tx = build_register_tx(
             &setup, &TREE_ID, id_commitment, rate_limit, 0, 0,
         );
-        setup.state.transition_from_public_transaction(&register_tx)
+        setup.state.transition_from_public_transaction(&register_tx, 0, 0)
             .expect("Register should succeed");
 
         // Extract proof
@@ -2630,7 +2626,7 @@ mod tests {
             &setup.state,
         );
         setup.state
-            .transition_from_privacy_preserving_transaction(&shield_tx)
+            .transition_from_privacy_preserving_transaction(&shield_tx, 0, 0)
             .expect("Step 0: Shield payment tokens should succeed");
 
         // Step 1: Private buy_credits
@@ -2647,7 +2643,7 @@ mod tests {
             &setup.state,
         );
         setup.state
-            .transition_from_privacy_preserving_transaction(&buy_tx)
+            .transition_from_privacy_preserving_transaction(&buy_tx, 0, 0)
             .expect("Step 1: Private buy_credits should succeed");
 
         // Verify public state changes: credit supply increased
@@ -2669,7 +2665,7 @@ mod tests {
             &setup.state,
         );
         setup.state
-            .transition_from_privacy_preserving_transaction(&transfer_tx)
+            .transition_from_privacy_preserving_transaction(&transfer_tx, 0, 0)
             .expect("Step 2: Private credit transfer should succeed");
 
         // Step 3: Deshield credits (private → public)
@@ -2683,7 +2679,7 @@ mod tests {
             &setup.state,
         );
         setup.state
-            .transition_from_privacy_preserving_transaction(&deshield_tx)
+            .transition_from_privacy_preserving_transaction(&deshield_tx, 0, 0)
             .expect("Step 3: Deshield credits should succeed");
 
         // Verify credits landed in the public account
@@ -2705,7 +2701,7 @@ mod tests {
             0, // credit account nonce (fresh public account)
             0, // next_index
         );
-        let result = setup.state.transition_from_public_transaction(&register_tx);
+        let result = setup.state.transition_from_public_transaction(&register_tx, 0, 0);
         assert!(
             result.is_ok(),
             "Step 4: Public register_with_credits should succeed: {:?}",

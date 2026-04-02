@@ -24,6 +24,8 @@ use rln::hashers::poseidon_hash;
 use rln::prelude::{hash_to_field_le, seeded_keygen, Fr, RLNWitnessInput, RLN};
 use rln::utils::{fr_to_bytes_le, IdSecret};
 use std::time::Duration;
+use common::transaction::NSSATransaction;
+use sequencer_service_rpc::RpcClient as _;
 use wallet::WalletCore;
 use wallet::program_facades::token::Token;
 
@@ -278,7 +280,7 @@ async fn ensure_program_deployed(
     let deploy_msg = program_deployment_transaction::Message::new(bytecode);
     let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
 
-    match wallet_core.sequencer_client.send_tx_program(deploy_tx).await {
+    match wallet_core.sequencer_client.send_transaction(NSSATransaction::ProgramDeployment(deploy_tx)).await {
         Ok(_) => {
             println!("  {} deployed (program ID: {:?})", program_name, program.id());
             true
@@ -305,7 +307,7 @@ async fn deploy_builtin_program(
     let deploy_msg = program_deployment_transaction::Message::new(program.elf().to_vec());
     let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
 
-    match wallet_core.sequencer_client.send_tx_program(deploy_tx).await {
+    match wallet_core.sequencer_client.send_transaction(NSSATransaction::ProgramDeployment(deploy_tx)).await {
         Ok(_) => {
             println!("  {} deployed (program ID: {:?})", program_name, program.id());
         }
@@ -365,7 +367,7 @@ async fn run_setup(
     // Step 3: Deploy payment token
     println!("Setup Step 3: Deploying payment token...");
     Token(wallet_core)
-        .send_new_definition(token_definition_id.clone(), supply_holding_id.clone(), *b"RLNTOK", TOKEN_SUPPLY)
+        .send_new_definition(token_definition_id.clone(), supply_holding_id.clone(), "RLNTOK".to_string(), TOKEN_SUPPLY)
         .await
         .expect("Failed to deploy token");
     wait_for_account_data(wallet_core, &supply_holding_id, 30).await;
@@ -404,7 +406,7 @@ async fn run_setup(
 
     let witness_set = WitnessSet::for_message(&message, &[]);
     let tx = PublicTransaction::new(message, witness_set);
-    wallet_core.sequencer_client.send_tx_public(tx).await.expect("Failed to initialize registration");
+    wallet_core.sequencer_client.send_transaction(NSSATransaction::Public(tx)).await.expect("Failed to initialize registration");
     wait_for_account_data(wallet_core, &config_id, 30).await;
     println!("  Registration initialized");
 
@@ -491,7 +493,7 @@ async fn create_identity(
     let signing_key = wallet_core
         .storage()
         .user_data
-        .get_pub_account_signing_key(&account_id)
+        .get_pub_account_signing_key(account_id.clone())
         .expect("Account should be self-owned public");
 
     // Derive identity from signing key using zerokit
@@ -586,7 +588,7 @@ async fn register_identity(
     let signing_key = wallet_core
         .storage()
         .user_data
-        .get_pub_account_signing_key(user_holding_id)
+        .get_pub_account_signing_key(user_holding_id.clone())
         .expect("User holding account not found in wallet - must be owned by this wallet");
 
     // Get nonce for user's holding account
@@ -615,7 +617,7 @@ async fn register_identity(
 
     wallet_core
         .sequencer_client
-        .send_tx_public(tx)
+        .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to register identity");
 

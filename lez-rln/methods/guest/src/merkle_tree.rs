@@ -28,7 +28,7 @@
 
 use crate::hash::{ZERO, compute_default_hashes, hash_pair};
 use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
+use nssa_core::program::{AccountPostState, Claim, PdaSeed};
 pub use rln_layouts::{
     TREE_DEPTH, TOP_DEPTH, BOTTOM_DEPTH, SUBTREE_LEAVES,
     OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE,
@@ -194,7 +194,7 @@ pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<AccountPostS
     let mut post_account = main_account.account.clone();
     post_account.data = data.try_into().expect("Data should fit");
 
-    vec![AccountPostState::new_claimed_if_default(post_account)]
+    vec![AccountPostState::new_claimed_if_default(post_account, Claim::Authorized)]
 }
 
 /// Insert a leaf into the Merkle tree.
@@ -274,7 +274,7 @@ pub fn insert_leaf(
 
     vec![
         AccountPostState::new(main_post_account),
-        AccountPostState::new_claimed_if_default(subtree_post_account),
+        AccountPostState::new_claimed_if_default(subtree_post_account, Claim::Authorized),
     ]
 }
 

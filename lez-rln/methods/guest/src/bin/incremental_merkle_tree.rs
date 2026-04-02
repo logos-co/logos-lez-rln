@@ -11,7 +11,7 @@
 //! - `3`: Set - Set a leaf at a specific index (for index reuse, must be zeroed first)
 
 use logos_lez_rln_guest::merkle_tree::{initialize_tree, insert_leaf, remove_leaf, set_leaf};
-use nssa_core::program::{ProgramInput, read_nssa_inputs, write_nssa_outputs};
+use nssa_core::program::{ProgramInput, ProgramOutput, read_nssa_inputs};
 
 type Instruction = Vec<u8>;
 
@@ -35,5 +35,5 @@ fn main() {
         _ => panic!("Invalid instruction type"),
     };
 
-    write_nssa_outputs(instruction_words, pre_states, post_states);
+    ProgramOutput::new(instruction_words, pre_states, post_states).write();
 }

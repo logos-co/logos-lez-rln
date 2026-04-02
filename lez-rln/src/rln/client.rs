@@ -2,12 +2,14 @@
 //!
 //! Used by both `run_rln_proof` and `bulk_register` binaries.
 
+use common::transaction::NSSATransaction;
 use nssa::{
     AccountId, ProgramDeploymentTransaction, PublicTransaction,
     program::Program,
     program_deployment_transaction,
     public_transaction::{Message, WitnessSet},
 };
+use sequencer_service_rpc::RpcClient as _;
 use std::path::PathBuf;
 use std::time::Duration;
 use wallet::WalletCore;
@@ -48,7 +50,7 @@ pub fn init_wallet() -> WalletCore {
             std::fs::remove_file(&config_path).ok();
         }
         println!("First run: initializing wallet storage at {storage_path:?}");
-        WalletCore::new_init_storage(config_path, storage_path, None, String::new()).unwrap()
+        WalletCore::new_init_storage(config_path, storage_path, None, "").unwrap().0
     }
 }
 
@@ -208,7 +210,7 @@ pub async fn ensure_program_deployed(
 
     match wallet_core
         .sequencer_client
-        .send_tx_program(deploy_tx)
+        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
         .await
     {
         Ok(_) => {
@@ -247,7 +249,7 @@ pub async fn deploy_builtin_program(
 
     match wallet_core
         .sequencer_client
-        .send_tx_program(deploy_tx)
+        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
         .await
     {
         Ok(_) => println!(
@@ -328,7 +330,7 @@ pub async fn run_setup(
         )
         .await
         .expect("Failed to deploy token");
-    wait_for_account_data(wallet_core, &supply_holding_id, 30).await;
+    wait_for_account_data(wallet_core, &supply_holding_id, 90).await;
     println!("  Token deployed: {}", token_definition_id);
 
     println!("Setup Step 4: Initializing treasury...");
@@ -336,7 +338,7 @@ pub async fn run_setup(
         .send_transfer_transaction(supply_holding_id.clone(), treasury_id.clone(), 1)
         .await
         .expect("Failed to initialize treasury");
-    wait_for_account_data(wallet_core, &treasury_id, 30).await;
+    wait_for_account_data(wallet_core, &treasury_id, 90).await;
 
     println!("Setup Step 5: Initializing registration program...");
     let instruction = Instruction::Initialize {
@@ -357,10 +359,10 @@ pub async fn run_setup(
     let tx = PublicTransaction::new(message, witness_set);
     wallet_core
         .sequencer_client
-        .send_tx_public(tx)
+        .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to initialize registration");
-    wait_for_account_data(wallet_core, &config_id, 30).await;
+    wait_for_account_data(wallet_core, &config_id, 90).await;
     println!("  Registration initialized");
 
     save_supply_holding(tree_id, &supply_holding_id);
@@ -381,7 +383,7 @@ pub async fn run_setup(
         )
         .await
         .expect("Failed to fund user");
-    wait_for_account_data(wallet_core, &user_payment_holding_id, 30).await;
+    wait_for_account_data(wallet_core, &user_payment_holding_id, 90).await;
     println!("  User payment holding: {}", user_payment_holding_id);
     println!("  User funded with {} tokens", user_funding);
 
@@ -419,7 +421,7 @@ pub async fn create_funded_user(
         .await
         .expect("Failed to fund user. The supply holding may be out of funds.");
 
-    wait_for_account_data(wallet_core, &user_payment_holding_id, 30).await;
+    wait_for_account_data(wallet_core, &user_payment_holding_id, 90).await;
     println!("  User payment holding: {}", user_payment_holding_id);
     println!("  User funded with {} tokens\n", user_funding);
 
@@ -439,7 +441,7 @@ pub async fn register_identity(
     id_commitment: &[u8; 32],
     user_holding_id: &AccountId,
     rate_limit: u64,
-    nonce_override: Option<u128>,
+    nonce_override: Option<nssa_core::account::Nonce>,
 ) -> u64 {
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
@@ -503,7 +505,7 @@ pub async fn register_identity(
 
     wallet_core
         .sequencer_client
-        .send_tx_public(tx)
+        .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to register identity");
 

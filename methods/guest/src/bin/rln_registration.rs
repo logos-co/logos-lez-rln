@@ -66,8 +66,8 @@ use logos_lez_rln_guest::hash::hash_pair;
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
     program::{
-        AccountPostState, ChainedCall, ProgramId, ProgramInput,
-        read_nssa_inputs, write_nssa_outputs_with_chained_call,
+        AccountPostState, ChainedCall, Claim, PdaSeed, ProgramId, ProgramInput,
+        ProgramOutput, read_nssa_inputs,
     },
 };
 
@@ -207,19 +207,17 @@ fn initialize(
         pda_seeds: vec![derive_tree_main_seed(&tree_id)],
     };
 
+    let config_seed = derive_config_seed(&tree_id);
     let output_pre_states = vec![config, credit_token_def, credit_supply, tree_main];
     let post_states = vec![
-        AccountPostState::new_claimed_if_default(config_post),
+        AccountPostState::new_claimed_if_default(config_post, Claim::Pda(PdaSeed::new(config_seed))),
         AccountPostState::new(Account::default()),
         AccountPostState::new(Account::default()),
         AccountPostState::new(Account::default()),
     ];
-    write_nssa_outputs_with_chained_call(
-        instruction_data,
-        output_pre_states,
-        post_states,
-        vec![token_create_call, merkle_chained_call],
-    );
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+        .with_chained_calls(vec![token_create_call, merkle_chained_call])
+        .write();
 }
 
 fn register(
@@ -306,15 +304,12 @@ fn register(
         AccountPostState::new(user_holding.account.clone()),
         AccountPostState::new(treasury_holding.account.clone()),
         AccountPostState::new(bottom_subtree.account.clone()),
-        AccountPostState::new_claimed_if_default(membership_post),
+        AccountPostState::new_claimed_if_default(membership_post, Claim::Pda(PdaSeed::new(membership_seed))),
     ];
 
-    write_nssa_outputs_with_chained_call(
-        instruction_data,
-        output_pre_states,
-        post_states,
-        vec![token_call, merkle_call],
-    );
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+        .with_chained_calls(vec![token_call, merkle_call])
+        .write();
 }
 
 fn buy_credits(
@@ -375,12 +370,9 @@ fn buy_credits(
         user_credit_holding.clone(),
     ];
 
-    write_nssa_outputs_with_chained_call(
-        instruction_data,
-        output_pre_states,
-        post_states,
-        vec![transfer_call, mint_call],
-    );
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+        .with_chained_calls(vec![transfer_call, mint_call])
+        .write();
 }
 
 fn register_with_credits(
@@ -467,15 +459,12 @@ fn register_with_credits(
         AccountPostState::new(tree_main.account.clone()),
         AccountPostState::new(user_credit_holding.account.clone()),
         AccountPostState::new(bottom_subtree.account.clone()),
-        AccountPostState::new_claimed_if_default(membership_post),
+        AccountPostState::new_claimed_if_default(membership_post, Claim::Pda(PdaSeed::new(membership_seed))),
     ];
 
-    write_nssa_outputs_with_chained_call(
-        instruction_data,
-        output_pre_states,
-        post_states,
-        vec![burn_call, merkle_call],
-    );
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+        .with_chained_calls(vec![burn_call, merkle_call])
+        .write();
 }
 
 fn slash(
@@ -529,10 +518,7 @@ fn slash(
         AccountPostState::new(bottom_subtree.account.clone()),
     ];
 
-    write_nssa_outputs_with_chained_call(
-        instruction_data,
-        output_pre_states,
-        post_states,
-        vec![merkle_call],
-    );
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+        .with_chained_calls(vec![merkle_call])
+        .write();
 }
