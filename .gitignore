@@ -1,2 +1,12 @@
-/target
-Cargo.lock
+**/target/
+# Cargo.lock is tracked — required by nix/crane builds
+storage.json
+wallet_config.json
+dev/storage.json
+dev/wallet_config.json
+dev/logs/
+.DS_Store
+result
+result-*
+.mcp.json
+.mcp_data/

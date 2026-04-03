@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = [
+  "rln-layouts",
+  "lez-rln-ffi",
+]
+
+[package]
+name = "logos-lez-rln"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "logos_lez_rln"
+path = "src/lib.rs"
+
+[dependencies]
+# LSSA dependencies via git
+nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+common = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7", features = ["client"] }
+
+# Shared layouts
+rln-layouts = { path = "rln-layouts" }
+
+# External dependencies
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
+hex = "0.4.3"
+bytemuck = "1.24.0"
+rln = "1.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+[[bin]]
+name = "run_rln_proof"
+path = "src/bin/run_rln_proof.rs"
+
+[[bin]]
+name = "run_setup"
+path = "src/bin/run_setup.rs"
+
+[[bin]]
+name = "register_member"
+path = "src/bin/register_member.rs"
+
+[dev-dependencies]
+nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7", features = ["test-utils"] }
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+
+[workspace.dependencies]
+rln-layouts = { path = "rln-layouts", default-features = false }
