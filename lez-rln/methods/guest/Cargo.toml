@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "logos_lez_rln_guest"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+bytemuck = "1.24.0"
+risc0-zkvm = { version = "3.0.5", default-features = false }
+rln-layouts = { path = "../../rln-layouts", default-features = false }
+rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
+
+[[bin]]
+name = "rln_registration"
+path = "src/bin/rln_registration.rs"
+
+[[bin]]
+name = "incremental_merkle_tree"
+path = "src/bin/incremental_merkle_tree.rs"
