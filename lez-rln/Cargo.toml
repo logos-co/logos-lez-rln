@@ -45,6 +45,7 @@ name = "register_member"
 path = "src/bin/register_member.rs"
 
 [dev-dependencies]
+nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7", features = ["test-utils"] }
 token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
 
 [workspace.dependencies]

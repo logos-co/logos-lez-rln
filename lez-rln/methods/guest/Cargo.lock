@@ -1654,7 +1654,7 @@ checksum = "a5b0c77c1b780822bc749a33e39aeb2c07584ab93332303babeabb645298a76e"
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=3e24ae27#3e24ae273643716b845f43f036f530ba4ff81e16"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
 dependencies = [
  "base58",
  "borsh",
@@ -2950,7 +2950,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "token_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=3e24ae27#3e24ae273643716b845f43f036f530ba4ff81e16"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
 dependencies = [
  "borsh",
  "nssa_core",
