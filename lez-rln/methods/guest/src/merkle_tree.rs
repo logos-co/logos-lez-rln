@@ -28,7 +28,7 @@
 
 use crate::hash::{ZERO, compute_default_hashes, hash_pair};
 use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::{AccountPostState, Claim, PdaSeed};
+use nssa_core::program::{AccountPostState, Claim};
 pub use rln_layouts::{
     TREE_DEPTH, TOP_DEPTH, BOTTOM_DEPTH, SUBTREE_LEAVES,
     OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE,

@@ -71,7 +71,7 @@ use nssa_core::{
 };
 
 fn main() {
-    let (ProgramInput { self_program_id, pre_states, instruction }, instruction_data) =
+    let (ProgramInput { pre_states, instruction }, instruction_data) =
         read_nssa_inputs::<Instruction>();
 
     match instruction {
@@ -84,7 +84,6 @@ fn main() {
                 registration_program_id, merkle_program_id, tree_id,
                 payment_token_id, price_per_unit, treasury_account_id,
                 token_program_id, max_total_rate_limit,
-                self_program_id,
                 instruction_data,
             )
         }
@@ -94,7 +93,6 @@ fn main() {
                 registration_program_id, id_commitment, rate_limit,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
                 &pre_states[4],
-                self_program_id,
                 instruction_data,
             )
         }
@@ -104,7 +102,6 @@ fn main() {
                 amount,
                 &pre_states[0], &pre_states[1], &pre_states[2],
                 &pre_states[3], &pre_states[4],
-                self_program_id,
                 instruction_data,
             )
         }
@@ -116,7 +113,6 @@ fn main() {
                 registration_program_id, id_commitment, amount_to_burn,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
                 &pre_states[4],
-                self_program_id,
                 instruction_data,
             )
         }
@@ -125,7 +121,6 @@ fn main() {
             slash(
                 identity_secret,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
-                self_program_id,
                 instruction_data,
             )
         }
@@ -145,7 +140,6 @@ fn initialize(
     treasury_account_id: [u8; 32],
     token_program_id: [u8; 32],
     max_total_rate_limit: u64,
-    self_program_id: ProgramId,
     instruction_data: Vec<u32>,
 ) {
     assert!(max_total_rate_limit > 0, "Max total rate limit must be positive");
@@ -220,12 +214,7 @@ fn initialize(
         AccountPostState::new(Account::default()),
         AccountPostState::new(Account::default()),
     ];
-    ProgramOutput::new(
-        self_program_id,
-        instruction_data,
-        output_pre_states,
-        post_states,
-    )
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
     .with_chained_calls(vec![token_create_call, merkle_chained_call])
     .write();
 }
@@ -239,7 +228,6 @@ fn register(
     user_holding: &AccountWithMetadata,
     treasury_holding: &AccountWithMetadata,
     bottom_subtree: &AccountWithMetadata,
-    self_program_id: ProgramId,
     instruction_data: Vec<u32>,
 ) {
     validate_rate_limit(rate_limit);
@@ -318,12 +306,7 @@ fn register(
         AccountPostState::new_claimed_if_default(membership_post, Claim::Pda(membership_seed)),
     ];
 
-    ProgramOutput::new(
-        self_program_id,
-        instruction_data,
-        output_pre_states,
-        post_states,
-    )
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
     .with_chained_calls(vec![token_call, merkle_call])
     .write();
 }
@@ -335,7 +318,6 @@ fn buy_credits(
     user_payment_holding: &AccountWithMetadata,
     treasury_holding: &AccountWithMetadata,
     user_credit_holding: &AccountWithMetadata,
-    self_program_id: ProgramId,
     instruction_data: Vec<u32>,
 ) {
 
@@ -387,12 +369,7 @@ fn buy_credits(
         user_credit_holding.clone(),
     ];
 
-    ProgramOutput::new(
-        self_program_id,
-        instruction_data,
-        output_pre_states,
-        post_states,
-    )
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
     .with_chained_calls(vec![transfer_call, mint_call])
     .write();
 }
@@ -406,7 +383,6 @@ fn register_with_credits(
     tree_main: &AccountWithMetadata,
     user_credit_holding: &AccountWithMetadata,
     bottom_subtree: &AccountWithMetadata,
-    self_program_id: ProgramId,
     instruction_data: Vec<u32>,
 ) {
 
@@ -485,12 +461,7 @@ fn register_with_credits(
         AccountPostState::new_claimed_if_default(membership_post, Claim::Pda(membership_seed)),
     ];
 
-    ProgramOutput::new(
-        self_program_id,
-        instruction_data,
-        output_pre_states,
-        post_states,
-    )
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
     .with_chained_calls(vec![burn_call, merkle_call])
     .write();
 }
@@ -501,7 +472,6 @@ fn slash(
     tree_main: &AccountWithMetadata,
     membership_account: &AccountWithMetadata,
     bottom_subtree: &AccountWithMetadata,
-    self_program_id: ProgramId,
     instruction_data: Vec<u32>,
 ) {
 
@@ -547,12 +517,7 @@ fn slash(
         AccountPostState::new(bottom_subtree.account.clone()),
     ];
 
-    ProgramOutput::new(
-        self_program_id,
-        instruction_data,
-        output_pre_states,
-        post_states,
-    )
+    ProgramOutput::new(instruction_data, output_pre_states, post_states)
     .with_chained_calls(vec![merkle_call])
     .write();
 }
