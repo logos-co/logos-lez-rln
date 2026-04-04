@@ -16,13 +16,8 @@ use nssa_core::program::{ProgramInput, ProgramOutput, read_nssa_inputs};
 type Instruction = Vec<u8>;
 
 fn main() {
-    let (
-        ProgramInput {
-            pre_states,
-            instruction,
-        },
-        instruction_words,
-    ) = read_nssa_inputs::<Instruction>();
+    let (ProgramInput { pre_states, instruction }, instruction_words) =
+        read_nssa_inputs::<Instruction>();
 
     let post_states = match instruction[0] {
         0 => initialize_tree(pre_states.clone()),

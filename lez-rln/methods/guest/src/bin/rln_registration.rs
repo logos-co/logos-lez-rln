@@ -215,8 +215,8 @@ fn initialize(
         AccountPostState::new(Account::default()),
     ];
     ProgramOutput::new(instruction_data, output_pre_states, post_states)
-        .with_chained_calls(vec![token_create_call, merkle_chained_call])
-        .write();
+    .with_chained_calls(vec![token_create_call, merkle_chained_call])
+    .write();
 }
 
 fn register(
@@ -307,8 +307,8 @@ fn register(
     ];
 
     ProgramOutput::new(instruction_data, output_pre_states, post_states)
-        .with_chained_calls(vec![token_call, merkle_call])
-        .write();
+    .with_chained_calls(vec![token_call, merkle_call])
+    .write();
 }
 
 fn buy_credits(
@@ -370,8 +370,8 @@ fn buy_credits(
     ];
 
     ProgramOutput::new(instruction_data, output_pre_states, post_states)
-        .with_chained_calls(vec![transfer_call, mint_call])
-        .write();
+    .with_chained_calls(vec![transfer_call, mint_call])
+    .write();
 }
 
 fn register_with_credits(
@@ -462,8 +462,8 @@ fn register_with_credits(
     ];
 
     ProgramOutput::new(instruction_data, output_pre_states, post_states)
-        .with_chained_calls(vec![burn_call, merkle_call])
-        .write();
+    .with_chained_calls(vec![burn_call, merkle_call])
+    .write();
 }
 
 fn slash(
@@ -518,6 +518,6 @@ fn slash(
     ];
 
     ProgramOutput::new(instruction_data, output_pre_states, post_states)
-        .with_chained_calls(vec![merkle_call])
-        .write();
+    .with_chained_calls(vec![merkle_call])
+    .write();
 }
