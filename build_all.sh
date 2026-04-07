@@ -9,10 +9,17 @@ cd "$ROOT"
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 die() { echo "FATAL: $*" >&2; exit 1; }
 
-# 1. Submodules
+# 1. Top-level submodules + recursive init of logos-delivery's vendor tree.
+# We init each vendor submodule individually so a single stale pinned commit doesn't
+# cascade and leave later submodules empty (which would break nix's submodule fetcher).
 log "Initializing submodules..."
 git submodule update --init
-(cd logos-delivery && git submodule update --init --recursive)
+(cd logos-delivery && \
+    git submodule init && \
+    for mod in $(git config --file .gitmodules --get-regexp path | awk '{print $2}'); do
+        git submodule update --init --recursive "$mod" 2>/dev/null || \
+            echo "  warn: $mod recursive init incomplete (likely stale pinned subref)"
+    done)
 
 # 2. Guest binaries (zkVM programs)
 GUEST_DIR="lez-rln/methods/guest/target/riscv32im-risc0-zkvm-elf/docker"
