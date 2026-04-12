@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build all modules needed for the RLN relay simulation.
-# Prerequisites: nix, cargo-risczero, Docker
+# Build all modules needed for the LEZ mix simulation.
+# Prerequisites: nix (with flakes), Docker, cargo-risczero
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +12,7 @@ die() { echo "FATAL: $*" >&2; exit 1; }
 # 1. Submodules
 log "Initializing submodules..."
 git submodule update --init
-(cd logos-delivery && git submodule update --init --recursive)
+(cd logos-delivery-module && git submodule update --init --recursive)
 
 # 2. Guest binaries (zkVM programs)
 GUEST_DIR="lez-rln/methods/guest/target/riscv32im-risc0-zkvm-elf/docker"
@@ -27,28 +27,61 @@ fi
 log "Building RLN module..."
 nix build .#logos-rln-module -o logos-rln-module/result-rln
 
-# 4. Wallet module (logos-execution-zone-module + wallet FFI from our LSSA fork)
+# 4. Wallet module
 log "Building wallet module..."
 (cd logos-execution-zone-module && \
     nix build --override-input logos-execution-zone "git+file://$(pwd)/../lssa" \
     -o ../logos-rln-module/result-wallet)
 
-# 5. Delivery module (logos-delivery-module + our delivery fork with rln_gifter)
-log "Building delivery module..."
-(cd logos-delivery-module && \
-    nix build --override-input logos-delivery "git+file://$(pwd)/../logos-delivery?submodules=1")
+# 5. Nim binaries: liblogosdelivery, chat2mix
+log "Building Nim binaries (liblogosdelivery, chat2mix)..."
+(cd logos-delivery-module/vendor/logos-delivery && make -j4 liblogosdelivery chat2mix 2>&1 | tail -3)
 
-# 6. Mix simulation module
-log "Building mix-simulation module..."
-(cd mix-simulation-module/src-local && nix build -o ../result)
+# 6. Delivery module C++ plugin (cmake with correct SDK for LogosInstance ID)
+log "Building delivery module plugin (cmake with SDK a4bd66c)..."
+SDK_PATH=$(nix build github:logos-co/logos-cpp-sdk/a4bd66c --no-link --print-out-paths 2>/dev/null)
+LIBLOGOS_PATH=$(nix build github:logos-co/logos-liblogos/7df6195 \
+    --override-input logos-cpp-sdk github:logos-co/logos-cpp-sdk/a4bd66c \
+    --no-link --print-out-paths 2>/dev/null)
 
-# 7. Clean stale wallet storage (format may differ between LSSA versions)
-if [ -f "$HOME/.nssa/wallet/storage.json" ]; then
-    log "Removing stale wallet storage..."
-    rm -f "$HOME/.nssa/wallet/storage.json"
-fi
+# Qt paths come from the logoscore nix build (cached in store)
+QT_BASE=$(find /nix/store -maxdepth 1 -name "*qtbase-6.9.2" -type d 2>/dev/null | head -1)
+QT_RO=$(find /nix/store -maxdepth 1 -name "*qtremoteobjects-6.9.2" -type d 2>/dev/null | head -1)
+[ -d "$QT_BASE" ] || die "Qt base 6.9.2 not in nix store — build logoscore first"
+[ -d "$QT_RO" ] || die "Qt RemoteObjects 6.9.2 not in nix store — build logoscore first"
+
+DELIVERY_MOD="$ROOT/logos-delivery-module"
+cat > /tmp/_build_plugin.sh << PLUGINSCRIPT
+#!/bin/bash
+set -e
+cd "$DELIVERY_MOD"
+rm -rf build_plugin && mkdir build_plugin && cd build_plugin
+mkdir -p delivery_root/bin delivery_root/liblogosdelivery
+cp "$DELIVERY_MOD/vendor/logos-delivery/build/liblogosdelivery.dylib" delivery_root/bin/ 2>/dev/null || true
+cp "$DELIVERY_MOD/vendor/logos-delivery/liblogosdelivery/liblogosdelivery.h" delivery_root/liblogosdelivery/
+cmake .. -GNinja \
+  -DLOGOS_CPP_SDK_ROOT="$SDK_PATH" \
+  -DLOGOS_LIBLOGOS_ROOT="$LIBLOGOS_PATH" \
+  -DLOGOS_DELIVERY_ROOT="\$PWD/delivery_root" \
+  -DLOGOS_MESSAGING_MODULE_USE_VENDOR=OFF \
+  -DCMAKE_PREFIX_PATH="$QT_BASE;$QT_RO" \
+  -DQT_ADDITIONAL_PACKAGES_PREFIX_PATH="$QT_RO"
+ninja
+PLUGINSCRIPT
+chmod +x /tmp/_build_plugin.sh
+nix-shell -p cmake ninja pkg-config postgresql --run "bash /tmp/_build_plugin.sh" 2>&1 | tail -5
+
+# Fix rpath for liblogosdelivery
+PLUGIN="$DELIVERY_MOD/build_plugin/modules/delivery_module_plugin.dylib"
+[ -f "$PLUGIN" ] || die "cmake plugin build failed"
+ABS_PATH=$(otool -L "$PLUGIN" | grep liblogosdelivery | awk '{print $1}' | grep -v '@rpath' || true)
+[ -n "$ABS_PATH" ] && install_name_tool -change "$ABS_PATH" "@rpath/liblogosdelivery.dylib" "$PLUGIN"
+log "  Plugin built with LogosInstance ID support."
+
+# 7. Clean stale wallet storage
+[ -f "$HOME/.nssa/wallet/storage.json" ] && rm -f "$HOME/.nssa/wallet/storage.json"
 
 log "All modules built successfully."
 log ""
 log "Run the simulation:"
-log "  bash logos-delivery/simulations/relay-rln/run_simulation.sh --fresh"
+log "  bash logos-delivery-module/simulations/mixnet-logos-core/run_simulation_lez.sh --fresh"
