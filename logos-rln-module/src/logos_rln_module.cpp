@@ -1,6 +1,7 @@
 #include "logos_rln_module.h"
 
 #include <cpp/logos_api_client.h>
+#include <QtCore/QCoreApplication>
 #include <QtCore/QDebug>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
@@ -105,6 +106,8 @@ static QString resolveAccountId(LogosAPIClient* walletClient, const QString& id)
     if (stripped.size() == 64)
         return stripped;
 
+    // Process pending events before blocking RPC to avoid starving the event loop
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     const QVariant hexResult = walletClient->invokeRemoteMethod(
         WALLET_MODULE, "account_id_from_base58", QVariant(id));
     return hexResult.toString();
@@ -207,6 +210,9 @@ static bool fetchAccountData(LogosAPIClient* walletClient,
                               const QString& accountIdHex,
                               QByteArray& outData,
                               QByteArray* outProgramOwner /* = nullptr */) {
+    // Process pending events before the blocking RPC call so that other
+    // protocol handlers (e.g. lightpush) are not starved.
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     const QVariant result = walletClient->invokeRemoteMethod(
         WALLET_MODULE, "get_account_public", QVariant(accountIdHex));
     const QString json = result.toString();
