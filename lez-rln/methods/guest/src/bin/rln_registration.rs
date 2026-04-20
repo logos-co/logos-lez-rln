@@ -61,7 +61,7 @@ use logos_lez_rln_guest::registration::{
     prepare_merkle_accounts,
 };
 use logos_lez_rln_guest::merkle_tree::SUBTREE_LEAVES;
-use logos_lez_rln_guest::hash::{hash_pair, validate_field_element};
+use logos_lez_rln_guest::hash::{hash_single, validate_field_element};
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
     program::{
@@ -478,7 +478,7 @@ fn slash(
 ) {
     validate_field_element(&identity_secret);
 
-    let id_commitment = hash_pair(&identity_secret, &[0u8; 32]);
+    let id_commitment = hash_single(&identity_secret);
     let config = RegistrationConfig::from_data(config_account.account.data.as_ref());
 
     let membership_bytes = membership_account.account.data.as_ref();
