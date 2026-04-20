@@ -149,28 +149,20 @@ QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
         return {};
     }
 
-    // 2. Parse config to get tree_id, then derive tree main account
-    uint8_t merkleProgramId[32] = {};
-    uint8_t treeId[24] = {};
-    RlnFfiError err = rln_ffi_parse_config(
+    // 2. Derive tree main account ID via merkle_proofs_plan (no leaves needed)
+    RlnFfiMerkleProofsPlan accountsPlan = {};
+    RlnFfiError err = rln_ffi_merkle_proofs_plan(
         reinterpret_cast<const uint8_t*>(configData.constData()),
         static_cast<size_t>(configData.size()),
-        merkleProgramId, treeId);
-    qDebug() << "get_valid_roots: parse_config result=" << static_cast<int>(err);
-    if (err != RLN_FFI_ERROR_SUCCESS) {
-        qDebug() << "get_valid_roots: FAIL parse_config FFI error" << static_cast<int>(err);
-        return {};
-    }
-
-    uint8_t mainAccountId[32] = {};
-    err = rln_ffi_derive_main_account_id(
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-        treeId, mainAccountId);
-    qDebug() << "get_valid_roots: derive_main result=" << static_cast<int>(err);
+        nullptr, 0,
+        &accountsPlan);
+    qDebug() << "get_valid_roots: merkle_proofs_plan result=" << static_cast<int>(err);
     if (err != RLN_FFI_ERROR_SUCCESS) {
-        qDebug() << "get_valid_roots: FAIL derive_main FFI error" << static_cast<int>(err);
+        qDebug() << "get_valid_roots: FAIL merkle_proofs_plan FFI error" << static_cast<int>(err);
         return {};
     }
+    const uint8_t* mainAccountId = accountsPlan.main_account_id;
 
     // 3. Fetch tree main account data
     const QString mainHex = bytesToHex(mainAccountId, 32);
@@ -324,36 +316,27 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
         return {};
     }
 
-    // Parse config to get tree_id
-    uint8_t merkleProgramId[32] = {};
-    uint8_t treeId[24] = {};
-    RlnFfiError err = rln_ffi_parse_config(
+    // Derive tree main account ID via merkle_proofs_plan (no leaves needed) and fetch it
+    RlnFfiMerkleProofsPlan accountsPlan = {};
+    RlnFfiError err = rln_ffi_merkle_proofs_plan(
         reinterpret_cast<const uint8_t*>(configData.constData()),
         static_cast<size_t>(configData.size()),
-        merkleProgramId, treeId);
-    if (err != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "register_member: failed to parse config";
-        return {};
-    }
-
-    // Derive tree main account and fetch it
-    uint8_t treeMainAccountId[32] = {};
-    err = rln_ffi_derive_main_account_id(
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-        treeId, treeMainAccountId);
+        nullptr, 0,
+        &accountsPlan);
     if (err != RLN_FFI_ERROR_SUCCESS) {
         qWarning() << "register_member: failed to derive tree main account";
         return {};
     }
 
-    const QString treeMainHex = bytesToHex(treeMainAccountId, 32);
+    const QString treeMainHex = bytesToHex(accountsPlan.main_account_id, 32);
     QByteArray treeMainData;
     if (!fetchAccountData(walletClient, treeMainHex, treeMainData)) {
         qWarning() << "register_member: failed to fetch tree main account";
         return {};
     }
 
-    // Plan the registration
+    // Plan the registration (tree_id is read from config internally)
     RlnFfiRlnRegisterPlan plan = {};
     err = rln_ffi_register_plan(
         reinterpret_cast<const uint8_t*>(configData.constData()),
@@ -361,7 +344,6 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
         reinterpret_cast<const uint8_t*>(treeMainData.constData()),
         static_cast<size_t>(treeMainData.size()),
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-        treeId,
         &plan);
     if (err != RLN_FFI_ERROR_SUCCESS) {
         qWarning() << "register_member: register_plan FFI error" << static_cast<int>(err);
