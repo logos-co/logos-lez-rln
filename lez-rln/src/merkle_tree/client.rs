@@ -65,57 +65,7 @@ impl ParsedTreeMain {
     }
 }
 
-// ============================================================================
-// Sparse Node Reading
-// ============================================================================
-
-/// Computes the BFS offset for a node within a subtree (or the top tree).
-/// Used as the key in sparse node storage.
-pub fn subtree_node_offset(level: usize, index: usize) -> usize {
-    ((1 << level) - 1) + index
-}
-
-/// Read a node from sparse tree storage format.
-///
-/// Format: `[count(u16le), (offset(u16le), hash(32bytes))...]`
-/// Entries are sorted by offset. Returns cached_default if not found.
-pub fn read_sparse_node(data: &[u8], level: usize, index: usize, cached_default: &[u8; 32]) -> [u8; 32] {
-    if data.len() < 2 {
-        return *cached_default;
-    }
-    let count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
-    if count == 0 {
-        return *cached_default;
-    }
-    let target = subtree_node_offset(level, index) as u16;
-
-    let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let entry_start = 2 + mid * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
-        if entry_offset < target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-
-    if lo < count {
-        let entry_start = 2 + lo * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
-        if entry_offset == target {
-            return data[entry_start + 2..entry_start + 34].try_into().unwrap();
-        }
-    }
-
-    *cached_default
-}
+pub use rln_layouts::{read_sparse_node, subtree_node_offset};
 
 // ============================================================================
 // Tree State Reading

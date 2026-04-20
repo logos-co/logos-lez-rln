@@ -17,6 +17,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
+pub mod sparse;
+pub use sparse::{read_sparse_node, subtree_node_offset};
+
 // ============================================================================
 // Instruction Enum
 // ============================================================================
