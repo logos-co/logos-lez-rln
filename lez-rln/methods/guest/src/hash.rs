@@ -3,7 +3,14 @@ use rust_poseidon_bn254_pure::poseidon::permutation::compress_2;
 
 pub const ZERO: [u8; 32] = [0u8; 32];
 
+pub fn validate_field_element(bytes: &[u8; 32]) {
+    let felt = Felt::unsafe_from_le_bytes(bytes);
+    assert!(Felt::is_valid(&felt), "Input is not a valid BN254 field element (must be < prime)");
+}
+
 pub fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    validate_field_element(left);
+    validate_field_element(right);
     let hash_felt = compress_2([
         Felt::unsafe_from_le_bytes(left),
         Felt::unsafe_from_le_bytes(right),

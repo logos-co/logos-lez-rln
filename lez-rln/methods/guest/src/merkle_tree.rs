@@ -26,7 +26,7 @@
 //! ensures only the owning program (via tail call with PDA seeds) can modify
 //! the tree.
 
-use crate::hash::{ZERO, compute_default_hashes, hash_pair};
+use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::{AccountPostState, Claim, PdaSeed};
 pub use rln_layouts::{
@@ -225,6 +225,7 @@ pub fn insert_leaf(
     );
     let expected_index = u64::from_le_bytes(instruction[0..8].try_into().unwrap());
     let leaf_value: [u8; 32] = instruction[8..40].try_into().unwrap();
+    validate_field_element(&leaf_value);
 
     let main_data = main_account.account.data.as_ref();
     let depth = main_data[OFFSET_DEPTH] as usize;
@@ -304,6 +305,7 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
     );
     let leaf_index = u64::from_le_bytes(instruction[0..8].try_into().unwrap());
     let leaf_value: [u8; 32] = instruction[8..40].try_into().unwrap();
+    validate_field_element(&leaf_value);
 
     let main_data = main_account.account.data.as_ref();
     let depth = main_data[OFFSET_DEPTH] as usize;
@@ -1083,7 +1085,7 @@ mod tests {
     #[test]
     fn test_same_insertions_produce_same_root() {
         let run_insertions = || {
-            let leaf = [123u8; 32];
+            let leaf = [1u8; 32];
             let (pre_states, instruction) = build_insert_first_leaf_data(
                 AccountForTests::main_initialized(),
                 AccountForTests::subtree_empty(),
@@ -1236,7 +1238,7 @@ mod tests {
 
         let mut instruction = Vec::with_capacity(40);
         instruction.extend_from_slice(&last_index.to_le_bytes());
-        let leaf = [0xFFu8; 32];
+        let leaf = [1u8; 32];
         instruction.extend_from_slice(&leaf);
 
         let post_states = insert_leaf(vec![main_account, subtree_account], &instruction);
@@ -1286,7 +1288,7 @@ mod tests {
         // Insert
         let mut insert_instr = Vec::with_capacity(40);
         insert_instr.extend_from_slice(&last_index.to_le_bytes());
-        insert_instr.extend_from_slice(&[0xFFu8; 32]);
+        insert_instr.extend_from_slice(&[1u8; 32]);
 
         let post_insert = insert_leaf(
             vec![main_account, subtree_account],

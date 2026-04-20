@@ -13,7 +13,7 @@
 //! 1. Buy credits: Pay tokens -> receive credits
 //! 2. Register: Burn credits -> register with rate_limit = amount burned
 
-use crate::hash::hash_pair;
+use crate::hash::{hash_pair, validate_field_element};
 use crate::layouts;
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::PdaSeed;
@@ -190,6 +190,7 @@ pub fn calculate_payment_amount(rate_limit: u64, price_per_unit: u128) -> u128 {
 ///
 /// The leaf is H(id_commitment, rate_limit).
 pub fn compute_registration_leaf(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] {
+    validate_field_element(id_commitment);
     let mut rate_bytes = [0u8; 32];
     rate_bytes[..8].copy_from_slice(&rate_limit.to_le_bytes());
     hash_pair(id_commitment, &rate_bytes)
@@ -237,7 +238,7 @@ pub fn derive_membership_seed(tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> P
 /// This is separate from derive_membership_seed for cases where you need
 /// the raw bytes without wrapping in PdaSeed.
 pub fn membership_seed_bytes(tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> [u8; 32] {
-    // Pad tree_id to 32 bytes and hash with id_commitment
+    validate_field_element(id_commitment);
     let mut tree_id_padded = [0u8; 32];
     tree_id_padded[0..24].copy_from_slice(tree_id);
     hash_pair(&tree_id_padded, id_commitment)

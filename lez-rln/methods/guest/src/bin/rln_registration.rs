@@ -61,7 +61,7 @@ use logos_lez_rln_guest::registration::{
     prepare_merkle_accounts,
 };
 use logos_lez_rln_guest::merkle_tree::SUBTREE_LEAVES;
-use logos_lez_rln_guest::hash::hash_pair;
+use logos_lez_rln_guest::hash::{hash_pair, validate_field_element};
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
     program::{
@@ -230,6 +230,7 @@ fn register(
     bottom_subtree: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
+    validate_field_element(&id_commitment);
     validate_rate_limit(rate_limit);
 
     let config = RegistrationConfig::from_data(config_account.account.data.as_ref());
@@ -385,6 +386,7 @@ fn register_with_credits(
     bottom_subtree: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
+    validate_field_element(&id_commitment);
 
     let rate_limit = amount_to_burn;
     validate_rate_limit(rate_limit);
@@ -474,6 +476,7 @@ fn slash(
     bottom_subtree: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
+    validate_field_element(&identity_secret);
 
     let id_commitment = hash_pair(&identity_secret, &[0u8; 32]);
     let config = RegistrationConfig::from_data(config_account.account.data.as_ref());
