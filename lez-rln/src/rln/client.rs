@@ -9,6 +9,9 @@ use nssa::{
     program_deployment_transaction,
     public_transaction::{Message, WitnessSet},
 };
+use rln::hashers::poseidon_hash;
+use rln::prelude::{Fr, seeded_keygen};
+use rln::utils::{IdSecret, fr_to_bytes_le};
 use sequencer_service_rpc::RpcClient as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -153,6 +156,59 @@ pub fn load_payment_account(tree_id: &[u8; 24]) -> Option<AccountId> {
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
+}
+
+/// Outputs of `create_identity`: the RLN identity plus the on-chain leaf (rate commitment).
+pub struct RlnIdentity {
+    pub identity_secret: IdSecret,
+    pub id_commitment_fr: Fr,
+    pub id_commitment_bytes: [u8; 32],
+    pub leaf_bytes: [u8; 32],
+    pub id_secret_hash_hex: String,
+}
+
+/// Create a new wallet account, derive an RLN identity from its signing key, and
+/// compute the rate commitment (leaf value = poseidon(id_commitment, rate_limit)).
+pub async fn create_identity(
+    wallet_core: &mut WalletCore,
+    user_message_limit: u64,
+) -> RlnIdentity {
+    let (account_id, _chain_index) = wallet_core.create_new_account_public(None);
+    wallet_core
+        .store_persistent_data()
+        .await
+        .expect("Failed to store wallet");
+
+    let signing_key = wallet_core
+        .storage()
+        .user_data
+        .get_pub_account_signing_key(account_id)
+        .expect("Account should be self-owned public");
+
+    let seed = signing_key.value();
+    let (mut identity_secret_fr, id_commitment_fr) =
+        seeded_keygen(seed).expect("seeded_keygen should succeed");
+
+    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
+    let id_secret_hash_hex: String = id_secret_hash_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    let identity_secret = IdSecret::from(&mut identity_secret_fr);
+    let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+
+    let rate_commitment = poseidon_hash(&[id_commitment_fr, Fr::from(user_message_limit)])
+        .expect("Failed to compute rate commitment");
+    let leaf_bytes: [u8; 32] = fr_to_bytes_le(&rate_commitment).try_into().unwrap();
+
+    RlnIdentity {
+        identity_secret,
+        id_commitment_fr,
+        id_commitment_bytes,
+        leaf_bytes,
+        id_secret_hash_hex,
+    }
 }
 
 /// Check if a program is deployed by checking if an account owned by it exists.
