@@ -57,7 +57,7 @@ async fn main() {
         &tree_id,
         leaf_index,
         &leaf_bytes,
-        30,
+        90,
         Duration::from_millis(500),
     ).await;
     if !finalized {
