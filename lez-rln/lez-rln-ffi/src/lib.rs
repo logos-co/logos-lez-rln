@@ -241,7 +241,7 @@ fn build_merkle_proof_inner(
 ///
 /// `main_data`/`main_len`: raw bytes of the tree main account.
 /// `subtree_data`/`subtree_len`: raw bytes of the subtree account for this leaf.
-///   (subtree_id = leaf_index / 1024)
+///   (subtree_id = leaf_index / SUBTREE_LEAVES)
 /// `leaf_index`: the leaf position in the tree.
 /// `out_proof`: pointer to caller-allocated `RlnMerkleProof`.
 #[unsafe(no_mangle)]
@@ -304,7 +304,7 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     // Collect unique subtree IDs
     let mut unique_ids: Vec<u32> = leaf_indices
         .iter()
-        .map(|&idx| (idx / 1024) as u32)
+        .map(|&idx| (idx / SUBTREE_LEAVES as u64) as u32)
         .collect();
     unique_ids.sort_unstable();
     unique_ids.dedup();
@@ -376,7 +376,7 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_exec(
     let mut proofs = Vec::with_capacity(leaf_indices.len());
 
     for &leaf_index in leaf_indices {
-        let subtree_id = (leaf_index / 1024) as u32;
+        let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
 
         // Find matching subtree data
         let subtree_data: &[u8] = subtrees
