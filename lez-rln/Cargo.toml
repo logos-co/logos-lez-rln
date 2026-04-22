@@ -21,7 +21,6 @@ nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98
 wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
 common = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62", features = ["client"] }
-clock_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
 
 # Shared layouts
 rln-layouts = { path = "rln-layouts" }
@@ -48,6 +47,7 @@ path = "src/bin/register_member.rs"
 [dev-dependencies]
 nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62", features = ["test-utils"] }
 token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+clock_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
 
 [workspace.dependencies]
 rln-layouts = { path = "rln-layouts", default-features = false }

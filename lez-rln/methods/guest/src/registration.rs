@@ -15,7 +15,7 @@
 
 use crate::hash::{hash_pair, validate_field_element};
 use crate::layouts;
-use nssa_core::account::{AccountId, AccountWithMetadata};
+use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::PdaSeed;
 
 // Re-export rate limit and expiration constants / helpers from shared crate
@@ -399,21 +399,14 @@ pub fn prepare_merkle_accounts(
 // Clock Helpers
 // ============================================================================
 
-/// Canonical `AccountId` for the CLOCK_50 system account.
-pub fn derive_clock_account_id() -> AccountId {
-    AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES)
-}
-
-/// Decode a clock account's data blob into its current unix timestamp.
-///
-/// The clock account is sequencer-managed; its data is a borsh-encoded
-/// `clock_core::ClockAccountData { block_id, timestamp }`.
+/// Decode a clock account's borsh-encoded `ClockAccountData` blob and return
+/// its unix timestamp field.
 pub fn parse_clock_timestamp(data: &[u8]) -> u64 {
     clock_core::ClockAccountData::from_bytes(data).timestamp
 }
 
-/// Assert that the account provided as the clock pre-state is the expected
-/// CLOCK_50 account, then return its timestamp.
+/// Validate that `clock_account` is the expected CLOCK_50 system account and
+/// return its current unix timestamp.
 pub fn require_clock(clock_account: &AccountWithMetadata) -> u64 {
     assert!(
         *clock_account.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,

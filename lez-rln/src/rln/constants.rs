@@ -26,10 +26,6 @@ pub use rln_layouts::MAX_RATE_LIMIT;
 pub const CONFIG_OFFSET_PRICE_PER_UNIT: usize = offset_of!(ConfigLayout, price_per_unit);
 pub const CONFIG_OFFSET_TREASURY_ACCOUNT_ID: usize = offset_of!(ConfigLayout, treasury_account_id);
 pub const CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT: usize = offset_of!(ConfigLayout, current_total_rate_limit);
-pub const CONFIG_OFFSET_ACTIVE_DURATION_FOR_NEW_MEMBERSHIPS: usize =
-    offset_of!(ConfigLayout, active_duration_for_new_memberships);
-pub const CONFIG_OFFSET_GRACE_PERIOD_DURATION_FOR_NEW_MEMBERSHIPS: usize =
-    offset_of!(ConfigLayout, grace_period_duration_for_new_memberships);
 
 // ============================================================================
 // Membership Account Layout (Derived from MembershipLayout)
