@@ -57,13 +57,10 @@ use logos_lez_rln_guest::registration::{
     create_membership_data, MembershipData,
     // Chained call helpers
     serialize_token_instruction, authorize,
-    build_merkle_insert_instruction,
-    build_membership_remove_call,
-    prepare_merkle_accounts,
+    build_membership_insert_call, build_membership_remove_call,
     // Clock / expiration
     require_clock, is_in_grace_period, is_expired,
 };
-use logos_lez_rln_guest::merkle_tree::SUBTREE_LEAVES;
 use logos_lez_rln_guest::hash::{hash_single, validate_field_element};
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
@@ -298,21 +295,11 @@ fn register(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
-    let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     let updated_config = config.with_registration(rate_limit);
 
-    let (merkle_accounts, pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_insert_call(
+        &config, tree_main, bottom_subtree, next_index, &leaf_value,
     );
-
-    let merkle_instruction = build_merkle_insert_instruction(next_index, &leaf_value);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds,
-    };
 
     let token_instruction = token_core::Instruction::Transfer { amount_to_transfer: payment_amount };
     let token_call = ChainedCall {
@@ -479,21 +466,11 @@ fn register_with_credits(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
-    let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     let updated_config = config.with_registration(rate_limit);
 
-    let (merkle_accounts, merkle_pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_insert_call(
+        &config, tree_main, bottom_subtree, next_index, &leaf_value,
     );
-
-    let merkle_instruction = build_merkle_insert_instruction(next_index, &leaf_value);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds: merkle_pda_seeds,
-    };
 
     let membership_data = create_membership_data(
         next_index,

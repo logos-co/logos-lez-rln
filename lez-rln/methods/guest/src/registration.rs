@@ -397,6 +397,27 @@ pub fn prepare_merkle_accounts(
     (merkle_accounts, pda_seeds)
 }
 
+/// Build the merkle `insert` chained call for a new registration.
+/// Shared by the `register` and `register_with_credits` flows.
+pub fn build_membership_insert_call(
+    config: &RegistrationConfig,
+    tree_main: &AccountWithMetadata,
+    bottom_subtree: &AccountWithMetadata,
+    next_index: u64,
+    leaf_value: &[u8; 32],
+) -> ChainedCall {
+    let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
+    let (pre_states, pda_seeds) = prepare_merkle_accounts(
+        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    );
+    ChainedCall {
+        program_id: bytemuck::cast(config.merkle_program_id),
+        instruction_data: risc0_zkvm::serde::to_vec(&build_merkle_insert_instruction(next_index, leaf_value)).unwrap(),
+        pre_states,
+        pda_seeds,
+    }
+}
+
 /// Build the merkle `remove` chained call for a membership being torn down.
 /// Shared by the `slash` and `erase` flows.
 pub fn build_membership_remove_call(
