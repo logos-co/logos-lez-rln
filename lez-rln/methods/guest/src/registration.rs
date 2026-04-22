@@ -309,7 +309,7 @@ impl MembershipData {
     }
 }
 
-/// Create membership account data with expiration timestamps.
+/// Create membership account data.
 pub fn create_membership_data(
     leaf_index: u64,
     rate_limit: u64,

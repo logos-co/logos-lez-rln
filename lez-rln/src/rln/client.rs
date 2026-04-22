@@ -29,13 +29,13 @@ pub const PRICE_PER_UNIT: u128 = 10_000;
 pub const TOKEN_SUPPLY: u128 = 1_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
-/// Default active-period duration for new memberships (30 days in seconds).
+/// 30 days, in seconds.
 pub const DEFAULT_ACTIVE_DURATION_SECS: u32 = 30 * 24 * 60 * 60;
 
-/// Default grace-period duration for new memberships (7 days in seconds).
+/// 7 days, in seconds.
 pub const DEFAULT_GRACE_PERIOD_DURATION_SECS: u32 = 7 * 24 * 60 * 60;
 
-/// Public `AccountId` of the CLOCK_50 system account (read-only timestamp).
+/// CLOCK_50 system account id.
 pub fn clock_account_id() -> AccountId {
     AccountId::new(crate::rln::CLOCK_50_ACCOUNT_ID_BYTES)
 }

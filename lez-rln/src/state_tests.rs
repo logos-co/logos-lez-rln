@@ -118,7 +118,7 @@ mod tests {
     fn valid_id_commitment(seed: u8) -> [u8; 32] {
         let mut out = [0u8; 32];
         out[0] = seed;
-        out[1] = 0x42; // filler byte for variety
+        out[1] = 0x42;
         out
     }
 
@@ -1007,8 +1007,7 @@ mod tests {
         state_with_initialized_registration_config(DEFAULT_MAX_TOTAL_RATE_LIMIT)
     }
 
-    /// Same as `state_with_initialized_registration_config` but lets the caller
-    /// choose the `Initialize` durations.
+    /// Same as `state_with_initialized_registration_config` with caller-chosen durations.
     #[allow(dead_code)]
     fn state_with_initialized_registration_durations(
         max_total_rate_limit: u64,
