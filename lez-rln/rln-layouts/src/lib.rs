@@ -101,71 +101,34 @@ pub fn is_expired(grace_start: u64, grace_duration: u32, now: u64) -> bool {
 // Helper Types for Unaligned Integer Access
 // ============================================================================
 
-/// Little-endian u64 stored as bytes (for unaligned access in packed structs).
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
-pub struct U64Le(pub [u8; 8]);
+macro_rules! le_int {
+    ($name:ident, $int:ty, $n:expr) => {
+        #[repr(C, packed)]
+        #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+        pub struct $name(pub [u8; $n]);
 
-impl U64Le {
-    #[inline]
-    pub fn get(&self) -> u64 {
-        u64::from_le_bytes(self.0)
-    }
+        impl $name {
+            #[inline]
+            pub fn get(&self) -> $int {
+                <$int>::from_le_bytes(self.0)
+            }
 
-    #[inline]
-    pub fn set(&mut self, value: u64) {
-        self.0 = value.to_le_bytes();
-    }
+            #[inline]
+            pub fn set(&mut self, value: $int) {
+                self.0 = value.to_le_bytes();
+            }
 
-    #[inline]
-    pub fn new(value: u64) -> Self {
-        Self(value.to_le_bytes())
-    }
+            #[inline]
+            pub fn new(value: $int) -> Self {
+                Self(value.to_le_bytes())
+            }
+        }
+    };
 }
 
-/// Little-endian u32 stored as bytes (for unaligned access in packed structs).
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
-pub struct U32Le(pub [u8; 4]);
-
-impl U32Le {
-    #[inline]
-    pub fn get(&self) -> u32 {
-        u32::from_le_bytes(self.0)
-    }
-
-    #[inline]
-    pub fn set(&mut self, value: u32) {
-        self.0 = value.to_le_bytes();
-    }
-
-    #[inline]
-    pub fn new(value: u32) -> Self {
-        Self(value.to_le_bytes())
-    }
-}
-
-/// Little-endian u128 stored as bytes (for unaligned access in packed structs).
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
-pub struct U128Le(pub [u8; 16]);
-
-impl U128Le {
-    #[inline]
-    pub fn get(&self) -> u128 {
-        u128::from_le_bytes(self.0)
-    }
-
-    #[inline]
-    pub fn set(&mut self, value: u128) {
-        self.0 = value.to_le_bytes();
-    }
-
-    #[inline]
-    pub fn new(value: u128) -> Self {
-        Self(value.to_le_bytes())
-    }
-}
+le_int!(U32Le, u32, 4);
+le_int!(U64Le, u64, 8);
+le_int!(U128Le, u128, 16);
 
 // ============================================================================
 // Account Layouts
