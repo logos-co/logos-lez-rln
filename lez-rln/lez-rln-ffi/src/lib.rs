@@ -557,32 +557,27 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
 /// Returns a borsh-serialized instruction payload that can be used
 /// to construct the transaction message.
 ///
-/// `registration_program_id_ptr`: 32-byte registration program ID
 /// `id_commitment_ptr`: 32-byte id_commitment
 /// `rate_limit`: the user's rate limit
 /// `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
 /// Caller must free with `rln_ffi_free_string`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_build_instruction(
-    registration_program_id_ptr: *const u8,
     id_commitment_ptr: *const u8,
     rate_limit: u64,
     out_data_ptr: *mut *mut u8,
     out_data_len: *mut usize,
 ) -> Error {
-    if registration_program_id_ptr.is_null()
-        || id_commitment_ptr.is_null()
+    if id_commitment_ptr.is_null()
         || out_data_ptr.is_null()
         || out_data_len.is_null()
     {
         return Error::NullPointer;
     }
 
-    let registration_program_id = unsafe { &*(registration_program_id_ptr as *const [u8; 32]) };
     let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
     let instruction = rln_layouts::Instruction::Register {
-        registration_program_id: *registration_program_id,
         id_commitment: *id_commitment,
         rate_limit,
     };

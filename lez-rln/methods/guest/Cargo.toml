@@ -11,8 +11,10 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
-token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+clock_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
 rln-layouts = { path = "../../rln-layouts", default-features = false }

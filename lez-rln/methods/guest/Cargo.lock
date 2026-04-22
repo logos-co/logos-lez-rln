@@ -536,6 +536,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clock_core"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
+dependencies = [
+ "borsh",
+ "nssa_core",
+]
+
+[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1567,7 +1576,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 name = "logos_lez_rln_guest"
 version = "0.1.0"
 dependencies = [
+ "borsh",
  "bytemuck",
+ "clock_core",
  "nssa_core",
  "risc0-zkvm",
  "rln-layouts",
@@ -1654,7 +1665,7 @@ checksum = "a5b0c77c1b780822bc749a33e39aeb2c07584ab93332303babeabb645298a76e"
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "base58",
  "borsh",
@@ -2950,7 +2961,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "token_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "borsh",
  "nssa_core",

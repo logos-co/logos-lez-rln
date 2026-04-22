@@ -29,6 +29,17 @@ pub const PRICE_PER_UNIT: u128 = 10_000;
 pub const TOKEN_SUPPLY: u128 = 1_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
+/// Default active-period duration for new memberships (30 days in seconds).
+pub const DEFAULT_ACTIVE_DURATION_SECS: u32 = 30 * 24 * 60 * 60;
+
+/// Default grace-period duration for new memberships (7 days in seconds).
+pub const DEFAULT_GRACE_PERIOD_DURATION_SECS: u32 = 7 * 24 * 60 * 60;
+
+/// Public `AccountId` of the CLOCK_50 system account (read-only timestamp).
+pub fn clock_account_id() -> AccountId {
+    AccountId::new(crate::rln::CLOCK_50_ACCOUNT_ID_BYTES)
+}
+
 pub const REGISTRATION_BINARY: &str = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
 pub const MERKLE_TREE_BINARY: &str =
     "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
@@ -398,7 +409,6 @@ pub async fn run_setup(
 
     println!("Setup Step 5: Initializing registration program...");
     let instruction = Instruction::Initialize {
-        registration_program_id: bytemuck::cast(registration_program.id()),
         merkle_program_id: bytemuck::cast(merkle_program.id()),
         tree_id: *tree_id,
         payment_token_id: *token_definition_id.value(),
@@ -406,6 +416,8 @@ pub async fn run_setup(
         treasury_account_id: *treasury_id.value(),
         token_program_id: bytemuck::cast(Program::token().id()),
         max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
+        active_duration_for_new_memberships: DEFAULT_ACTIVE_DURATION_SECS,
+        grace_period_duration_for_new_memberships: DEFAULT_GRACE_PERIOD_DURATION_SECS,
     };
 
     let message = Message::try_new(registration_program.id(), vec![], vec![], instruction)
@@ -531,6 +543,7 @@ pub async fn register_identity(
         user_holding_id.clone(),
         treasury_account_id,
         subtree_account,
+        clock_account_id(),
     ];
 
     let signing_key = wallet_core
@@ -548,7 +561,6 @@ pub async fn register_identity(
     };
 
     let instruction = Instruction::Register {
-        registration_program_id: bytemuck::cast(registration_program.id()),
         id_commitment: *id_commitment,
         rate_limit,
     };
@@ -566,4 +578,113 @@ pub async fn register_identity(
         .expect("Failed to register identity");
 
     next_index
+}
+
+/// Extend a membership that is currently inside its grace period. The
+/// `user_holding_id` must match the `holder_account_id` stored on the
+/// membership at registration time.
+pub async fn extend_membership(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 24],
+    id_commitment: &[u8; 32],
+    user_holding_id: &AccountId,
+) {
+    let config_account = derive_config_account(&registration_program.id(), tree_id);
+    let membership_account = crate::rln::derive_membership_account(
+        &registration_program.id(),
+        tree_id,
+        id_commitment,
+    );
+
+    let accounts = vec![
+        config_account,
+        membership_account,
+        clock_account_id(),
+        user_holding_id.clone(),
+    ];
+
+    let signing_key = wallet_core
+        .storage()
+        .user_data
+        .get_pub_account_signing_key(user_holding_id.clone())
+        .expect("User holding account not found in wallet");
+
+    let nonces = wallet_core
+        .get_accounts_nonces(vec![*user_holding_id])
+        .await
+        .expect("Failed to fetch account nonces");
+
+    let instruction = Instruction::Extend { id_commitment: *id_commitment };
+
+    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
+        .expect("Failed to create extend message");
+
+    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
+    let tx = PublicTransaction::new(message, witness_set);
+
+    wallet_core
+        .sequencer_client
+        .send_transaction(NSSATransaction::Public(tx))
+        .await
+        .expect("Failed to extend membership");
+}
+
+/// Erase a membership. Pass `holder_holding_id = None` to erase an expired
+/// membership (anyone may do this); pass `Some(account_id)` matching the
+/// stored `holder_account_id` to erase during the grace period.
+pub async fn erase_membership(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 24],
+    id_commitment: &[u8; 32],
+    leaf_index: u64,
+    holder_holding_id: Option<&AccountId>,
+    fee_payer_id: &AccountId,
+) {
+    let config_account = derive_config_account(&registration_program.id(), tree_id);
+    let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
+    let membership_account = crate::rln::derive_membership_account(
+        &registration_program.id(),
+        tree_id,
+        id_commitment,
+    );
+    let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
+    let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
+
+    let mut accounts = vec![
+        config_account,
+        tree_main_account,
+        membership_account,
+        subtree_account,
+        clock_account_id(),
+    ];
+    if let Some(holder) = holder_holding_id {
+        accounts.push(holder.clone());
+    }
+
+    let signing_key = wallet_core
+        .storage()
+        .user_data
+        .get_pub_account_signing_key(fee_payer_id.clone())
+        .expect("Fee payer account not found in wallet");
+
+    let nonces = wallet_core
+        .get_accounts_nonces(vec![*fee_payer_id])
+        .await
+        .expect("Failed to fetch account nonces");
+
+    let instruction = Instruction::Erase { id_commitment: *id_commitment };
+
+    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
+        .expect("Failed to create erase message");
+
+    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
+    let tx = PublicTransaction::new(message, witness_set);
+
+    wallet_core
+        .sequencer_client
+        .send_transaction(NSSATransaction::Public(tx))
+        .await
+        .expect("Failed to erase membership");
 }

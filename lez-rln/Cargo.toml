@@ -16,11 +16,12 @@ path = "src/lib.rs"
 
 [dependencies]
 # LSSA dependencies via git
-nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
-wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
-common = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7", features = ["client"] }
+nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+common = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62", features = ["client"] }
+clock_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
 
 # Shared layouts
 rln-layouts = { path = "rln-layouts" }
@@ -45,8 +46,8 @@ name = "register_member"
 path = "src/bin/register_member.rs"
 
 [dev-dependencies]
-nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7", features = ["test-utils"] }
-token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "fbdfd8f7" }
+nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62", features = ["test-utils"] }
+token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
 
 [workspace.dependencies]
 rln-layouts = { path = "rln-layouts", default-features = false }

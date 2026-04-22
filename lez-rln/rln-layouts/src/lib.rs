@@ -27,7 +27,6 @@ pub use sparse::{read_sparse_node, subtree_node_offset};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Instruction {
     Initialize {
-        registration_program_id: [u8; 32],
         merkle_program_id: [u8; 32],
         tree_id: [u8; 24],
         payment_token_id: [u8; 32],
@@ -35,9 +34,10 @@ pub enum Instruction {
         treasury_account_id: [u8; 32],
         token_program_id: [u8; 32],
         max_total_rate_limit: u64,
+        active_duration_for_new_memberships: u32,
+        grace_period_duration_for_new_memberships: u32,
     },
     Register {
-        registration_program_id: [u8; 32],
         id_commitment: [u8; 32],
         rate_limit: u64,
     },
@@ -45,12 +45,20 @@ pub enum Instruction {
         amount: u128,
     },
     RegisterWithCredits {
-        registration_program_id: [u8; 32],
         id_commitment: [u8; 32],
         amount_to_burn: u64,
     },
     Slash {
         identity_secret: [u8; 32],
+    },
+    /// Renew a membership during its grace period. Only the holder may call this.
+    Extend {
+        id_commitment: [u8; 32],
+    },
+    /// Remove a membership. Allowed when the membership is expired (any caller)
+    /// or in its grace period (holder only).
+    Erase {
+        id_commitment: [u8; 32],
     },
 }
 
@@ -63,6 +71,31 @@ pub const MIN_RATE_LIMIT: u64 = 100;
 
 /// Maximum allowed rate limit for registration.
 pub const MAX_RATE_LIMIT: u64 = 600;
+
+// ============================================================================
+// Clock Account
+// ============================================================================
+
+/// Raw bytes of the CLOCK_50 system account ID, updated by the sequencer every
+/// 50 blocks. This crate mirrors the constant instead of depending on
+/// `clock_core` to stay `no_std`-friendly for the host side.
+pub const CLOCK_50_ACCOUNT_ID_BYTES: [u8; 32] = *b"/LEZ/ClockProgramAccount/0000050";
+
+// ============================================================================
+// Expiration helpers
+// ============================================================================
+
+/// Returns true iff `now` falls inside `[grace_start, grace_start + grace_duration)`.
+#[inline]
+pub fn is_in_grace_period(grace_start: u64, grace_duration: u32, now: u64) -> bool {
+    grace_start <= now && now < grace_start.saturating_add(grace_duration as u64)
+}
+
+/// Returns true iff `now >= grace_start + grace_duration`.
+#[inline]
+pub fn is_expired(grace_start: u64, grace_duration: u32, now: u64) -> bool {
+    now >= grace_start.saturating_add(grace_duration as u64)
+}
 
 // ============================================================================
 // Helper Types for Unaligned Integer Access
@@ -86,6 +119,28 @@ impl U64Le {
 
     #[inline]
     pub fn new(value: u64) -> Self {
+        Self(value.to_le_bytes())
+    }
+}
+
+/// Little-endian u32 stored as bytes (for unaligned access in packed structs).
+#[repr(C, packed)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+pub struct U32Le(pub [u8; 4]);
+
+impl U32Le {
+    #[inline]
+    pub fn get(&self) -> u32 {
+        u32::from_le_bytes(self.0)
+    }
+
+    #[inline]
+    pub fn set(&mut self, value: u32) {
+        self.0 = value.to_le_bytes();
+    }
+
+    #[inline]
+    pub fn new(value: u32) -> Self {
         Self(value.to_le_bytes())
     }
 }
@@ -116,7 +171,7 @@ impl U128Le {
 // Account Layouts
 // ============================================================================
 
-/// Zero-copy layout for config account data (192 bytes).
+/// Zero-copy layout for config account data (200 bytes).
 ///
 /// ```text
 /// Offset  Size  Field
@@ -130,6 +185,8 @@ impl U128Le {
 /// 168     8     total_registrations (u64 le)
 /// 176     8     max_total_rate_limit (u64 le)
 /// 184     8     current_total_rate_limit (u64 le)
+/// 192     4     active_duration_for_new_memberships (u32 le, seconds)
+/// 196     4     grace_period_duration_for_new_memberships (u32 le, seconds)
 /// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -143,10 +200,12 @@ pub struct ConfigLayout {
     pub total_registrations: U64Le,
     pub max_total_rate_limit: U64Le,
     pub current_total_rate_limit: U64Le,
+    pub active_duration_for_new_memberships: U32Le,
+    pub grace_period_duration_for_new_memberships: U32Le,
 }
 
 impl ConfigLayout {
-    pub const SIZE: usize = 192;
+    pub const SIZE: usize = 200;
 
     #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
     #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }
@@ -159,11 +218,15 @@ impl ConfigLayout {
     #[inline] pub fn set_max_total_rate_limit(&mut self, v: u64) { self.max_total_rate_limit.set(v); }
     #[inline] pub fn current_total_rate_limit(&self) -> u64 { self.current_total_rate_limit.get() }
     #[inline] pub fn set_current_total_rate_limit(&mut self, v: u64) { self.current_total_rate_limit.set(v); }
+    #[inline] pub fn active_duration_for_new_memberships(&self) -> u32 { self.active_duration_for_new_memberships.get() }
+    #[inline] pub fn set_active_duration_for_new_memberships(&mut self, v: u32) { self.active_duration_for_new_memberships.set(v); }
+    #[inline] pub fn grace_period_duration_for_new_memberships(&self) -> u32 { self.grace_period_duration_for_new_memberships.get() }
+    #[inline] pub fn set_grace_period_duration_for_new_memberships(&mut self, v: u32) { self.grace_period_duration_for_new_memberships.set(v); }
 }
 
 const _: () = assert!(core::mem::size_of::<ConfigLayout>() == ConfigLayout::SIZE);
 
-/// Zero-copy layout for membership account data (48 bytes).
+/// Zero-copy layout for membership account data (96 bytes).
 ///
 /// ```text
 /// Offset  Size  Field
@@ -171,6 +234,10 @@ const _: () = assert!(core::mem::size_of::<ConfigLayout>() == ConfigLayout::SIZE
 /// 0       8     leaf_index (u64 le)
 /// 8       8     rate_limit (u64 le)
 /// 16      32    id_commitment
+/// 48      8     grace_period_start_timestamp (u64 le, unix seconds)
+/// 56      4     active_duration (u32 le, seconds; snapshot of global at registration)
+/// 60      4     grace_period_duration (u32 le, seconds; snapshot of global at registration)
+/// 64      32    holder_account_id (account authorized to extend / erase during grace)
 /// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -178,10 +245,14 @@ pub struct MembershipLayout {
     pub leaf_index: U64Le,
     pub rate_limit: U64Le,
     pub id_commitment: [u8; 32],
+    pub grace_period_start_timestamp: U64Le,
+    pub active_duration: U32Le,
+    pub grace_period_duration: U32Le,
+    pub holder_account_id: [u8; 32],
 }
 
 impl MembershipLayout {
-    pub const SIZE: usize = 48;
+    pub const SIZE: usize = 96;
 
     #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
     #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }
@@ -190,6 +261,12 @@ impl MembershipLayout {
     #[inline] pub fn set_leaf_index(&mut self, v: u64) { self.leaf_index.set(v); }
     #[inline] pub fn rate_limit(&self) -> u64 { self.rate_limit.get() }
     #[inline] pub fn set_rate_limit(&mut self, v: u64) { self.rate_limit.set(v); }
+    #[inline] pub fn grace_period_start_timestamp(&self) -> u64 { self.grace_period_start_timestamp.get() }
+    #[inline] pub fn set_grace_period_start_timestamp(&mut self, v: u64) { self.grace_period_start_timestamp.set(v); }
+    #[inline] pub fn active_duration(&self) -> u32 { self.active_duration.get() }
+    #[inline] pub fn set_active_duration(&mut self, v: u32) { self.active_duration.set(v); }
+    #[inline] pub fn grace_period_duration(&self) -> u32 { self.grace_period_duration.get() }
+    #[inline] pub fn set_grace_period_duration(&mut self, v: u32) { self.grace_period_duration.set(v); }
 }
 
 const _: () = assert!(core::mem::size_of::<MembershipLayout>() == MembershipLayout::SIZE);
