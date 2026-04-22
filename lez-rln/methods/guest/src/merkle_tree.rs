@@ -26,73 +26,15 @@
 //! ensures only the owning program (via tail call with PDA seeds) can modify
 //! the tree.
 
-use crate::hash::{ZERO, compute_default_hashes, hash_pair};
+use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::{AccountPostState, Claim, PdaSeed};
 pub use rln_layouts::{
     TREE_DEPTH, TOP_DEPTH, BOTTOM_DEPTH, SUBTREE_LEAVES,
     OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE,
     OFFSET_CACHED_NODES, OFFSET_TOP_TREE_DATA,
+    read_sparse_node, subtree_node_offset,
 };
-
-// ============================================================================
-// Sparse Node Storage
-// ============================================================================
-
-/// Compute the BFS offset for a node at (level, index_within_level).
-/// Used as the key in sparse node storage.
-#[inline]
-fn subtree_node_offset(level: usize, index: usize) -> usize {
-    ((1 << level) - 1) + index
-}
-
-/// Read a 32-byte hash from sparse tree node storage.
-///
-/// Format: `[count(u16le), entries...]` where each entry is `[offset(u16le), hash(32)]`.
-/// Entries are sorted by offset for binary search. Returns cached_default if not found.
-fn read_sparse_node(
-    data: &[u8],
-    level: usize,
-    index: usize,
-    cached_default: &[u8; 32],
-) -> [u8; 32] {
-    if data.len() < 2 {
-        return *cached_default;
-    }
-    let count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
-    if count == 0 {
-        return *cached_default;
-    }
-    let target = subtree_node_offset(level, index) as u16;
-
-    // Binary search
-    let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let entry_start = 2 + mid * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
-        if entry_offset < target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-
-    if lo < count {
-        let entry_start = 2 + lo * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
-        if entry_offset == target {
-            return data[entry_start + 2..entry_start + 34].try_into().unwrap();
-        }
-    }
-
-    *cached_default
-}
 
 /// Write a 32-byte hash into sparse tree node storage.
 ///
@@ -225,6 +167,7 @@ pub fn insert_leaf(
     );
     let expected_index = u64::from_le_bytes(instruction[0..8].try_into().unwrap());
     let leaf_value: [u8; 32] = instruction[8..40].try_into().unwrap();
+    validate_field_element(&leaf_value);
 
     let main_data = main_account.account.data.as_ref();
     let depth = main_data[OFFSET_DEPTH] as usize;
@@ -304,6 +247,7 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
     );
     let leaf_index = u64::from_le_bytes(instruction[0..8].try_into().unwrap());
     let leaf_value: [u8; 32] = instruction[8..40].try_into().unwrap();
+    validate_field_element(&leaf_value);
 
     let main_data = main_account.account.data.as_ref();
     let depth = main_data[OFFSET_DEPTH] as usize;
@@ -1083,7 +1027,7 @@ mod tests {
     #[test]
     fn test_same_insertions_produce_same_root() {
         let run_insertions = || {
-            let leaf = [123u8; 32];
+            let leaf = [1u8; 32];
             let (pre_states, instruction) = build_insert_first_leaf_data(
                 AccountForTests::main_initialized(),
                 AccountForTests::subtree_empty(),
@@ -1236,7 +1180,7 @@ mod tests {
 
         let mut instruction = Vec::with_capacity(40);
         instruction.extend_from_slice(&last_index.to_le_bytes());
-        let leaf = [0xFFu8; 32];
+        let leaf = [1u8; 32];
         instruction.extend_from_slice(&leaf);
 
         let post_states = insert_leaf(vec![main_account, subtree_account], &instruction);
@@ -1286,7 +1230,7 @@ mod tests {
         // Insert
         let mut insert_instr = Vec::with_capacity(40);
         insert_instr.extend_from_slice(&last_index.to_le_bytes());
-        insert_instr.extend_from_slice(&[0xFFu8; 32]);
+        insert_instr.extend_from_slice(&[1u8; 32]);
 
         let post_insert = insert_leaf(
             vec![main_account, subtree_account],

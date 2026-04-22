@@ -1,22 +1,16 @@
-//! End-to-end RLN proof demonstration.
-//!
-//! Requires setup to have been run first (`cargo run --bin run_setup`).
-//! Each run creates a new identity, registers it, and generates + verifies an RLN proof.
-//!
-//! ```bash
-//! source dev/env.sh && cargo run --bin run_rln_proof
-//! ```
+//! End-to-end RLN proof demo. Requires `run_setup` to have been run first.
+
 use logos_lez_rln::merkle_tree::{
     TREE_DEPTH, get_merkle_proof, proof_to_fr, wait_for_leaf,
 };
 use logos_lez_rln::rln::client::{
-    TREE_ID, init_wallet, load_programs, create_funded_user, register_identity,
+    RlnIdentity, TREE_ID, create_funded_user, create_identity, init_wallet, load_programs,
+    register_identity,
 };
 use rln::hashers::poseidon_hash;
-use rln::prelude::{hash_to_field_le, seeded_keygen, Fr, RLNWitnessInput, RLN};
-use rln::utils::{fr_to_bytes_le, IdSecret};
+use rln::prelude::{hash_to_field_le, Fr, RLNWitnessInput, RLN};
+use rln::utils::fr_to_bytes_le;
 use std::time::Duration;
-use wallet::WalletCore;
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -39,7 +33,7 @@ async fn main() {
 
     // Step 1: Create identity using zerokit
     println!("Step 1: Creating identity...");
-    let (identity_secret, _id_commitment, id_commitment_bytes, leaf_bytes) =
+    let RlnIdentity { identity_secret, id_commitment_bytes, leaf_bytes, .. } =
         create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
     println!("  Identity commitment: {}", hex::encode(&id_commitment_bytes));
 
@@ -63,7 +57,7 @@ async fn main() {
         &tree_id,
         leaf_index,
         &leaf_bytes,
-        30,
+        90,
         Duration::from_millis(500),
     ).await;
     if !finalized {
@@ -132,37 +126,4 @@ async fn main() {
     if !is_valid {
         panic!("RLN proof verification failed!");
     }
-}
-
-/// Create a new RLN identity and compute the rate commitment (leaf value).
-async fn create_identity(
-    wallet_core: &mut WalletCore,
-    user_message_limit: u64,
-) -> (IdSecret, Fr, [u8; 32], [u8; 32]) {
-    let (account_id, chain_index) = wallet_core.create_new_account_public(None);
-    println!("  Created account: {} at path {}", account_id, chain_index);
-    wallet_core
-        .store_persistent_data()
-        .await
-        .expect("Failed to store wallet");
-
-    let signing_key = wallet_core
-        .storage()
-        .user_data
-        .get_pub_account_signing_key(account_id.clone())
-        .expect("Account should be self-owned public");
-
-    let seed = signing_key.value();
-    let (mut identity_secret_fr, id_commitment) =
-        seeded_keygen(seed).expect("seeded_keygen should succeed");
-
-    let identity_secret = IdSecret::from(&mut identity_secret_fr);
-    let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment).try_into().unwrap();
-
-    let user_message_limit_fr = Fr::from(user_message_limit);
-    let rate_commitment = poseidon_hash(&[id_commitment, user_message_limit_fr])
-        .expect("Failed to compute rate commitment");
-    let leaf_bytes: [u8; 32] = fr_to_bytes_le(&rate_commitment).try_into().unwrap();
-
-    (identity_secret, id_commitment, id_commitment_bytes, leaf_bytes)
 }

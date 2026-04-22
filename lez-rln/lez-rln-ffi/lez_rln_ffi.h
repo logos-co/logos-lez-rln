@@ -73,30 +73,11 @@ enum RlnFfiError rln_ffi_get_valid_roots(const uint8_t *data_ptr,
                                          uint32_t *out_count);
 
 /**
- * Deprecated: superseded by `rln_ffi_merkle_proofs_plan` which handles config parsing internally.
- * Extract merkle_program_id (32 bytes) and tree_id (24 bytes) from config account data.
- */
-enum RlnFfiError rln_ffi_parse_config(const uint8_t *data_ptr,
-                                      uintptr_t data_len,
-                                      uint8_t *out_merkle_program_id,
-                                      uint8_t *out_tree_id);
-
-/**
- * Deprecated: superseded by `rln_ffi_merkle_proofs_plan` which derives accounts internally.
- * WARNING: the first parameter should be the registration program ID (the config account's
- * `program_owner`), NOT the merkle_program_id from config data. Tree accounts are PDAs of
- * the registration program.
- */
-enum RlnFfiError rln_ffi_derive_main_account_id(const uint8_t *registration_program_id,
-                                                const uint8_t *tree_id,
-                                                uint8_t *out_account_id);
-
-/**
  * Build a merkle proof for a single leaf given pre-fetched main + subtree data.
  *
  * `main_data`/`main_len`: raw bytes of the tree main account.
  * `subtree_data`/`subtree_len`: raw bytes of the subtree account for this leaf.
- *   (subtree_id = leaf_index / 1024)
+ *   (subtree_id = leaf_index / SUBTREE_LEAVES)
  * `leaf_index`: the leaf position in the tree.
  * `out_proof`: pointer to caller-allocated `RlnMerkleProof`.
  */
@@ -173,13 +154,9 @@ enum RlnFfiError rln_ffi_compute_rate_commitment(const uint8_t *id_commitment_pt
 /**
  * Plan a registration transaction by deriving all required account IDs.
  *
- * Given config account data, tree main account data, and the registration program ID,
- * computes which accounts are needed for the registration transaction.
- *
- * `config_data_ptr`/`config_data_len`: raw bytes of config account
- * `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account
+ * `config_data_ptr`/`config_data_len`: raw bytes of config account (tree_id is read from here)
+ * `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account (for next_leaf_index)
  * `program_owner_ptr`: 32-byte registration program ID
- * `tree_id_ptr`: 24-byte tree ID
  * `out_plan`: pointer to caller-allocated RlnRegisterPlan
  */
 enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
@@ -187,7 +164,6 @@ enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
                                        const uint8_t *tree_main_data_ptr,
                                        uintptr_t tree_main_data_len,
                                        const uint8_t *program_owner_ptr,
-                                       const uint8_t *tree_id_ptr,
                                        struct RlnFfiRlnRegisterPlan *out_plan);
 
 /**

@@ -2,6 +2,7 @@ use rln_layouts::{
     ConfigLayout, TreeMainLayout, ROOT_HISTORY_SIZE,
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA,
     TOP_DEPTH, TREE_DEPTH, SUBTREE_LEAVES,
+    read_sparse_node,
 };
 use serde::Serialize;
 use sha2::{Sha256, Digest};
@@ -62,48 +63,6 @@ fn derive_pda(program_id: &[u8; 32], pda_seed: &[u8; 32]) -> [u8; 32] {
 }
 
 
-fn subtree_node_offset(level: usize, index: usize) -> usize {
-    ((1 << level) - 1) + index
-}
-
-fn read_sparse_node(data: &[u8], level: usize, index: usize, cached_default: &[u8; 32]) -> [u8; 32] {
-    if data.len() < 2 {
-        return *cached_default;
-    }
-    let count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
-    if count == 0 {
-        return *cached_default;
-    }
-    let target = subtree_node_offset(level, index) as u16;
-
-    let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let entry_start = 2 + mid * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
-        if entry_offset < target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-
-    if lo < count {
-        let entry_start = 2 + lo * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
-        if entry_offset == target {
-            return data[entry_start + 2..entry_start + 34].try_into().unwrap();
-        }
-    }
-
-    *cached_default
-}
-
 /// Parse tree-main account data and write valid roots into `out_roots`.
 ///
 /// `out_roots`: caller buffer, at least 160 bytes (5 x 32).
@@ -141,60 +100,6 @@ pub unsafe extern "C" fn rln_ffi_get_valid_roots(
     }
 
     unsafe { *out_count = count };
-    Error::Success
-}
-
-/// Deprecated: superseded by `rln_ffi_merkle_proofs_plan` which handles config parsing internally.
-/// Extract merkle_program_id (32 bytes) and tree_id (24 bytes) from config account data.
-#[deprecated(note = "Use rln_ffi_merkle_proofs_plan instead")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rln_ffi_parse_config(
-    data_ptr: *const u8,
-    data_len: usize,
-    out_merkle_program_id: *mut u8,
-    out_tree_id: *mut u8,
-) -> Error {
-    if data_ptr.is_null() || out_merkle_program_id.is_null() || out_tree_id.is_null() {
-        return Error::NullPointer;
-    }
-    if data_len < ConfigLayout::SIZE {
-        return Error::InvalidConfig;
-    }
-
-    let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
-    let config = ConfigLayout::parse(data);
-
-    let out_prog = unsafe { core::slice::from_raw_parts_mut(out_merkle_program_id, 32) };
-    out_prog.copy_from_slice(&config.merkle_program_id);
-
-    let out_tid = unsafe { core::slice::from_raw_parts_mut(out_tree_id, 24) };
-    out_tid.copy_from_slice(&config.tree_id);
-
-    Error::Success
-}
-
-/// Deprecated: superseded by `rln_ffi_merkle_proofs_plan` which derives accounts internally.
-/// WARNING: the first parameter should be the registration program ID (the config account's
-/// `program_owner`), NOT the merkle_program_id from config data. Tree accounts are PDAs of
-/// the registration program.
-#[deprecated(note = "Use rln_ffi_merkle_proofs_plan instead")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rln_ffi_derive_main_account_id(
-    registration_program_id: *const u8,
-    tree_id: *const u8,
-    out_account_id: *mut u8,
-) -> Error {
-    if registration_program_id.is_null() || tree_id.is_null() || out_account_id.is_null() {
-        return Error::NullPointer;
-    }
-
-    let prog = unsafe { &*(registration_program_id as *const [u8; 32]) };
-    let tid = unsafe { &*(tree_id as *const [u8; 24]) };
-    let seed = rln_layouts::main_seed(tid);
-    let account_id = derive_pda(prog, &seed);
-
-    let out = unsafe { core::slice::from_raw_parts_mut(out_account_id, 32) };
-    out.copy_from_slice(&account_id);
     Error::Success
 }
 
@@ -282,7 +187,7 @@ fn build_merkle_proof_inner(
 ///
 /// `main_data`/`main_len`: raw bytes of the tree main account.
 /// `subtree_data`/`subtree_len`: raw bytes of the subtree account for this leaf.
-///   (subtree_id = leaf_index / 1024)
+///   (subtree_id = leaf_index / SUBTREE_LEAVES)
 /// `leaf_index`: the leaf position in the tree.
 /// `out_proof`: pointer to caller-allocated `RlnMerkleProof`.
 #[unsafe(no_mangle)]
@@ -324,9 +229,10 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     leaf_indices_count: usize,
     out_plan: *mut MerkleProofsPlan,
 ) -> Error {
-    if config_data_ptr.is_null() || program_owner_ptr.is_null()
-        || leaf_indices_ptr.is_null() || out_plan.is_null()
-    {
+    if config_data_ptr.is_null() || program_owner_ptr.is_null() || out_plan.is_null() {
+        return Error::NullPointer;
+    }
+    if leaf_indices_count > 0 && leaf_indices_ptr.is_null() {
         return Error::NullPointer;
     }
     if config_data_len < ConfigLayout::SIZE {
@@ -336,16 +242,19 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
     let config = ConfigLayout::parse(config_data);
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
-    let leaf_indices = unsafe { core::slice::from_raw_parts(leaf_indices_ptr, leaf_indices_count) };
+    let leaf_indices: &[u64] = if leaf_indices_count == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(leaf_indices_ptr, leaf_indices_count) }
+    };
 
-    // Derive main account ID using the registration program (program_owner), not merkle_program_id
+    // Tree accounts are PDAs of the registration program (program_owner), not of the merkle program.
     let main_seed = rln_layouts::main_seed(&config.tree_id);
     let main_account_id = derive_pda(program_owner, &main_seed);
 
-    // Collect unique subtree IDs
     let mut unique_ids: Vec<u32> = leaf_indices
         .iter()
-        .map(|&idx| (idx / 1024) as u32)
+        .map(|&idx| (idx / SUBTREE_LEAVES as u64) as u32)
         .collect();
     unique_ids.sort_unstable();
     unique_ids.dedup();
@@ -354,7 +263,6 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
         return Error::InvalidLeafIndex;
     }
 
-    // Derive subtree account IDs (also PDAs of the registration program)
     let plan = unsafe { &mut *out_plan };
     plan.main_account_id = main_account_id;
     plan.subtree_count = unique_ids.len() as u32;
@@ -413,13 +321,11 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_exec(
         &[]
     };
 
-    // Build a proof for each leaf index using the existing build logic
     let mut proofs = Vec::with_capacity(leaf_indices.len());
 
     for &leaf_index in leaf_indices {
-        let subtree_id = (leaf_index / 1024) as u32;
+        let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
 
-        // Find matching subtree data
         let subtree_data: &[u8] = subtrees
             .iter()
             .find(|s| s.subtree_id == subtree_id)
@@ -588,13 +494,9 @@ pub unsafe extern "C" fn rln_ffi_compute_rate_commitment(
 
 /// Plan a registration transaction by deriving all required account IDs.
 ///
-/// Given config account data, tree main account data, and the registration program ID,
-/// computes which accounts are needed for the registration transaction.
-///
-/// `config_data_ptr`/`config_data_len`: raw bytes of config account
-/// `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account
+/// `config_data_ptr`/`config_data_len`: raw bytes of config account (tree_id is read from here)
+/// `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account (for next_leaf_index)
 /// `program_owner_ptr`: 32-byte registration program ID
-/// `tree_id_ptr`: 24-byte tree ID
 /// `out_plan`: pointer to caller-allocated RlnRegisterPlan
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_plan(
@@ -603,13 +505,11 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     tree_main_data_ptr: *const u8,
     tree_main_data_len: usize,
     program_owner_ptr: *const u8,
-    tree_id_ptr: *const u8,
     out_plan: *mut RlnRegisterPlan,
 ) -> Error {
     if config_data_ptr.is_null()
         || tree_main_data_ptr.is_null()
         || program_owner_ptr.is_null()
-        || tree_id_ptr.is_null()
         || out_plan.is_null()
     {
         return Error::NullPointer;
@@ -624,12 +524,11 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
     let tree_main_data = unsafe { core::slice::from_raw_parts(tree_main_data_ptr, tree_main_data_len) };
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
-    let tree_id = unsafe { &*(tree_id_ptr as *const [u8; 24]) };
 
     let config = ConfigLayout::parse(config_data);
     let tree_main = TreeMainLayout::parse(tree_main_data);
+    let tree_id = &config.tree_id;
 
-    // Derive account IDs
     let config_seed = rln_layouts::config_seed(tree_id);
     let config_account_id = derive_pda(program_owner, &config_seed);
 
@@ -718,27 +617,22 @@ mod tests {
 
     #[test]
     fn plan_derives_correct_ids_with_program_owner() {
-        // Create a fake config: 192 bytes
+        // Tree PDAs derive from program_owner, not from the merkle_program_id embedded in config.
         let mut config_data = vec![0u8; ConfigLayout::SIZE];
-        // Fill merkle_program_id with pattern (NOT used for tree PDA derivation)
         for i in 0..32 {
             config_data[i] = (i + 1) as u8;
         }
-        // Fill tree_id with pattern
         for i in 0..24 {
             config_data[32 + i] = (i + 0x40) as u8;
         }
 
-        // Simulate the registration program ID (config account's program_owner)
         let program_owner: [u8; 32] = [0xAA; 32];
 
-        // Expected: derive_main using program_owner (NOT merkle_program_id)
         let tree_id: [u8; 24] = config_data[32..56].try_into().unwrap();
         let expected_main_seed = rln_layouts::main_seed(&tree_id);
         let expected_main_id = derive_pda(&program_owner, &expected_main_seed);
 
-        // New path: merkle_proofs_plan with program_owner
-        let leaf_indices: Vec<u64> = vec![0, 1, 1025]; // subtrees 0 and 1
+        let leaf_indices: Vec<u64> = vec![0, 1, 1025];
         let mut plan = MerkleProofsPlan {
             main_account_id: [0u8; 32],
             subtree_account_ids: [[0u8; 32]; MAX_SUBTREES_PER_CALL],
@@ -755,15 +649,12 @@ mod tests {
         };
         assert!(matches!(err, Error::Success));
 
-        // Main account should be derived from program_owner, not merkle_program_id
         assert_eq!(expected_main_id, plan.main_account_id);
 
-        // Check subtree IDs
         assert_eq!(plan.subtree_count, 2);
         assert_eq!(plan.subtree_ids[0], 0);
         assert_eq!(plan.subtree_ids[1], 1);
 
-        // Subtree accounts should also use program_owner
         for i in 0..plan.subtree_count as usize {
             let seed = rln_layouts::subtree_seed(&tree_id, plan.subtree_ids[i]);
             let expected = derive_pda(&program_owner, &seed);
