@@ -15,6 +15,7 @@
 
 use crate::hash::{hash_pair, validate_field_element};
 use crate::layouts;
+use nssa_core::Timestamp;
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::PdaSeed;
 
@@ -268,7 +269,7 @@ pub struct MembershipData {
     pub leaf_index: u64,
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],
-    pub grace_period_start_timestamp: u64,
+    pub grace_period_start_timestamp: Timestamp,
     pub active_duration: u32,
     pub grace_period_duration: u32,
     pub holder_account_id: [u8; 32],
@@ -313,7 +314,7 @@ pub fn create_membership_data(
     leaf_index: u64,
     rate_limit: u64,
     id_commitment: &[u8; 32],
-    grace_period_start_timestamp: u64,
+    grace_period_start_timestamp: Timestamp,
     active_duration: u32,
     grace_period_duration: u32,
     holder_account_id: &[u8; 32],
@@ -401,13 +402,13 @@ pub fn prepare_merkle_accounts(
 
 /// Decode a clock account's borsh-encoded `ClockAccountData` blob and return
 /// its unix timestamp field.
-pub fn parse_clock_timestamp(data: &[u8]) -> u64 {
+pub fn parse_clock_timestamp(data: &[u8]) -> Timestamp {
     clock_core::ClockAccountData::from_bytes(data).timestamp
 }
 
 /// Validate that `clock_account` is the expected CLOCK_50 system account and
 /// return its current unix timestamp.
-pub fn require_clock(clock_account: &AccountWithMetadata) -> u64 {
+pub fn require_clock(clock_account: &AccountWithMetadata) -> Timestamp {
     assert!(
         *clock_account.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
         "Wrong clock account provided"
