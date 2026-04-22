@@ -15,9 +15,10 @@
 
 use crate::hash::{hash_pair, validate_field_element};
 use crate::layouts;
+use crate::merkle_tree::SUBTREE_LEAVES;
 use nssa_core::Timestamp;
 use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::PdaSeed;
+use nssa_core::program::{ChainedCall, PdaSeed};
 
 // Re-export rate limit and expiration constants / helpers from shared crate
 pub use crate::layouts::{
@@ -394,6 +395,26 @@ pub fn prepare_merkle_accounts(
         derive_subtree_seed(tree_id, subtree_id),
     ];
     (merkle_accounts, pda_seeds)
+}
+
+/// Build the merkle `remove` chained call for a membership being torn down.
+/// Shared by the `slash` and `erase` flows.
+pub fn build_membership_remove_call(
+    config: &RegistrationConfig,
+    tree_main: &AccountWithMetadata,
+    bottom_subtree: &AccountWithMetadata,
+    leaf_index: u64,
+) -> ChainedCall {
+    let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
+    let (pre_states, pda_seeds) = prepare_merkle_accounts(
+        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    );
+    ChainedCall {
+        program_id: bytemuck::cast(config.merkle_program_id),
+        instruction_data: risc0_zkvm::serde::to_vec(&build_merkle_remove_instruction(leaf_index)).unwrap(),
+        pre_states,
+        pda_seeds,
+    }
 }
 
 // ============================================================================

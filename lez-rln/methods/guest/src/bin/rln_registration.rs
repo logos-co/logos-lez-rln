@@ -57,7 +57,8 @@ use logos_lez_rln_guest::registration::{
     create_membership_data, MembershipData,
     // Chained call helpers
     serialize_token_instruction, authorize,
-    build_merkle_insert_instruction, build_merkle_remove_instruction,
+    build_merkle_insert_instruction,
+    build_membership_remove_call,
     prepare_merkle_accounts,
     // Clock / expiration
     require_clock, is_in_grace_period, is_expired,
@@ -551,20 +552,9 @@ fn slash(
     let membership = MembershipData::from_data(membership_bytes);
     assert!(membership.id_commitment == id_commitment, "id_commitment mismatch - provided identity_secret doesn't match membership");
 
-    let subtree_id = (membership.leaf_index / SUBTREE_LEAVES as u64) as u32;
-
-    let (merkle_accounts, pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_remove_call(
+        &config, tree_main, bottom_subtree, membership.leaf_index,
     );
-
-    let merkle_instruction = build_merkle_remove_instruction(membership.leaf_index);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds,
-    };
 
     let mut membership_post = membership_account.account.clone();
     membership_post.data = vec![].try_into().unwrap();
@@ -729,20 +719,9 @@ fn erase(
         );
     }
 
-    let subtree_id = (membership.leaf_index / SUBTREE_LEAVES as u64) as u32;
-
-    let (merkle_accounts, pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_remove_call(
+        &config, tree_main, bottom_subtree, membership.leaf_index,
     );
-
-    let merkle_instruction = build_merkle_remove_instruction(membership.leaf_index);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds,
-    };
 
     let mut membership_post = membership_account.account.clone();
     membership_post.data = vec![].try_into().unwrap();
