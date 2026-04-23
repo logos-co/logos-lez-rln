@@ -4994,9 +4994,9 @@ dependencies = [
 
 [[package]]
 name = "rln"
-version = "1.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5211831f7e0f46e85450c118f0b0b3426538c9df1c285e790fa5cb71f22bfb5b"
+checksum = "927f89b31cd4a7e98c7311dc5ba93236d8adef8b455e69eadf1bc8d1f4ecb05b"
 dependencies = [
  "ark-bn254 0.5.0",
  "ark-ec 0.5.0",
@@ -5010,7 +5010,6 @@ dependencies = [
  "cfg-if",
  "num-bigint",
  "num-traits",
- "once_cell",
  "prost 0.14.3",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -7318,9 +7317,9 @@ dependencies = [
 
 [[package]]
 name = "zerokit_utils"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6278ed0a599eb0f8cf1d866206b78c55010b5f72aee6801d3ae9cca783a7899"
+checksum = "f6acb5f70fd3183429f9495e1df68281db875b8eb4a54bce01cb0569e9b4e0c5"
 dependencies = [
  "ark-ff 0.5.0",
  "num-bigint",

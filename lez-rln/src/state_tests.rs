@@ -1186,7 +1186,7 @@ mod tests {
         use rln::utils::{bytes_le_to_fr, fr_to_bytes_le};
 
         let (secret_fr, _) = bytes_le_to_fr(identity_secret).expect("Invalid identity_secret");
-        let hash_fr = poseidon_hash(&[secret_fr]).expect("Poseidon hash failed");
+        let hash_fr = poseidon_hash(&[secret_fr]);
         fr_to_bytes_le(&hash_fr).try_into().unwrap()
     }
 
@@ -2266,7 +2266,7 @@ mod tests {
     fn compute_rate_commitment(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] {
         let (id_fr, _) = bytes_le_to_fr(id_commitment).expect("Invalid id_commitment");
         let rate_fr = Fr::from(rate_limit);
-        let hash_fr = poseidon_hash(&[id_fr, rate_fr]).expect("Poseidon hash failed");
+        let hash_fr = poseidon_hash(&[id_fr, rate_fr]);
         fr_to_bytes_le(&hash_fr).try_into().unwrap()
     }
 
@@ -2383,7 +2383,7 @@ mod tests {
                 (sibling, current)
             };
 
-            current = poseidon_hash(&[left, right]).expect("Poseidon hash failed");
+            current = poseidon_hash(&[left, right]);
         }
 
         fr_to_bytes_le(&current).try_into().unwrap()
@@ -2430,7 +2430,7 @@ mod tests {
         // Create identity using zerokit's seeded_keygen (like run_rln_proof does)
         let seed = [0x42u8; 32]; // deterministic seed for testing
         let (mut identity_secret_fr, id_commitment_fr) =
-            seeded_keygen(&seed).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed);
         let identity_secret = IdSecret::from(&mut identity_secret_fr);
 
         let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
@@ -2464,13 +2464,12 @@ mod tests {
         let message_id = Fr::from(0u64);
 
         // Compute external nullifier = poseidon(epoch, rln_identifier)
-        let epoch_fr = hash_to_field_le(b"test-epoch").expect("Failed to hash epoch");
-        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test").expect("Failed to hash rln_identifier");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr])
-            .expect("Failed to compute external nullifier");
+        let epoch_fr = hash_to_field_le(b"test-epoch");
+        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
+        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
 
         // Compute signal hash (x) = hash of message
-        let x = hash_to_field_le(b"Hello, RLN!").expect("Failed to hash message");
+        let x = hash_to_field_le(b"Hello, RLN!");
 
         // Create RLN witness input
         let witness = RLNWitnessInput::new(
@@ -2492,7 +2491,7 @@ mod tests {
             .expect("Failed to generate RLN proof");
 
         // Verify proof values match
-        assert_eq!(proof_values.root, root, "Proof root should match on-chain root");
+        assert_eq!(*proof_values.root(), root, "Proof root should match on-chain root");
 
         // Verify the RLN proof with root check
         let is_valid = rln
@@ -2513,7 +2512,7 @@ mod tests {
         // Register first identity
         let seed1 = [0x01u8; 32];
         let (mut identity_secret_fr1, id_commitment_fr1) =
-            seeded_keygen(&seed1).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed1);
         let _identity_secret1 = IdSecret::from(&mut identity_secret_fr1);
         let id_commitment1: [u8; 32] = fr_to_bytes_le(&id_commitment_fr1).try_into().unwrap();
 
@@ -2526,7 +2525,7 @@ mod tests {
         // Register second identity (this is the one we'll prove)
         let seed2 = [0x02u8; 32];
         let (mut identity_secret_fr2, id_commitment_fr2) =
-            seeded_keygen(&seed2).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed2);
         let identity_secret2 = IdSecret::from(&mut identity_secret_fr2);
         let id_commitment2: [u8; 32] = fr_to_bytes_le(&id_commitment_fr2).try_into().unwrap();
         let rate_limit2 = 100u64;
@@ -2540,7 +2539,7 @@ mod tests {
         // Register third identity
         let seed3 = [0x03u8; 32];
         let (mut identity_secret_fr3, id_commitment_fr3) =
-            seeded_keygen(&seed3).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed3);
         let _identity_secret3 = IdSecret::from(&mut identity_secret_fr3);
         let id_commitment3: [u8; 32] = fr_to_bytes_le(&id_commitment_fr3).try_into().unwrap();
 
@@ -2569,10 +2568,10 @@ mod tests {
         // Create and verify RLN proof
         let user_message_limit = Fr::from(rate_limit2);
         let message_id = Fr::from(0u64);
-        let epoch_fr = hash_to_field_le(b"test-epoch-2").expect("Failed to hash epoch");
-        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test").expect("Failed to hash rln_identifier");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]).unwrap();
-        let x = hash_to_field_le(b"Another message").expect("Failed to hash message");
+        let epoch_fr = hash_to_field_le(b"test-epoch-2");
+        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
+        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let x = hash_to_field_le(b"Another message");
 
         let witness = RLNWitnessInput::new(
             identity_secret2,
@@ -2589,7 +2588,7 @@ mod tests {
             .generate_rln_proof(&witness)
             .expect("Failed to generate RLN proof");
 
-        assert_eq!(proof_values.root, root, "Proof root should match on-chain root");
+        assert_eq!(*proof_values.root(), root, "Proof root should match on-chain root");
 
         let is_valid = rln
             .verify_with_roots(&rln_proof, &proof_values, &x, &[root])
@@ -2657,7 +2656,7 @@ mod tests {
         // Create identity
         let seed = [0x99u8; 32];
         let (mut identity_secret_fr, id_commitment_fr) =
-            seeded_keygen(&seed).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed);
         let identity_secret = IdSecret::from(&mut identity_secret_fr);
         let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
         let rate_limit = 300u64;
@@ -2684,12 +2683,12 @@ mod tests {
         let user_message_limit = Fr::from(rate_limit);
         let message_id = Fr::from(0u64); // Same message_id for both
 
-        let epoch_fr = hash_to_field_le(b"epoch-1").expect("Failed to hash epoch");
-        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test").expect("Failed to hash rln_identifier");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]).unwrap();
+        let epoch_fr = hash_to_field_le(b"epoch-1");
+        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
+        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
 
         // First message
-        let x1 = hash_to_field_le(b"First message").expect("Failed to hash message");
+        let x1 = hash_to_field_le(b"First message");
         let witness1 = RLNWitnessInput::new(
             identity_secret.clone(),
             user_message_limit,
@@ -2701,7 +2700,7 @@ mod tests {
         ).expect("Failed to create witness 1");
 
         // Second message (different content, same message_id)
-        let x2 = hash_to_field_le(b"Second message").expect("Failed to hash message");
+        let x2 = hash_to_field_le(b"Second message");
         let witness2 = RLNWitnessInput::new(
             identity_secret,
             user_message_limit,
@@ -2726,7 +2725,7 @@ mod tests {
 
         // But they should have the SAME nullifier (since same identity, epoch, message_id)
         assert_eq!(
-            values1.nullifier, values2.nullifier,
+            values1.nullifier(), values2.nullifier(),
             "Same identity + epoch + message_id should produce same nullifier"
         );
 

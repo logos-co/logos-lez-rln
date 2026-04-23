@@ -55,7 +55,7 @@ pub fn membership_pda_seed(tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> [u8;
     let (commit_fr, _) = bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
-    let seed_fr = poseidon_hash(&[tree_fr, commit_fr]).expect("Poseidon hash failed");
+    let seed_fr = poseidon_hash(&[tree_fr, commit_fr]);
     fr_to_bytes_le(&seed_fr).try_into().unwrap()
 }
 

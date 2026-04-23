@@ -431,11 +431,7 @@ pub unsafe extern "C" fn rln_ffi_generate_identity(
 
     let seed = unsafe { &*(seed_ptr as *const [u8; 32]) };
 
-    let keygen_result = rln::prelude::seeded_keygen(seed);
-    let (mut identity_secret_fr, id_commitment_fr) = match keygen_result {
-        Ok(result) => result,
-        Err(_) => return Error::KeygenFailed,
-    };
+    let (mut identity_secret_fr, id_commitment_fr) = rln::prelude::seeded_keygen(seed);
 
     let id_commitment_bytes = rln::utils::fr_to_bytes_le(&id_commitment_fr);
     let id_secret_hash_bytes = rln::utils::fr_to_bytes_le(&identity_secret_fr);
@@ -479,10 +475,7 @@ pub unsafe extern "C" fn rln_ffi_compute_rate_commitment(
 
     let rate_limit_fr = rln::prelude::Fr::from(rate_limit);
 
-    let rate_commitment_fr = match rln::hashers::poseidon_hash(&[id_commitment_fr, rate_limit_fr]) {
-        Ok(hash) => hash,
-        Err(_) => return Error::HashFailed,
-    };
+    let rate_commitment_fr = rln::hashers::poseidon_hash(&[id_commitment_fr, rate_limit_fr]);
 
     let leaf_bytes = rln::utils::fr_to_bytes_le(&rate_commitment_fr);
 

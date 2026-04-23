@@ -76,13 +76,11 @@ async fn main() {
     let user_message_limit_fr = Fr::from(USER_MESSAGE_LIMIT);
     let message_id_fr = Fr::from(MESSAGE_ID);
 
-    let epoch_fr = hash_to_field_le(EPOCH.as_bytes()).expect("Failed to hash epoch");
-    let rln_identifier_fr = hash_to_field_le(RLN_IDENTIFIER.as_bytes())
-        .expect("Failed to hash rln_identifier");
-    let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr])
-        .expect("Failed to compute external nullifier");
+    let epoch_fr = hash_to_field_le(EPOCH.as_bytes());
+    let rln_identifier_fr = hash_to_field_le(RLN_IDENTIFIER.as_bytes());
+    let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
 
-    let x = hash_to_field_le(MESSAGE.as_bytes()).expect("Failed to hash message");
+    let x = hash_to_field_le(MESSAGE.as_bytes());
 
     let witness = RLNWitnessInput::new(
         identity_secret,
@@ -102,8 +100,8 @@ async fn main() {
         .expect("Failed to generate RLN proof");
 
     println!("  Proof generated successfully!");
-    println!("  Nullifier: {}", hex::encode(fr_to_bytes_le(&proof_values.nullifier)));
-    println!("  Root in proof: {}", hex::encode(fr_to_bytes_le(&proof_values.root)));
+    println!("  Nullifier: {}", hex::encode(fr_to_bytes_le(&proof_values.nullifier())));
+    println!("  Root in proof: {}", hex::encode(fr_to_bytes_le(&proof_values.root())));
 
     // Step 5: Verify the RLN proof
     println!("\nStep 5: Verifying RLN proof...");

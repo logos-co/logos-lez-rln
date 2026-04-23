@@ -198,7 +198,7 @@ pub async fn create_identity(
 
     let seed = signing_key.value();
     let (mut identity_secret_fr, id_commitment_fr) =
-        seeded_keygen(seed).expect("seeded_keygen should succeed");
+        seeded_keygen(seed);
 
     let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
     let id_secret_hash_hex: String = id_secret_hash_bytes
@@ -209,8 +209,7 @@ pub async fn create_identity(
     let identity_secret = IdSecret::from(&mut identity_secret_fr);
     let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
 
-    let rate_commitment = poseidon_hash(&[id_commitment_fr, Fr::from(user_message_limit)])
-        .expect("Failed to compute rate commitment");
+    let rate_commitment = poseidon_hash(&[id_commitment_fr, Fr::from(user_message_limit)]);
     let leaf_bytes: [u8; 32] = fr_to_bytes_le(&rate_commitment).try_into().unwrap();
 
     RlnIdentity {
@@ -511,6 +510,9 @@ pub async fn register_identity(
     rate_limit: u64,
     nonce_override: Option<nssa_core::account::Nonce>,
 ) -> u64 {
+    rln::utils::bytes_le_to_fr(id_commitment)
+        .expect("id_commitment is not a valid BN254 field element");
+
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
 
@@ -589,6 +591,9 @@ pub async fn extend_membership(
     id_commitment: &[u8; 32],
     fee_payer_id: &AccountId,
 ) {
+    rln::utils::bytes_le_to_fr(id_commitment)
+        .expect("id_commitment is not a valid BN254 field element");
+
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let membership_account = crate::rln::derive_membership_account(
         &registration_program.id(),
@@ -634,6 +639,9 @@ pub async fn erase_membership(
     leaf_index: u64,
     fee_payer_id: &AccountId,
 ) {
+    rln::utils::bytes_le_to_fr(id_commitment)
+        .expect("id_commitment is not a valid BN254 field element");
+
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
     let membership_account = crate::rln::derive_membership_account(
