@@ -39,8 +39,6 @@ pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP: usize =
 pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = offset_of!(MembershipLayout, active_duration);
 pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize =
     offset_of!(MembershipLayout, grace_period_duration);
-pub const MEMBERSHIP_OFFSET_HOLDER_ACCOUNT_ID: usize =
-    offset_of!(MembershipLayout, holder_account_id);
 pub const MEMBERSHIP_SIZE: usize = size_of::<MembershipLayout>();
 
 // ============================================================================

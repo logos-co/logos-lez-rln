@@ -129,19 +129,18 @@ fn main() {
             )
         }
         Instruction::Extend { id_commitment } => {
-            assert!(pre_states.len() == 4, "Extend requires exactly 4 accounts");
+            assert!(pre_states.len() == 3, "Extend requires exactly 3 accounts");
             extend(
                 self_program_id, id_commitment,
-                &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
+                &pre_states[0], &pre_states[1], &pre_states[2],
                 instruction_data,
             )
         }
         Instruction::Erase { id_commitment } => {
-            assert!(pre_states.len() >= 5 && pre_states.len() <= 6, "Erase requires 5 or 6 accounts");
+            assert!(pre_states.len() == 5, "Erase requires exactly 5 accounts");
             erase(
                 self_program_id, id_commitment,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3], &pre_states[4],
-                pre_states.get(5),
                 instruction_data,
             )
         }
@@ -289,8 +288,6 @@ fn register(
     let treasury_id: [u8; 32] = *treasury_holding.account_id.value();
     assert!(treasury_id == config.treasury_account_id, "Wrong treasury");
 
-    let holder_account_id: [u8; 32] = *user_holding.account_id.value();
-
     let token_program_id = user_holding.account.program_owner;
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
@@ -316,7 +313,6 @@ fn register(
         grace_period_start_timestamp,
         config.active_duration_for_new_memberships,
         config.grace_period_duration_for_new_memberships,
-        &holder_account_id,
     );
     let mut membership_post = membership.account.clone();
     membership_post.data = membership_data.try_into().unwrap();
@@ -451,8 +447,6 @@ fn register_with_credits(
     assert!(user_token == config.receipt_token_id, "Wrong token type");
     assert!(user_balance >= rate_limit as u128, "Insufficient receipt tokens");
 
-    let holder_account_id: [u8; 32] = *user_credit_holding.account_id.value();
-
     let token_program_id = user_credit_holding.account.program_owner;
 
     let burn_instruction = token_core::Instruction::Burn { amount_to_burn: rate_limit as u128 };
@@ -479,7 +473,6 @@ fn register_with_credits(
         grace_period_start_timestamp,
         config.active_duration_for_new_memberships,
         config.grace_period_duration_for_new_memberships,
-        &holder_account_id,
     );
     let mut membership_post = membership.account.clone();
     membership_post.data = membership_data.try_into().unwrap();
@@ -566,7 +559,6 @@ fn extend(
     config_account: &AccountWithMetadata,
     membership_account: &AccountWithMetadata,
     clock_account: &AccountWithMetadata,
-    holder_account: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
     validate_field_element(&id_commitment);
@@ -594,16 +586,6 @@ fn extend(
         "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
     );
 
-    let holder_id: [u8; 32] = *holder_account.account_id.value();
-    assert!(
-        holder_id == membership.holder_account_id,
-        "NonHolderCannotExtend: caller is not the holder"
-    );
-    assert!(
-        holder_account.is_authorized,
-        "NonHolderCannotExtend: holder account must be authorized"
-    );
-
     let new_grace_start = membership
         .grace_period_start_timestamp
         .saturating_add(membership.grace_period_duration as u64)
@@ -621,13 +603,11 @@ fn extend(
         config_account.clone(),
         membership_account.clone(),
         clock_account.clone(),
-        holder_account.clone(),
     ];
     let post_states = vec![
         AccountPostState::new(config_account.account.clone()),
         AccountPostState::new(membership_post),
         AccountPostState::new(clock_account.account.clone()),
-        AccountPostState::new(holder_account.account.clone()),
     ];
 
     ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
@@ -635,7 +615,7 @@ fn extend(
 }
 
 // ============================================================================
-// Erase
+// Erase — expired memberships only; any caller
 // ============================================================================
 
 fn erase(
@@ -646,7 +626,6 @@ fn erase(
     membership_account: &AccountWithMetadata,
     bottom_subtree: &AccountWithMetadata,
     clock_account: &AccountWithMetadata,
-    holder_account: Option<&AccountWithMetadata>,
     instruction_data: Vec<u32>,
 ) {
     validate_field_element(&id_commitment);
@@ -666,35 +645,14 @@ fn erase(
         "id_commitment mismatch - instruction does not match stored membership"
     );
 
-    let expired = is_expired(
-        membership.grace_period_start_timestamp,
-        membership.grace_period_duration,
-        now,
+    assert!(
+        is_expired(
+            membership.grace_period_start_timestamp,
+            membership.grace_period_duration,
+            now,
+        ),
+        "CannotEraseUnexpiredMembership: membership has not expired yet"
     );
-    let in_grace = is_in_grace_period(
-        membership.grace_period_start_timestamp,
-        membership.grace_period_duration,
-        now,
-    );
-
-    if !expired && !in_grace {
-        panic!("CannotEraseActiveMembership: membership is still in its active period");
-    }
-
-    if in_grace {
-        let holder = holder_account.expect(
-            "NonHolderCannotEraseGracePeriodMembership: holder account required during grace period",
-        );
-        let holder_id: [u8; 32] = *holder.account_id.value();
-        assert!(
-            holder_id == membership.holder_account_id,
-            "NonHolderCannotEraseGracePeriodMembership: caller is not the holder"
-        );
-        assert!(
-            holder.is_authorized,
-            "NonHolderCannotEraseGracePeriodMembership: holder account must be authorized"
-        );
-    }
 
     let merkle_call = build_membership_remove_call(
         &config, tree_main, bottom_subtree, membership.leaf_index,
@@ -707,24 +665,20 @@ fn erase(
     let mut config_post = config_account.account.clone();
     config_post.data = updated_config.to_bytes().try_into().unwrap();
 
-    let mut output_pre_states = vec![
+    let output_pre_states = vec![
         config_account.clone(),
         tree_main.clone(),
         membership_account.clone(),
         bottom_subtree.clone(),
         clock_account.clone(),
     ];
-    let mut post_states = vec![
+    let post_states = vec![
         AccountPostState::new(config_post),
         AccountPostState::new(tree_main.account.clone()),
         AccountPostState::new(membership_post),
         AccountPostState::new(bottom_subtree.account.clone()),
         AccountPostState::new(clock_account.account.clone()),
     ];
-    if let Some(holder) = holder_account {
-        output_pre_states.push(holder.clone());
-        post_states.push(AccountPostState::new(holder.account.clone()));
-    }
 
     ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
         .with_chained_calls(vec![merkle_call])

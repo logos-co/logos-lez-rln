@@ -58,7 +58,6 @@ mod tests {
         MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP,
         MEMBERSHIP_OFFSET_ACTIVE_DURATION,
         MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION,
-        MEMBERSHIP_OFFSET_HOLDER_ACCOUNT_ID,
         CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
         CLOCK_50_ACCOUNT_ID_BYTES,
         derive_tree_main_account, derive_subtree_account,
@@ -2923,19 +2922,6 @@ mod tests {
         )
     }
 
-    fn read_holder(
-        state: &V03State,
-        registration: &Program,
-        tree_id: &[u8; 24],
-        id_commitment: &[u8; 32],
-    ) -> [u8; 32] {
-        let data = read_membership(state, registration, tree_id, id_commitment)
-            .expect("membership must exist");
-        data[MEMBERSHIP_OFFSET_HOLDER_ACCOUNT_ID..MEMBERSHIP_OFFSET_HOLDER_ACCOUNT_ID + 32]
-            .try_into()
-            .unwrap()
-    }
-
     fn read_active_duration(
         state: &V03State,
         registration: &Program,
@@ -2975,9 +2961,6 @@ mod tests {
         setup: &TestSetup,
         tree_id: &[u8; 24],
         id_commitment: [u8; 32],
-        holder_id: &AccountId,
-        holder_key: &PrivateKey,
-        holder_nonce: Nonce,
     ) -> PublicTransaction {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
@@ -2986,23 +2969,14 @@ mod tests {
             config_id,
             membership_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
-            holder_id.clone(),
         ];
 
         let instruction = Instruction::Extend { id_commitment };
 
-        let message = Message::try_new(
-            setup.registration.id(),
-            account_ids,
-            vec![holder_nonce],
-            instruction,
-        )
-        .expect("valid message");
+        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
+            .expect("valid message");
 
-        PublicTransaction::new(
-            message.clone(),
-            WitnessSet::for_message(&message, &[holder_key]),
-        )
+        PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
     }
 
     fn build_erase_tx(
@@ -3010,7 +2984,6 @@ mod tests {
         tree_id: &[u8; 24],
         id_commitment: [u8; 32],
         leaf_index: u64,
-        holder: Option<(&AccountId, &PrivateKey, Nonce)>,
     ) -> PublicTransaction {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let tree_main_id = derive_tree_main_pda(setup.registration.id(), tree_id);
@@ -3018,30 +2991,20 @@ mod tests {
         let sid = subtree_id_for_index(leaf_index);
         let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
 
-        let mut account_ids = vec![
+        let account_ids = vec![
             config_id,
             tree_main_id,
             membership_id,
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
-        let mut nonces = vec![];
-        let mut signing_keys: Vec<&PrivateKey> = vec![];
-        if let Some((holder_id, holder_key, holder_nonce)) = holder {
-            account_ids.push(holder_id.clone());
-            nonces.push(holder_nonce);
-            signing_keys.push(holder_key);
-        }
 
         let instruction = Instruction::Erase { id_commitment };
 
-        let message = Message::try_new(setup.registration.id(), account_ids, nonces, instruction)
+        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
             .expect("valid message");
 
-        PublicTransaction::new(
-            message.clone(),
-            WitnessSet::for_message(&message, &signing_keys),
-        )
+        PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
     }
 
     // ========================================================================
@@ -3092,11 +3055,6 @@ mod tests {
             read_grace_duration(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
             DEFAULT_GRACE_PERIOD_DURATION,
         );
-        assert_eq!(
-            read_holder(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
-            *setup.user_payment_id.value(),
-            "holder_account_id must equal the user payment holding id",
-        );
     }
 
     #[test]
@@ -3111,14 +3069,7 @@ mod tests {
         let in_grace = grace_start + (DEFAULT_GRACE_PERIOD_DURATION as u64 / 2);
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        let extend_tx = build_extend_tx(
-            &setup,
-            &TREE_ID,
-            id_commitment,
-            &setup.user_payment_id.clone(),
-            &setup.user_payment_key,
-            Nonce(1),
-        );
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
         setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0)
@@ -3142,14 +3093,7 @@ mod tests {
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 10, 100);
 
-        let extend_tx = build_extend_tx(
-            &setup,
-            &TREE_ID,
-            id_commitment,
-            &setup.user_payment_id.clone(),
-            &setup.user_payment_key,
-            Nonce(1),
-        );
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
         let result = setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0);
@@ -3173,14 +3117,7 @@ mod tests {
             + DEFAULT_GRACE_PERIOD_DURATION as u64;
         set_clock_50(&mut setup.state, expiration + 1, 100);
 
-        let extend_tx = build_extend_tx(
-            &setup,
-            &TREE_ID,
-            id_commitment,
-            &setup.user_payment_id.clone(),
-            &setup.user_payment_key,
-            Nonce(1),
-        );
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
         let result = setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0);
@@ -3192,7 +3129,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extend_fails_for_non_holder() {
+    fn test_extend_by_any_caller_succeeds_in_grace() {
+        // Sanity: Extend carries no authorization — the builder signs with no keys.
+        // If this test fails, something is asserting caller identity.
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
@@ -3202,42 +3141,15 @@ mod tests {
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        // Create a stranger account with the same payment token type but a
-        // different AccountId from the original holder.
-        let (stranger_key, stranger_id) = create_test_keypair(42);
-        let stranger_holding = token_core::TokenHolding::Fungible {
-            definition_id: setup.payment_def_id.clone(),
-            balance: 1_000,
-        };
-        setup.state.force_insert_account(
-            stranger_id.clone(),
-            Account {
-                program_owner: Program::token().id(),
-                data: Data::from(&stranger_holding),
-                ..Account::default()
-            },
-        );
-
-        let extend_tx = build_extend_tx(
-            &setup,
-            &TREE_ID,
-            id_commitment,
-            &stranger_id,
-            &stranger_key,
-            Nonce(0),
-        );
-        let result = setup
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        setup
             .state
-            .transition_from_public_transaction(&extend_tx, 2, 0);
-        assert!(
-            result.is_err(),
-            "extend by non-holder must fail, got {:?}",
-            result
-        );
+            .transition_from_public_transaction(&extend_tx, 2, 0)
+            .expect("extend with no signer must succeed");
     }
 
     #[test]
-    fn test_erase_succeeds_when_expired_by_anyone() {
+    fn test_erase_succeeds_when_expired() {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
@@ -3249,11 +3161,11 @@ mod tests {
             + DEFAULT_GRACE_PERIOD_DURATION as u64;
         set_clock_50(&mut setup.state, expiration + 1, 100);
 
-        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0, None);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         setup
             .state
             .transition_from_public_transaction(&erase_tx, 2, 0)
-            .expect("erase of expired membership must succeed without auth");
+            .expect("erase of expired membership must succeed");
 
         assert!(
             read_membership(&setup.state, &setup.registration, &TREE_ID, &id_commitment)
@@ -3272,7 +3184,7 @@ mod tests {
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 1, 100);
 
-        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0, None);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         let result = setup
             .state
             .transition_from_public_transaction(&erase_tx, 2, 0);
@@ -3284,7 +3196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_erase_fails_in_grace_without_holder() {
+    fn test_erase_fails_in_grace_period() {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
@@ -3294,44 +3206,13 @@ mod tests {
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0, None);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         let result = setup
             .state
             .transition_from_public_transaction(&erase_tx, 2, 0);
         assert!(
             result.is_err(),
-            "erase during grace without holder must fail, got {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_erase_succeeds_in_grace_by_holder() {
-        let Some(mut setup) = setup_with_expiration() else { return };
-
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA9);
-        register_for_expiration_test(&mut setup, id_commitment);
-
-        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
-        set_clock_50(&mut setup.state, in_grace, 100);
-
-        let erase_tx = build_erase_tx(
-            &setup,
-            &TREE_ID,
-            id_commitment,
-            0,
-            Some((&setup.user_payment_id.clone(), &setup.user_payment_key, Nonce(1))),
-        );
-        setup
-            .state
-            .transition_from_public_transaction(&erase_tx, 2, 0)
-            .expect("holder erase during grace must succeed");
-
-        assert!(
-            read_membership(&setup.state, &setup.registration, &TREE_ID, &id_commitment)
-                .is_none(),
-            "membership data should be cleared",
+            "erase during grace period must fail (use extend, or wait until expired)"
         );
     }
 
@@ -3351,7 +3232,7 @@ mod tests {
             + DEFAULT_GRACE_PERIOD_DURATION as u64;
         set_clock_50(&mut setup.state, expiration + 1, 100);
 
-        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0, None);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         setup
             .state
             .transition_from_public_transaction(&erase_tx, 2, 0)

@@ -200,7 +200,6 @@ const _: () = assert!(core::mem::size_of::<ConfigLayout>() == ConfigLayout::SIZE
 /// 48      8     grace_period_start_timestamp (u64 le, unix seconds)
 /// 56      4     active_duration (u32 le, seconds; snapshot of global at registration)
 /// 60      4     grace_period_duration (u32 le, seconds; snapshot of global at registration)
-/// 64      32    holder_account_id (account authorized to extend / erase during grace)
 /// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -211,11 +210,10 @@ pub struct MembershipLayout {
     pub grace_period_start_timestamp: U64Le,
     pub active_duration: U32Le,
     pub grace_period_duration: U32Le,
-    pub holder_account_id: [u8; 32],
 }
 
 impl MembershipLayout {
-    pub const SIZE: usize = 96;
+    pub const SIZE: usize = 64;
 
     #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
     #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }

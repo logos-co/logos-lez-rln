@@ -580,15 +580,14 @@ pub async fn register_identity(
     next_index
 }
 
-/// Extend a membership that is currently inside its grace period. The
-/// `user_holding_id` must match the `holder_account_id` stored on the
-/// membership at registration time.
+/// Renew a membership that is currently inside its grace period. The
+/// `fee_payer_id` pays the tx fee; any funded account may call this.
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 24],
     id_commitment: &[u8; 32],
-    user_holding_id: &AccountId,
+    fee_payer_id: &AccountId,
 ) {
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let membership_account = crate::rln::derive_membership_account(
@@ -597,21 +596,16 @@ pub async fn extend_membership(
         id_commitment,
     );
 
-    let accounts = vec![
-        config_account,
-        membership_account,
-        clock_account_id(),
-        user_holding_id.clone(),
-    ];
+    let accounts = vec![config_account, membership_account, clock_account_id()];
 
     let signing_key = wallet_core
         .storage()
         .user_data
-        .get_pub_account_signing_key(user_holding_id.clone())
-        .expect("User holding account not found in wallet");
+        .get_pub_account_signing_key(fee_payer_id.clone())
+        .expect("Fee payer account not found in wallet");
 
     let nonces = wallet_core
-        .get_accounts_nonces(vec![*user_holding_id])
+        .get_accounts_nonces(vec![*fee_payer_id])
         .await
         .expect("Failed to fetch account nonces");
 
@@ -630,16 +624,14 @@ pub async fn extend_membership(
         .expect("Failed to extend membership");
 }
 
-/// Erase a membership. Pass `holder_holding_id = None` to erase an expired
-/// membership (anyone may do this); pass `Some(account_id)` matching the
-/// stored `holder_account_id` to erase during the grace period.
+/// Erase an expired membership. Any funded account can call this; callers
+/// pre-grace-period or mid-grace-period are rejected by the guest.
 pub async fn erase_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 24],
     id_commitment: &[u8; 32],
     leaf_index: u64,
-    holder_holding_id: Option<&AccountId>,
     fee_payer_id: &AccountId,
 ) {
     let config_account = derive_config_account(&registration_program.id(), tree_id);
@@ -652,16 +644,13 @@ pub async fn erase_membership(
     let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
     let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
 
-    let mut accounts = vec![
+    let accounts = vec![
         config_account,
         tree_main_account,
         membership_account,
         subtree_account,
         clock_account_id(),
     ];
-    if let Some(holder) = holder_holding_id {
-        accounts.push(holder.clone());
-    }
 
     let signing_key = wallet_core
         .storage()

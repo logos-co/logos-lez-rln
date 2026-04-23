@@ -273,7 +273,6 @@ pub struct MembershipData {
     pub grace_period_start_timestamp: Timestamp,
     pub active_duration: u32,
     pub grace_period_duration: u32,
-    pub holder_account_id: [u8; 32],
 }
 
 impl MembershipData {
@@ -289,7 +288,6 @@ impl MembershipData {
             grace_period_start_timestamp: layout.grace_period_start_timestamp(),
             active_duration: layout.active_duration(),
             grace_period_duration: layout.grace_period_duration(),
-            holder_account_id: layout.holder_account_id,
         }
     }
 
@@ -304,7 +302,6 @@ impl MembershipData {
         layout.set_grace_period_start_timestamp(self.grace_period_start_timestamp);
         layout.set_active_duration(self.active_duration);
         layout.set_grace_period_duration(self.grace_period_duration);
-        layout.holder_account_id = self.holder_account_id;
 
         data
     }
@@ -318,7 +315,6 @@ pub fn create_membership_data(
     grace_period_start_timestamp: Timestamp,
     active_duration: u32,
     grace_period_duration: u32,
-    holder_account_id: &[u8; 32],
 ) -> Vec<u8> {
     let membership = MembershipData {
         leaf_index,
@@ -327,7 +323,6 @@ pub fn create_membership_data(
         grace_period_start_timestamp,
         active_duration,
         grace_period_duration,
-        holder_account_id: *holder_account_id,
     };
     membership.to_bytes()
 }
@@ -696,10 +691,9 @@ mod tests {
         let grace_start = 1_700_000_000u64;
         let active = 2_592_000u32;
         let grace = 604_800u32;
-        let holder = [9u8; 32];
 
         let data = create_membership_data(
-            leaf_index, rate_limit, &id_commitment, grace_start, active, grace, &holder,
+            leaf_index, rate_limit, &id_commitment, grace_start, active, grace,
         );
         let parsed = MembershipData::from_data(&data);
 
@@ -709,12 +703,11 @@ mod tests {
         assert_eq!(parsed.grace_period_start_timestamp, grace_start);
         assert_eq!(parsed.active_duration, active);
         assert_eq!(parsed.grace_period_duration, grace);
-        assert_eq!(parsed.holder_account_id, holder);
     }
 
     #[test]
     fn test_membership_data_size() {
-        let data = create_membership_data(0, 100, &[0u8; 32], 0, 0, 0, &[0u8; 32]);
+        let data = create_membership_data(0, 100, &[0u8; 32], 0, 0, 0);
         assert_eq!(data.len(), MEMBERSHIP_SIZE);
     }
 
