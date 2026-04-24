@@ -407,6 +407,7 @@ pub struct RlnRegisterPlan {
     pub tree_main_account_id: [u8; 32],
     pub treasury_account_id: [u8; 32],
     pub subtree_account_id: [u8; 32],
+    pub clock_account_id: [u8; 32],
     pub subtree_id: u32,
     pub next_leaf_index: u64,
 }
@@ -539,6 +540,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     plan.tree_main_account_id = tree_main_account_id;
     plan.treasury_account_id = config.treasury_account_id;
     plan.subtree_account_id = subtree_account_id;
+    plan.clock_account_id = rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
     plan.subtree_id = subtree_id;
     plan.next_leaf_index = next_leaf_index;
 

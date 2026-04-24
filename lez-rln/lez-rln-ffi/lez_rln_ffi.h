@@ -55,6 +55,7 @@ typedef struct RlnFfiRlnRegisterPlan {
   uint8_t tree_main_account_id[32];
   uint8_t treasury_account_id[32];
   uint8_t subtree_account_id[32];
+  uint8_t clock_account_id[32];
   uint32_t subtree_id;
   uint64_t next_leaf_index;
 } RlnFfiRlnRegisterPlan;
