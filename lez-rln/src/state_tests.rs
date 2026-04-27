@@ -111,13 +111,12 @@ mod tests {
     /// (10 minutes).
     const DEFAULT_GRACE_PERIOD_DURATION: u32 = 600;
 
-    /// Returns a 32-byte id_commitment whose top byte is zero so it is
-    /// guaranteed to be a valid BN254 field element. Different `seed` values
-    /// produce distinct commitments.
-    fn valid_id_commitment(seed: u8) -> [u8; 32] {
+    /// Returns a valid BN254 field element with `seed` in the lowest
+    /// little-endian byte and zero-padding above. Used wherever a test needs a
+    /// distinct, valid field element (id_commitment, identity_secret, ...).
+    fn valid_field_element(seed: u8) -> [u8; 32] {
         let mut out = [0u8; 32];
         out[0] = seed;
-        out[1] = 0x42;
         out
     }
 
@@ -1703,7 +1702,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = valid_id_commitment(0x42);
+        let id_commitment = valid_field_element(0x42);
         let rate_limit = 300u64;
 
         let register_tx = build_register_tx(
@@ -1734,7 +1733,7 @@ mod tests {
             "Initial count should be 0"
         );
 
-        let register_tx = build_register_tx(&setup, &TREE_ID, valid_id_commitment(0x42), 300, Nonce(0), 0);
+        let register_tx = build_register_tx(&setup, &TREE_ID, valid_field_element(0x42), 300, Nonce(0), 0);
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
 
@@ -1756,7 +1755,7 @@ mod tests {
             "Initial next_index should be 0"
         );
 
-        let register_tx = build_register_tx(&setup, &TREE_ID, valid_id_commitment(0x42), 300, Nonce(0), 0);
+        let register_tx = build_register_tx(&setup, &TREE_ID, valid_field_element(0x42), 300, Nonce(0), 0);
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
 
@@ -1860,7 +1859,7 @@ mod tests {
             .expect("Buy should succeed");
 
         // Now register with credits
-        let id_commitment = valid_id_commitment(0x42);
+        let id_commitment = valid_field_element(0x42);
         let register_tx = build_register_with_credits_tx(
             &setup,
             &TREE_ID,
@@ -1892,7 +1891,7 @@ mod tests {
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
-            valid_id_commitment(0x42), 300, Nonce(1), 0,
+            valid_field_element(0x42), 300, Nonce(1), 0,
         );
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
@@ -1923,7 +1922,7 @@ mod tests {
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
-            valid_id_commitment(0x42), 300, Nonce(1), 0,
+            valid_field_element(0x42), 300, Nonce(1), 0,
         );
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
@@ -1949,7 +1948,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = valid_id_commitment(0x42);
+        let id_commitment = valid_field_element(0x42);
         let rate_limit = 300u64;
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, rate_limit, Nonce(0), 0);
@@ -1969,7 +1968,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = valid_id_commitment(0x42);
+        let id_commitment = valid_field_element(0x42);
 
         let register_tx1 = build_register_tx(&setup, &TREE_ID, id_commitment, 300, Nonce(0), 0);
         setup.state.transition_from_public_transaction(&register_tx1, 1, 0)
@@ -1989,7 +1988,7 @@ mod tests {
 
         // Buy and register
         let (user_credit_key, user_credit_id) = create_test_keypair(10);
-        let id_commitment = valid_id_commitment(0x99);
+        let id_commitment = valid_field_element(0x99);
         let rate_limit = 300u64;
 
         let buy_tx = build_buy_credits_tx(
@@ -2394,7 +2393,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = valid_id_commitment(0x42);
+        let id_commitment = valid_field_element(0x42);
         let rate_limit = 300u64;
 
         // Register a member
@@ -2603,7 +2602,7 @@ mod tests {
             .expect("Setup should succeed");
 
         // Create identity using poseidon derivation (for slash compatibility)
-        let identity_secret_bytes = valid_id_commitment(0x42);
+        let identity_secret_bytes = valid_field_element(0x42);
         let id_commitment = derive_id_commitment_from_secret(&identity_secret_bytes);
         let rate_limit = 300u64;
 
@@ -2835,7 +2834,7 @@ mod tests {
         );
 
         // Step 4: Public register_with_credits
-        let id_commitment = valid_id_commitment(0x99);
+        let id_commitment = valid_field_element(0x99);
         let register_tx = build_register_with_credits_tx(
             &setup,
             &TREE_ID,
@@ -3038,7 +3037,7 @@ mod tests {
         let register_clock = GENESIS_TIMESTAMP + 500;
         set_clock_50(&mut setup.state, register_clock, 50);
 
-        let id_commitment = valid_id_commitment(0xA1);
+        let id_commitment = valid_field_element(0xA1);
         register_for_expiration_test(&mut setup, id_commitment);
 
         assert_eq!(
@@ -3061,7 +3060,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA2);
+        let id_commitment = valid_field_element(0xA2);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let grace_start = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64;
@@ -3087,7 +3086,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA3);
+        let id_commitment = valid_field_element(0xA3);
         register_for_expiration_test(&mut setup, id_commitment);
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 10, 100);
@@ -3108,7 +3107,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA4);
+        let id_commitment = valid_field_element(0xA4);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let expiration = GENESIS_TIMESTAMP
@@ -3134,7 +3133,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA5);
+        let id_commitment = valid_field_element(0xA5);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
@@ -3152,7 +3151,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA6);
+        let id_commitment = valid_field_element(0xA6);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let expiration = GENESIS_TIMESTAMP
@@ -3178,7 +3177,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA7);
+        let id_commitment = valid_field_element(0xA7);
         register_for_expiration_test(&mut setup, id_commitment);
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 1, 100);
@@ -3199,7 +3198,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xA8);
+        let id_commitment = valid_field_element(0xA8);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
@@ -3220,7 +3219,7 @@ mod tests {
         let Some(mut setup) = setup_with_expiration() else { return };
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
-        let id_commitment = valid_id_commitment(0xAA);
+        let id_commitment = valid_field_element(0xAA);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let before = get_current_total_rate_limit(&setup.state, &setup.registration, &TREE_ID);
