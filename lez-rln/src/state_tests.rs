@@ -2970,7 +2970,7 @@ mod tests {
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
-        let instruction = Instruction::Extend { id_commitment };
+        let instruction = Instruction::Extend;
 
         let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
             .expect("valid message");
@@ -2998,7 +2998,7 @@ mod tests {
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
-        let instruction = Instruction::Erase { id_commitment };
+        let instruction = Instruction::Erase;
 
         let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
             .expect("valid message");

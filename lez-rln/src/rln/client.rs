@@ -614,7 +614,7 @@ pub async fn extend_membership(
         .await
         .expect("Failed to fetch account nonces");
 
-    let instruction = Instruction::Extend { id_commitment: *id_commitment };
+    let instruction = Instruction::Extend;
 
     let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
         .expect("Failed to create extend message");
@@ -671,7 +671,7 @@ pub async fn erase_membership(
         .await
         .expect("Failed to fetch account nonces");
 
-    let instruction = Instruction::Erase { id_commitment: *id_commitment };
+    let instruction = Instruction::Erase;
 
     let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
         .expect("Failed to create erase message");

@@ -51,15 +51,12 @@ pub enum Instruction {
     Slash {
         identity_secret: [u8; 32],
     },
-    /// Renew a membership during its grace period. Only the holder may call this.
-    Extend {
-        id_commitment: [u8; 32],
-    },
-    /// Remove a membership. Allowed when the membership is expired (any caller)
-    /// or in its grace period (holder only).
-    Erase {
-        id_commitment: [u8; 32],
-    },
+    /// Renew a membership during its grace period. Open to any signer.
+    /// The membership is identified by the membership-PDA pre-state.
+    Extend,
+    /// Remove an expired membership. Open to any signer.
+    /// The membership is identified by the membership-PDA pre-state.
+    Erase,
 }
 
 // ============================================================================

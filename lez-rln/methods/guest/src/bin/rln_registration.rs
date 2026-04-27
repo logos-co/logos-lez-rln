@@ -128,18 +128,18 @@ fn main() {
                 instruction_data,
             )
         }
-        Instruction::Extend { id_commitment } => {
+        Instruction::Extend => {
             assert!(pre_states.len() == 3, "Extend requires exactly 3 accounts");
             extend(
-                self_program_id, id_commitment,
+                self_program_id,
                 &pre_states[0], &pre_states[1], &pre_states[2],
                 instruction_data,
             )
         }
-        Instruction::Erase { id_commitment } => {
+        Instruction::Erase => {
             assert!(pre_states.len() == 5, "Erase requires exactly 5 accounts");
             erase(
-                self_program_id, id_commitment,
+                self_program_id,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3], &pre_states[4],
                 instruction_data,
             )
@@ -555,14 +555,11 @@ fn slash(
 
 fn extend(
     self_program_id: ProgramId,
-    id_commitment: [u8; 32],
     config_account: &AccountWithMetadata,
     membership_account: &AccountWithMetadata,
     clock_account: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
-    validate_field_element(&id_commitment);
-
     let now = require_clock(clock_account);
 
     let membership_bytes = membership_account.account.data.as_ref();
@@ -572,10 +569,6 @@ fn extend(
     );
 
     let membership = MembershipData::from_data(membership_bytes);
-    assert!(
-        membership.id_commitment == id_commitment,
-        "id_commitment mismatch - instruction does not match stored membership"
-    );
 
     assert!(
         is_in_grace_period(
@@ -620,7 +613,6 @@ fn extend(
 
 fn erase(
     self_program_id: ProgramId,
-    id_commitment: [u8; 32],
     config_account: &AccountWithMetadata,
     tree_main: &AccountWithMetadata,
     membership_account: &AccountWithMetadata,
@@ -628,8 +620,6 @@ fn erase(
     clock_account: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
-    validate_field_element(&id_commitment);
-
     let now = require_clock(clock_account);
     let config = RegistrationConfig::from_data(config_account.account.data.as_ref());
 
@@ -640,10 +630,6 @@ fn erase(
     );
 
     let membership = MembershipData::from_data(membership_bytes);
-    assert!(
-        membership.id_commitment == id_commitment,
-        "id_commitment mismatch - instruction does not match stored membership"
-    );
 
     assert!(
         is_expired(
