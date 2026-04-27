@@ -15,11 +15,17 @@
 
 use crate::hash::{hash_pair, validate_field_element};
 use crate::layouts;
+use crate::merkle_tree::SUBTREE_LEAVES;
+use nssa_core::Timestamp;
 use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::PdaSeed;
+use nssa_core::program::{ChainedCall, PdaSeed};
 
-// Re-export rate limit constants from shared crate
-pub use crate::layouts::{MIN_RATE_LIMIT, MAX_RATE_LIMIT};
+// Re-export rate limit and expiration constants / helpers from shared crate
+pub use crate::layouts::{
+    MIN_RATE_LIMIT, MAX_RATE_LIMIT,
+    CLOCK_50_ACCOUNT_ID_BYTES,
+    is_in_grace_period, is_expired,
+};
 
 // ============================================================================
 // Account Size Constants (re-exported from layouts)
@@ -59,6 +65,8 @@ pub struct RegistrationConfig {
     pub total_registrations: u64,
     pub max_total_rate_limit: u64,
     pub current_total_rate_limit: u64,
+    pub active_duration_for_new_memberships: u32,
+    pub grace_period_duration_for_new_memberships: u32,
 }
 
 impl RegistrationConfig {
@@ -77,6 +85,8 @@ impl RegistrationConfig {
             total_registrations: layout.total_registrations(),
             max_total_rate_limit: layout.max_total_rate_limit(),
             current_total_rate_limit: layout.current_total_rate_limit(),
+            active_duration_for_new_memberships: layout.active_duration_for_new_memberships(),
+            grace_period_duration_for_new_memberships: layout.grace_period_duration_for_new_memberships(),
         }
     }
 
@@ -94,6 +104,8 @@ impl RegistrationConfig {
         layout.set_total_registrations(self.total_registrations);
         layout.set_max_total_rate_limit(self.max_total_rate_limit);
         layout.set_current_total_rate_limit(self.current_total_rate_limit);
+        layout.set_active_duration_for_new_memberships(self.active_duration_for_new_memberships);
+        layout.set_grace_period_duration_for_new_memberships(self.grace_period_duration_for_new_memberships);
 
         data
     }
@@ -132,6 +144,8 @@ pub fn build_config_data(
     price_per_unit: u128,
     treasury_account_id: &[u8; 32],
     max_total_rate_limit: u64,
+    active_duration_for_new_memberships: u32,
+    grace_period_duration_for_new_memberships: u32,
 ) -> Vec<u8> {
     let config = RegistrationConfig {
         merkle_program_id: *merkle_program_id,
@@ -143,6 +157,8 @@ pub fn build_config_data(
         total_registrations: 0,
         max_total_rate_limit,
         current_total_rate_limit: 0,
+        active_duration_for_new_memberships,
+        grace_period_duration_for_new_memberships,
     };
     config.to_bytes()
 }
@@ -254,6 +270,9 @@ pub struct MembershipData {
     pub leaf_index: u64,
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],
+    pub grace_period_start_timestamp: Timestamp,
+    pub active_duration: u32,
+    pub grace_period_duration: u32,
 }
 
 impl MembershipData {
@@ -266,6 +285,9 @@ impl MembershipData {
             leaf_index: layout.leaf_index(),
             rate_limit: layout.rate_limit(),
             id_commitment: layout.id_commitment,
+            grace_period_start_timestamp: layout.grace_period_start_timestamp(),
+            active_duration: layout.active_duration(),
+            grace_period_duration: layout.grace_period_duration(),
         }
     }
 
@@ -277,6 +299,9 @@ impl MembershipData {
         layout.set_leaf_index(self.leaf_index);
         layout.set_rate_limit(self.rate_limit);
         layout.id_commitment = self.id_commitment;
+        layout.set_grace_period_start_timestamp(self.grace_period_start_timestamp);
+        layout.set_active_duration(self.active_duration);
+        layout.set_grace_period_duration(self.grace_period_duration);
 
         data
     }
@@ -287,11 +312,17 @@ pub fn create_membership_data(
     leaf_index: u64,
     rate_limit: u64,
     id_commitment: &[u8; 32],
+    grace_period_start_timestamp: Timestamp,
+    active_duration: u32,
+    grace_period_duration: u32,
 ) -> Vec<u8> {
     let membership = MembershipData {
         leaf_index,
         rate_limit,
         id_commitment: *id_commitment,
+        grace_period_start_timestamp,
+        active_duration,
+        grace_period_duration,
     };
     membership.to_bytes()
 }
@@ -361,6 +392,67 @@ pub fn prepare_merkle_accounts(
     (merkle_accounts, pda_seeds)
 }
 
+/// Build the merkle `insert` chained call for a new registration.
+/// Shared by the `register` and `register_with_credits` flows.
+pub fn build_membership_insert_call(
+    config: &RegistrationConfig,
+    tree_main: &AccountWithMetadata,
+    bottom_subtree: &AccountWithMetadata,
+    next_index: u64,
+    leaf_value: &[u8; 32],
+) -> ChainedCall {
+    let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
+    let (pre_states, pda_seeds) = prepare_merkle_accounts(
+        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    );
+    ChainedCall {
+        program_id: bytemuck::cast(config.merkle_program_id),
+        instruction_data: risc0_zkvm::serde::to_vec(&build_merkle_insert_instruction(next_index, leaf_value)).unwrap(),
+        pre_states,
+        pda_seeds,
+    }
+}
+
+/// Build the merkle `remove` chained call for a membership being torn down.
+/// Shared by the `slash` and `erase` flows.
+pub fn build_membership_remove_call(
+    config: &RegistrationConfig,
+    tree_main: &AccountWithMetadata,
+    bottom_subtree: &AccountWithMetadata,
+    leaf_index: u64,
+) -> ChainedCall {
+    let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
+    let (pre_states, pda_seeds) = prepare_merkle_accounts(
+        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    );
+    ChainedCall {
+        program_id: bytemuck::cast(config.merkle_program_id),
+        instruction_data: risc0_zkvm::serde::to_vec(&build_merkle_remove_instruction(leaf_index)).unwrap(),
+        pre_states,
+        pda_seeds,
+    }
+}
+
+// ============================================================================
+// Clock Helpers
+// ============================================================================
+
+/// Decode a clock account's borsh-encoded `ClockAccountData` blob and return
+/// its unix timestamp field.
+pub fn parse_clock_timestamp(data: &[u8]) -> Timestamp {
+    clock_core::ClockAccountData::from_bytes(data).timestamp
+}
+
+/// Validate that `clock_account` is the expected CLOCK_50 system account and
+/// return its current unix timestamp.
+pub fn require_clock(clock_account: &AccountWithMetadata) -> Timestamp {
+    assert!(
+        *clock_account.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
+        "Wrong clock account provided"
+    );
+    parse_clock_timestamp(clock_account.account.data.as_ref())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -385,6 +477,8 @@ mod tests {
             total_registrations: 42,
             max_total_rate_limit: 100000,
             current_total_rate_limit: 5000,
+            active_duration_for_new_memberships: 2_592_000,
+            grace_period_duration_for_new_memberships: 604_800,
         };
 
         let bytes = config.to_bytes();
@@ -399,6 +493,8 @@ mod tests {
         assert_eq!(parsed.total_registrations, config.total_registrations);
         assert_eq!(parsed.max_total_rate_limit, config.max_total_rate_limit);
         assert_eq!(parsed.current_total_rate_limit, config.current_total_rate_limit);
+        assert_eq!(parsed.active_duration_for_new_memberships, config.active_duration_for_new_memberships);
+        assert_eq!(parsed.grace_period_duration_for_new_memberships, config.grace_period_duration_for_new_memberships);
     }
 
     #[test]
@@ -413,7 +509,7 @@ mod tests {
 
         let data = build_config_data(
             &merkle_id, &tree_id, &payment_id, &receipt_id, price, &treasury,
-            max_rate_limit,
+            max_rate_limit, 3600, 1800,
         );
         let config = RegistrationConfig::from_data(&data);
 
@@ -422,6 +518,8 @@ mod tests {
         assert_eq!(config.total_registrations, 0);
         assert_eq!(config.max_total_rate_limit, max_rate_limit);
         assert_eq!(config.current_total_rate_limit, 0);
+        assert_eq!(config.active_duration_for_new_memberships, 3600);
+        assert_eq!(config.grace_period_duration_for_new_memberships, 1800);
     }
 
     #[test]
@@ -436,6 +534,8 @@ mod tests {
             total_registrations: 0,
             max_total_rate_limit: 1000,
             current_total_rate_limit: 0,
+            active_duration_for_new_memberships: 0,
+            grace_period_duration_for_new_memberships: 0,
         };
 
         // Can register with 500 rate limit
@@ -588,19 +688,55 @@ mod tests {
         let leaf_index = 42u64;
         let rate_limit = 300u64;
         let id_commitment = [7u8; 32];
+        let grace_start = 1_700_000_000u64;
+        let active = 2_592_000u32;
+        let grace = 604_800u32;
 
-        let data = create_membership_data(leaf_index, rate_limit, &id_commitment);
+        let data = create_membership_data(
+            leaf_index, rate_limit, &id_commitment, grace_start, active, grace,
+        );
         let parsed = MembershipData::from_data(&data);
 
         assert_eq!(parsed.leaf_index, leaf_index);
         assert_eq!(parsed.rate_limit, rate_limit);
         assert_eq!(parsed.id_commitment, id_commitment);
+        assert_eq!(parsed.grace_period_start_timestamp, grace_start);
+        assert_eq!(parsed.active_duration, active);
+        assert_eq!(parsed.grace_period_duration, grace);
     }
 
     #[test]
     fn test_membership_data_size() {
-        let data = create_membership_data(0, 100, &[0u8; 32]);
+        let data = create_membership_data(0, 100, &[0u8; 32], 0, 0, 0);
         assert_eq!(data.len(), MEMBERSHIP_SIZE);
+    }
+
+    #[test]
+    fn test_is_in_grace_period_boundaries() {
+        let start = 1_000u64;
+        let duration = 100u32;
+        assert!(!is_in_grace_period(start, duration, 999));
+        assert!(is_in_grace_period(start, duration, 1000));
+        assert!(is_in_grace_period(start, duration, 1099));
+        assert!(!is_in_grace_period(start, duration, 1100));
+        assert!(!is_in_grace_period(start, duration, 5000));
+    }
+
+    #[test]
+    fn test_is_expired_boundaries() {
+        let start = 1_000u64;
+        let duration = 100u32;
+        assert!(!is_expired(start, duration, 999));
+        assert!(!is_expired(start, duration, 1099));
+        assert!(is_expired(start, duration, 1100));
+        assert!(is_expired(start, duration, 5000));
+    }
+
+    #[test]
+    fn test_grace_period_zero_duration_transitions_directly_to_expired() {
+        let start = 1_000u64;
+        assert!(!is_in_grace_period(start, 0, 1_000));
+        assert!(is_expired(start, 0, 1_000));
     }
 
     #[test]

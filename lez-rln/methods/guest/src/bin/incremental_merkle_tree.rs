@@ -18,6 +18,7 @@ type Instruction = Vec<u8>;
 fn main() {
     let (
         ProgramInput {
+            self_program_id,
             pre_states,
             instruction,
         },
@@ -35,5 +36,5 @@ fn main() {
         _ => panic!("Invalid instruction type"),
     };
 
-    ProgramOutput::new(instruction_words, pre_states, post_states).write();
+    ProgramOutput::new(self_program_id, instruction_words, pre_states, post_states).write();
 }

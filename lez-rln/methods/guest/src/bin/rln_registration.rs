@@ -57,10 +57,10 @@ use logos_lez_rln_guest::registration::{
     create_membership_data, MembershipData,
     // Chained call helpers
     serialize_token_instruction, authorize,
-    build_merkle_insert_instruction, build_merkle_remove_instruction,
-    prepare_merkle_accounts,
+    build_membership_insert_call, build_membership_remove_call,
+    // Clock / expiration
+    require_clock, is_in_grace_period, is_expired,
 };
-use logos_lez_rln_guest::merkle_tree::SUBTREE_LEAVES;
 use logos_lez_rln_guest::hash::{hash_single, validate_field_element};
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
@@ -71,56 +71,76 @@ use nssa_core::{
 };
 
 fn main() {
-    let (ProgramInput { pre_states, instruction }, instruction_data) =
+    let (ProgramInput { self_program_id, pre_states, instruction }, instruction_data) =
         read_nssa_inputs::<Instruction>();
 
     match instruction {
         Instruction::Initialize {
-            registration_program_id, merkle_program_id, tree_id,
+            merkle_program_id, tree_id,
             payment_token_id, price_per_unit, treasury_account_id,
             token_program_id, max_total_rate_limit,
+            active_duration_for_new_memberships,
+            grace_period_duration_for_new_memberships,
         } => {
             initialize(
-                registration_program_id, merkle_program_id, tree_id,
+                self_program_id, merkle_program_id, tree_id,
                 payment_token_id, price_per_unit, treasury_account_id,
                 token_program_id, max_total_rate_limit,
+                active_duration_for_new_memberships,
+                grace_period_duration_for_new_memberships,
                 instruction_data,
             )
         }
-        Instruction::Register { registration_program_id, id_commitment, rate_limit } => {
-            assert!(pre_states.len() == 5, "Register requires exactly 5 accounts");
+        Instruction::Register { id_commitment, rate_limit } => {
+            assert!(pre_states.len() == 6, "Register requires exactly 6 accounts");
             register(
-                registration_program_id, id_commitment, rate_limit,
+                self_program_id, id_commitment, rate_limit,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
-                &pre_states[4],
+                &pre_states[4], &pre_states[5],
                 instruction_data,
             )
         }
         Instruction::BuyCredits { amount } => {
             assert!(pre_states.len() >= 5, "BuyCredits requires 5 accounts");
             buy_credits(
+                self_program_id,
                 amount,
                 &pre_states[0], &pre_states[1], &pre_states[2],
                 &pre_states[3], &pre_states[4],
                 instruction_data,
             )
         }
-        Instruction::RegisterWithCredits {
-            registration_program_id, id_commitment, amount_to_burn,
-        } => {
-            assert!(pre_states.len() == 5, "RegisterWithCredits requires exactly 5 accounts");
+        Instruction::RegisterWithCredits { id_commitment, amount_to_burn } => {
+            assert!(pre_states.len() == 6, "RegisterWithCredits requires exactly 6 accounts");
             register_with_credits(
-                registration_program_id, id_commitment, amount_to_burn,
+                self_program_id, id_commitment, amount_to_burn,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
-                &pre_states[4],
+                &pre_states[4], &pre_states[5],
                 instruction_data,
             )
         }
         Instruction::Slash { identity_secret } => {
             assert!(pre_states.len() == 4, "Slash requires exactly 4 accounts");
             slash(
+                self_program_id,
                 identity_secret,
                 &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3],
+                instruction_data,
+            )
+        }
+        Instruction::Extend { id_commitment } => {
+            assert!(pre_states.len() == 3, "Extend requires exactly 3 accounts");
+            extend(
+                self_program_id, id_commitment,
+                &pre_states[0], &pre_states[1], &pre_states[2],
+                instruction_data,
+            )
+        }
+        Instruction::Erase { id_commitment } => {
+            assert!(pre_states.len() == 5, "Erase requires exactly 5 accounts");
+            erase(
+                self_program_id, id_commitment,
+                &pre_states[0], &pre_states[1], &pre_states[2], &pre_states[3], &pre_states[4],
                 instruction_data,
             )
         }
@@ -132,7 +152,7 @@ fn main() {
 // ============================================================================
 
 fn initialize(
-    registration_program_id: [u8; 32],
+    self_program_id: ProgramId,
     merkle_program_id: [u8; 32],
     tree_id: [u8; 24],
     payment_token_id: [u8; 32],
@@ -140,15 +160,20 @@ fn initialize(
     treasury_account_id: [u8; 32],
     token_program_id: [u8; 32],
     max_total_rate_limit: u64,
+    active_duration_for_new_memberships: u32,
+    grace_period_duration_for_new_memberships: u32,
     instruction_data: Vec<u32>,
 ) {
     assert!(max_total_rate_limit > 0, "Max total rate limit must be positive");
+    assert!(
+        active_duration_for_new_memberships > 0,
+        "Active duration must be positive"
+    );
 
-    let reg_program_id: ProgramId = bytemuck::cast(registration_program_id);
-    let config_id = AccountId::from((&reg_program_id, &derive_config_seed(&tree_id)));
-    let credit_token_id = AccountId::from((&reg_program_id, &derive_credit_token_seed(&tree_id)));
-    let credit_supply_id = AccountId::from((&reg_program_id, &derive_credit_supply_seed(&tree_id)));
-    let tree_main_id = AccountId::from((&reg_program_id, &derive_tree_main_seed(&tree_id)));
+    let config_id = AccountId::from((&self_program_id, &derive_config_seed(&tree_id)));
+    let credit_token_id = AccountId::from((&self_program_id, &derive_credit_token_seed(&tree_id)));
+    let credit_supply_id = AccountId::from((&self_program_id, &derive_credit_supply_seed(&tree_id)));
+    let tree_main_id = AccountId::from((&self_program_id, &derive_tree_main_seed(&tree_id)));
 
     let config = AccountWithMetadata {
         account: Account::default(),
@@ -180,6 +205,8 @@ fn initialize(
         price_per_unit,
         &treasury_account_id,
         max_total_rate_limit,
+        active_duration_for_new_memberships,
+        grace_period_duration_for_new_memberships,
     );
     let mut config_post = config.account.clone();
     config_post.data = config_data.try_into().unwrap();
@@ -214,13 +241,13 @@ fn initialize(
         AccountPostState::new(Account::default()),
         AccountPostState::new(Account::default()),
     ];
-    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
         .with_chained_calls(vec![token_create_call, merkle_chained_call])
         .write();
 }
 
 fn register(
-    registration_program_id: [u8; 32],
+    self_program_id: ProgramId,
     id_commitment: [u8; 32],
     rate_limit: u64,
     config_account: &AccountWithMetadata,
@@ -228,6 +255,7 @@ fn register(
     user_holding: &AccountWithMetadata,
     treasury_holding: &AccountWithMetadata,
     bottom_subtree: &AccountWithMetadata,
+    clock_account: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
     validate_field_element(&id_commitment);
@@ -237,11 +265,14 @@ fn register(
 
     assert!(config.can_register(rate_limit), "Would exceed max total rate limit");
 
+    let now = require_clock(clock_account);
+    let grace_period_start_timestamp =
+        now.saturating_add(config.active_duration_for_new_memberships as u64);
+
     let payment_amount = calculate_payment_amount(rate_limit, config.price_per_unit);
 
-    let reg_program_id: ProgramId = bytemuck::cast(registration_program_id);
     let membership_seed = derive_membership_seed(&config.tree_id, &id_commitment);
-    let membership_id = AccountId::from((&reg_program_id, &membership_seed));
+    let membership_id = AccountId::from((&self_program_id, &membership_seed));
     let membership = AccountWithMetadata {
         account: Account::default(),
         is_authorized: false,
@@ -261,21 +292,11 @@ fn register(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
-    let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     let updated_config = config.with_registration(rate_limit);
 
-    let (merkle_accounts, pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_insert_call(
+        &config, tree_main, bottom_subtree, next_index, &leaf_value,
     );
-
-    let merkle_instruction = build_merkle_insert_instruction(next_index, &leaf_value);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds,
-    };
 
     let token_instruction = token_core::Instruction::Transfer { amount_to_transfer: payment_amount };
     let token_call = ChainedCall {
@@ -285,7 +306,14 @@ fn register(
         pda_seeds: vec![],
     };
 
-    let membership_data = create_membership_data(next_index, rate_limit, &id_commitment);
+    let membership_data = create_membership_data(
+        next_index,
+        rate_limit,
+        &id_commitment,
+        grace_period_start_timestamp,
+        config.active_duration_for_new_memberships,
+        config.grace_period_duration_for_new_memberships,
+    );
     let mut membership_post = membership.account.clone();
     membership_post.data = membership_data.try_into().unwrap();
 
@@ -296,6 +324,7 @@ fn register(
         config_account.clone(), tree_main.clone(),
         user_holding.clone(), treasury_holding.clone(),
         bottom_subtree.clone(),
+        clock_account.clone(),
         membership,
     ];
     let post_states = vec![
@@ -304,15 +333,17 @@ fn register(
         AccountPostState::new(user_holding.account.clone()),
         AccountPostState::new(treasury_holding.account.clone()),
         AccountPostState::new(bottom_subtree.account.clone()),
+        AccountPostState::new(clock_account.account.clone()),
         AccountPostState::new_claimed_if_default(membership_post, Claim::Pda(membership_seed)),
     ];
 
-    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
         .with_chained_calls(vec![token_call, merkle_call])
         .write();
 }
 
 fn buy_credits(
+    self_program_id: ProgramId,
     amount: u128,
     config_account: &AccountWithMetadata,
     credit_token_def: &AccountWithMetadata,
@@ -370,13 +401,13 @@ fn buy_credits(
         user_credit_holding.clone(),
     ];
 
-    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
         .with_chained_calls(vec![transfer_call, mint_call])
         .write();
 }
 
 fn register_with_credits(
-    registration_program_id: [u8; 32],
+    self_program_id: ProgramId,
     id_commitment: [u8; 32],
     amount_to_burn: u64,
     config_account: &AccountWithMetadata,
@@ -384,6 +415,7 @@ fn register_with_credits(
     tree_main: &AccountWithMetadata,
     user_credit_holding: &AccountWithMetadata,
     bottom_subtree: &AccountWithMetadata,
+    clock_account: &AccountWithMetadata,
     instruction_data: Vec<u32>,
 ) {
     validate_field_element(&id_commitment);
@@ -395,9 +427,12 @@ fn register_with_credits(
 
     assert!(config.can_register(rate_limit), "Would exceed max total rate limit");
 
-    let reg_program_id: ProgramId = bytemuck::cast(registration_program_id);
+    let now = require_clock(clock_account);
+    let grace_period_start_timestamp =
+        now.saturating_add(config.active_duration_for_new_memberships as u64);
+
     let membership_seed = derive_membership_seed(&config.tree_id, &id_commitment);
-    let membership_id = AccountId::from((&reg_program_id, &membership_seed));
+    let membership_id = AccountId::from((&self_program_id, &membership_seed));
     let membership = AccountWithMetadata {
         account: Account::default(),
         is_authorized: false,
@@ -425,23 +460,20 @@ fn register_with_credits(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
-    let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     let updated_config = config.with_registration(rate_limit);
 
-    let (merkle_accounts, merkle_pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_insert_call(
+        &config, tree_main, bottom_subtree, next_index, &leaf_value,
     );
 
-    let merkle_instruction = build_merkle_insert_instruction(next_index, &leaf_value);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds: merkle_pda_seeds,
-    };
-
-    let membership_data = create_membership_data(next_index, rate_limit, &id_commitment);
+    let membership_data = create_membership_data(
+        next_index,
+        rate_limit,
+        &id_commitment,
+        grace_period_start_timestamp,
+        config.active_duration_for_new_memberships,
+        config.grace_period_duration_for_new_memberships,
+    );
     let mut membership_post = membership.account.clone();
     membership_post.data = membership_data.try_into().unwrap();
 
@@ -452,6 +484,7 @@ fn register_with_credits(
         config_account.clone(), credit_token_def.clone(),
         tree_main.clone(), user_credit_holding.clone(),
         bottom_subtree.clone(),
+        clock_account.clone(),
         membership,
     ];
     let post_states = vec![
@@ -460,15 +493,17 @@ fn register_with_credits(
         AccountPostState::new(tree_main.account.clone()),
         AccountPostState::new(user_credit_holding.account.clone()),
         AccountPostState::new(bottom_subtree.account.clone()),
+        AccountPostState::new(clock_account.account.clone()),
         AccountPostState::new_claimed_if_default(membership_post, Claim::Pda(membership_seed)),
     ];
 
-    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
         .with_chained_calls(vec![burn_call, merkle_call])
         .write();
 }
 
 fn slash(
+    self_program_id: ProgramId,
     identity_secret: [u8; 32],
     config_account: &AccountWithMetadata,
     tree_main: &AccountWithMetadata,
@@ -487,20 +522,9 @@ fn slash(
     let membership = MembershipData::from_data(membership_bytes);
     assert!(membership.id_commitment == id_commitment, "id_commitment mismatch - provided identity_secret doesn't match membership");
 
-    let subtree_id = (membership.leaf_index / SUBTREE_LEAVES as u64) as u32;
-
-    let (merkle_accounts, pda_seeds) = prepare_merkle_accounts(
-        tree_main, bottom_subtree, &config.tree_id, subtree_id,
+    let merkle_call = build_membership_remove_call(
+        &config, tree_main, bottom_subtree, membership.leaf_index,
     );
-
-    let merkle_instruction = build_merkle_remove_instruction(membership.leaf_index);
-
-    let merkle_call = ChainedCall {
-        program_id: bytemuck::cast(config.merkle_program_id),
-        instruction_data: risc0_zkvm::serde::to_vec(&merkle_instruction).unwrap(),
-        pre_states: merkle_accounts,
-        pda_seeds,
-    };
 
     let mut membership_post = membership_account.account.clone();
     membership_post.data = vec![].try_into().unwrap();
@@ -520,7 +544,143 @@ fn slash(
         AccountPostState::new(bottom_subtree.account.clone()),
     ];
 
-    ProgramOutput::new(instruction_data, output_pre_states, post_states)
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
+        .with_chained_calls(vec![merkle_call])
+        .write();
+}
+
+// ============================================================================
+// Extend
+// ============================================================================
+
+fn extend(
+    self_program_id: ProgramId,
+    id_commitment: [u8; 32],
+    config_account: &AccountWithMetadata,
+    membership_account: &AccountWithMetadata,
+    clock_account: &AccountWithMetadata,
+    instruction_data: Vec<u32>,
+) {
+    validate_field_element(&id_commitment);
+
+    let now = require_clock(clock_account);
+
+    let membership_bytes = membership_account.account.data.as_ref();
+    assert!(
+        !membership_bytes.is_empty(),
+        "Membership account is empty - cannot extend a non-existent membership"
+    );
+
+    let membership = MembershipData::from_data(membership_bytes);
+    assert!(
+        membership.id_commitment == id_commitment,
+        "id_commitment mismatch - instruction does not match stored membership"
+    );
+
+    assert!(
+        is_in_grace_period(
+            membership.grace_period_start_timestamp,
+            membership.grace_period_duration,
+            now,
+        ),
+        "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
+    );
+
+    let new_grace_start = membership
+        .grace_period_start_timestamp
+        .saturating_add(membership.grace_period_duration as u64)
+        .saturating_add(membership.active_duration as u64);
+
+    let updated_membership = MembershipData {
+        grace_period_start_timestamp: new_grace_start,
+        ..membership
+    };
+
+    let mut membership_post = membership_account.account.clone();
+    membership_post.data = updated_membership.to_bytes().try_into().unwrap();
+
+    let output_pre_states = vec![
+        config_account.clone(),
+        membership_account.clone(),
+        clock_account.clone(),
+    ];
+    let post_states = vec![
+        AccountPostState::new(config_account.account.clone()),
+        AccountPostState::new(membership_post),
+        AccountPostState::new(clock_account.account.clone()),
+    ];
+
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
+        .write();
+}
+
+// ============================================================================
+// Erase — expired memberships only; any caller
+// ============================================================================
+
+fn erase(
+    self_program_id: ProgramId,
+    id_commitment: [u8; 32],
+    config_account: &AccountWithMetadata,
+    tree_main: &AccountWithMetadata,
+    membership_account: &AccountWithMetadata,
+    bottom_subtree: &AccountWithMetadata,
+    clock_account: &AccountWithMetadata,
+    instruction_data: Vec<u32>,
+) {
+    validate_field_element(&id_commitment);
+
+    let now = require_clock(clock_account);
+    let config = RegistrationConfig::from_data(config_account.account.data.as_ref());
+
+    let membership_bytes = membership_account.account.data.as_ref();
+    assert!(
+        !membership_bytes.is_empty(),
+        "Membership account is empty - nothing to erase"
+    );
+
+    let membership = MembershipData::from_data(membership_bytes);
+    assert!(
+        membership.id_commitment == id_commitment,
+        "id_commitment mismatch - instruction does not match stored membership"
+    );
+
+    assert!(
+        is_expired(
+            membership.grace_period_start_timestamp,
+            membership.grace_period_duration,
+            now,
+        ),
+        "CannotEraseUnexpiredMembership: membership has not expired yet"
+    );
+
+    let merkle_call = build_membership_remove_call(
+        &config, tree_main, bottom_subtree, membership.leaf_index,
+    );
+
+    let mut membership_post = membership_account.account.clone();
+    membership_post.data = vec![].try_into().unwrap();
+
+    let updated_config = config.with_erasure(membership.rate_limit);
+    let mut config_post = config_account.account.clone();
+    config_post.data = updated_config.to_bytes().try_into().unwrap();
+
+    let output_pre_states = vec![
+        config_account.clone(),
+        tree_main.clone(),
+        membership_account.clone(),
+        bottom_subtree.clone(),
+        clock_account.clone(),
+    ];
+    let post_states = vec![
+        AccountPostState::new(config_post),
+        AccountPostState::new(tree_main.account.clone()),
+        AccountPostState::new(membership_post),
+        AccountPostState::new(bottom_subtree.account.clone()),
+        AccountPostState::new(clock_account.account.clone()),
+    ];
+
+    ProgramOutput::new(self_program_id, instruction_data, output_pre_states, post_states)
         .with_chained_calls(vec![merkle_call])
         .write();
 }
