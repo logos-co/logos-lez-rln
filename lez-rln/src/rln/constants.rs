@@ -34,4 +34,15 @@ pub const CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT: usize = offset_of!(ConfigLayou
 pub const MEMBERSHIP_OFFSET_LEAF_INDEX: usize = offset_of!(MembershipLayout, leaf_index);
 pub const MEMBERSHIP_OFFSET_RATE_LIMIT: usize = offset_of!(MembershipLayout, rate_limit);
 pub const MEMBERSHIP_OFFSET_ID_COMMITMENT: usize = offset_of!(MembershipLayout, id_commitment);
+pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP: usize =
+    offset_of!(MembershipLayout, grace_period_start_timestamp);
+pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = offset_of!(MembershipLayout, active_duration);
+pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize =
+    offset_of!(MembershipLayout, grace_period_duration);
 pub const MEMBERSHIP_SIZE: usize = size_of::<MembershipLayout>();
+
+// ============================================================================
+// Clock Account
+// ============================================================================
+
+pub use rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;

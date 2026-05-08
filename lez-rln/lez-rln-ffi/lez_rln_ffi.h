@@ -55,6 +55,7 @@ typedef struct RlnFfiRlnRegisterPlan {
   uint8_t tree_main_account_id[32];
   uint8_t treasury_account_id[32];
   uint8_t subtree_account_id[32];
+  uint8_t clock_account_id[32];
   uint32_t subtree_id;
   uint64_t next_leaf_index;
 } RlnFfiRlnRegisterPlan;
@@ -172,14 +173,12 @@ enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
  * Returns a borsh-serialized instruction payload that can be used
  * to construct the transaction message.
  *
- * `registration_program_id_ptr`: 32-byte registration program ID
  * `id_commitment_ptr`: 32-byte id_commitment
  * `rate_limit`: the user's rate limit
  * `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
  * Caller must free with `rln_ffi_free_string`.
  */
-enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *registration_program_id_ptr,
-                                                    const uint8_t *id_commitment_ptr,
+enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *id_commitment_ptr,
                                                     uint64_t rate_limit,
                                                     uint8_t **out_data_ptr,
                                                     uintptr_t *out_data_len);

@@ -67,7 +67,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "amm_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "borsh",
  "nssa_core",
@@ -632,7 +632,7 @@ dependencies = [
 [[package]]
 name = "ata_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "nssa_core",
  "risc0-zkvm",
@@ -1097,6 +1097,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clock_core"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
+dependencies = [
+ "borsh",
+ "nssa_core",
+]
+
+[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1124,11 +1133,12 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "anyhow",
  "base64",
  "borsh",
+ "clock_core",
  "hex",
  "log",
  "logos-blockchain-common-http-client",
@@ -2962,7 +2972,7 @@ dependencies = [
 [[package]]
 name = "key_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3617,6 +3627,7 @@ name = "logos-lez-rln"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "clock_core",
  "common",
  "hex",
  "nssa",
@@ -3841,10 +3852,11 @@ dependencies = [
 [[package]]
 name = "nssa"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "anyhow",
  "borsh",
+ "clock_core",
  "hex",
  "k256",
  "log",
@@ -3862,7 +3874,7 @@ dependencies = [
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "base58",
  "borsh",
@@ -4982,9 +4994,9 @@ dependencies = [
 
 [[package]]
 name = "rln"
-version = "1.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5211831f7e0f46e85450c118f0b0b3426538c9df1c285e790fa5cb71f22bfb5b"
+checksum = "927f89b31cd4a7e98c7311dc5ba93236d8adef8b455e69eadf1bc8d1f4ecb05b"
 dependencies = [
  "ark-bn254 0.5.0",
  "ark-ec 0.5.0",
@@ -4998,7 +5010,6 @@ dependencies = [
  "cfg-if",
  "num-bigint",
  "num-traits",
- "once_cell",
  "prost 0.14.3",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -5374,7 +5385,7 @@ checksum = "f638d531eccd6e23b980caf34876660d38e265409d8e99b397ab71eb3612fad0"
 [[package]]
 name = "sequencer_service_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "common",
  "nssa",
@@ -5384,7 +5395,7 @@ dependencies = [
 [[package]]
 name = "sequencer_service_rpc"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "jsonrpsee",
  "sequencer_service_protocol",
@@ -5830,7 +5841,7 @@ dependencies = [
 [[package]]
 name = "testnet_initial_state"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "common",
  "key_protocol",
@@ -5956,7 +5967,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "token_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "borsh",
  "nssa_core",
@@ -6528,7 +6539,7 @@ dependencies = [
 [[package]]
 name = "wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa.git?rev=fbdfd8f7#fbdfd8f7ef4041d30789527f286d69d31c88f86f"
+source = "git+https://github.com/logos-blockchain/lssa.git?rev=98e98c62#98e98c6214afb6e0b60db3627ccfeae8293fe361"
 dependencies = [
  "amm_core",
  "anyhow",
@@ -7306,9 +7317,9 @@ dependencies = [
 
 [[package]]
 name = "zerokit_utils"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6278ed0a599eb0f8cf1d866206b78c55010b5f72aee6801d3ae9cca783a7899"
+checksum = "f6acb5f70fd3183429f9495e1df68281db875b8eb4a54bce01cb0569e9b4e0c5"
 dependencies = [
  "ark-ff 0.5.0",
  "num-bigint",

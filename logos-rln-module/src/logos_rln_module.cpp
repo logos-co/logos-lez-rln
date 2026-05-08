@@ -354,7 +354,6 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     uint8_t* instrPtr = nullptr;
     size_t instrLen = 0;
     err = rln_ffi_register_build_instruction(
-        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
         reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
         rate_limit,
         &instrPtr, &instrLen);
@@ -366,13 +365,14 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     const QString instructionHex = bytesToHex(instrPtr, instrLen);
     rln_ffi_free_string(instrPtr, instrLen);
 
-    // Build accounts list for the transaction
+    // Build accounts list for the transaction (6 accounts: config, tree_main, user_holding, treasury, subtree, clock)
     QJsonArray accountsList;
     accountsList.append(bytesToHex(plan.config_account_id, 32));
     accountsList.append(bytesToHex(plan.tree_main_account_id, 32));
     accountsList.append(userHoldingHex);
     accountsList.append(bytesToHex(plan.treasury_account_id, 32));
     accountsList.append(bytesToHex(plan.subtree_account_id, 32));
+    accountsList.append(bytesToHex(plan.clock_account_id, 32));
 
     // Build transaction request for wallet module
     QJsonObject txRequest;

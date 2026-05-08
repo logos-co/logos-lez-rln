@@ -55,7 +55,11 @@ mod tests {
         TREE_DEPTH,
         MEMBERSHIP_SIZE, MEMBERSHIP_OFFSET_LEAF_INDEX, MEMBERSHIP_OFFSET_RATE_LIMIT,
         MEMBERSHIP_OFFSET_ID_COMMITMENT,
+        MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP,
+        MEMBERSHIP_OFFSET_ACTIVE_DURATION,
+        MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION,
         CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
+        CLOCK_50_ACCOUNT_ID_BYTES,
         derive_tree_main_account, derive_subtree_account,
         derive_config_account, derive_credit_token_account, derive_membership_account,
         subtree_id_for_index,
@@ -94,6 +98,28 @@ mod tests {
 
     // Test-specific constant
     const PRICE_PER_UNIT: u128 = 10_000;
+
+    /// Genesis timestamp used when seeding test state. Chosen non-zero so that
+    /// time-travel tests can reason about both past and future relative to genesis.
+    const GENESIS_TIMESTAMP: u64 = 1_700_000_000;
+
+    /// Active-period length applied to newly registered memberships in tests
+    /// (1 hour). Kept small so tests can exercise expiration without huge numbers.
+    const DEFAULT_ACTIVE_DURATION: u32 = 3_600;
+
+    /// Grace-period length applied to newly registered memberships in tests
+    /// (10 minutes).
+    const DEFAULT_GRACE_PERIOD_DURATION: u32 = 600;
+
+    /// Returns a 32-byte id_commitment whose top byte is zero so it is
+    /// guaranteed to be a valid BN254 field element. Different `seed` values
+    /// produce distinct commitments.
+    fn valid_id_commitment(seed: u8) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[0] = seed;
+        out[1] = 0x42;
+        out
+    }
 
     // ========================================================================
     // Program Loading
@@ -156,7 +182,7 @@ mod tests {
         let merkle_program = Program::new(merkle_bytecode.clone()).ok()?;
         let registration_program = Program::new(registration_bytecode.clone()).ok()?;
 
-        let mut state = V03State::new_with_genesis_accounts(&[], &[]);
+        let mut state = V03State::new_with_genesis_accounts(&[], &[], GENESIS_TIMESTAMP);
 
         // Deploy merkle tree program
         let merkle_deploy_tx = ProgramDeploymentTransaction::new(
@@ -837,8 +863,31 @@ mod tests {
         treasury_id: &AccountId,
         max_total_rate_limit: u64,
     ) -> PublicTransaction {
+        build_registration_init_tx_with_durations(
+            registration,
+            merkle,
+            tree_id,
+            payment_token_id,
+            price_per_unit,
+            treasury_id,
+            max_total_rate_limit,
+            DEFAULT_ACTIVE_DURATION,
+            DEFAULT_GRACE_PERIOD_DURATION,
+        )
+    }
+
+    fn build_registration_init_tx_with_durations(
+        registration: &Program,
+        merkle: &Program,
+        tree_id: &[u8; 24],
+        payment_token_id: &AccountId,
+        price_per_unit: u128,
+        treasury_id: &AccountId,
+        max_total_rate_limit: u64,
+        active_duration: u32,
+        grace_period_duration: u32,
+    ) -> PublicTransaction {
         let instruction = Instruction::Initialize {
-            registration_program_id: bytemuck::cast(registration.id()),
             merkle_program_id: bytemuck::cast(merkle.id()),
             tree_id: *tree_id,
             payment_token_id: *payment_token_id.value(),
@@ -846,6 +895,8 @@ mod tests {
             treasury_account_id: *treasury_id.value(),
             token_program_id: bytemuck::cast(Program::token().id()),
             max_total_rate_limit,
+            active_duration_for_new_memberships: active_duration,
+            grace_period_duration_for_new_memberships: grace_period_duration,
         };
 
         let message = Message::try_new(
@@ -955,6 +1006,77 @@ mod tests {
         state_with_initialized_registration_config(DEFAULT_MAX_TOTAL_RATE_LIMIT)
     }
 
+    /// Same as `state_with_initialized_registration_config` with caller-chosen durations.
+    #[allow(dead_code)]
+    fn state_with_initialized_registration_durations(
+        max_total_rate_limit: u64,
+        active_duration: u32,
+        grace_period_duration: u32,
+    ) -> Option<TestSetup> {
+        let (mut state, merkle, registration) = state_with_programs()?;
+
+        let (treasury_key, treasury_id) = create_test_keypair(1);
+        let (user_payment_key, user_payment_id) = create_test_keypair(2);
+        let payment_def_id = AccountId::new([10; 32]);
+
+        let total_supply: u128 = 1_000_000_000;
+        let user_amount: u128 = 10_000_000;
+        let token_id = Program::token().id();
+
+        let token_definition = token_core::TokenDefinition::Fungible {
+            name: String::from("PAYTKN"),
+            total_supply,
+            metadata_id: None,
+        };
+        state.force_insert_account(payment_def_id.clone(), Account {
+            program_owner: token_id,
+            data: Data::from(&token_definition),
+            ..Account::default()
+        });
+        let treasury_holding = token_core::TokenHolding::Fungible {
+            definition_id: payment_def_id.clone(),
+            balance: total_supply - user_amount,
+        };
+        state.force_insert_account(treasury_id.clone(), Account {
+            program_owner: token_id,
+            data: Data::from(&treasury_holding),
+            ..Account::default()
+        });
+        let user_holding = token_core::TokenHolding::Fungible {
+            definition_id: payment_def_id.clone(),
+            balance: user_amount,
+        };
+        state.force_insert_account(user_payment_id.clone(), Account {
+            program_owner: token_id,
+            data: Data::from(&user_holding),
+            ..Account::default()
+        });
+
+        let init_tx = build_registration_init_tx_with_durations(
+            &registration,
+            &merkle,
+            &TREE_ID,
+            &payment_def_id,
+            PRICE_PER_UNIT,
+            &treasury_id,
+            max_total_rate_limit,
+            active_duration,
+            grace_period_duration,
+        );
+        state.transition_from_public_transaction(&init_tx, 1, 0).ok()?;
+
+        Some(TestSetup {
+            state,
+            merkle,
+            registration,
+            payment_def_id,
+            treasury_id,
+            treasury_key,
+            user_payment_id,
+            user_payment_key,
+        })
+    }
+
     // ========================================================================
     // State Reading Helpers
     // ========================================================================
@@ -1058,15 +1180,13 @@ mod tests {
     // ========================================================================
 
     /// Derive id_commitment from identity_secret using Poseidon hash.
-    /// This matches the derivation in the guest program: H(identity_secret, 0)
+    /// Matches the single-input `hash_single` used by the guest's slash path.
     fn derive_id_commitment_from_secret(identity_secret: &[u8; 32]) -> [u8; 32] {
         use rln::hashers::poseidon_hash;
         use rln::utils::{bytes_le_to_fr, fr_to_bytes_le};
 
-        let zero = [0u8; 32];
         let (secret_fr, _) = bytes_le_to_fr(identity_secret).expect("Invalid identity_secret");
-        let (zero_fr, _) = bytes_le_to_fr(&zero).expect("Invalid zero bytes");
-        let hash_fr = poseidon_hash(&[secret_fr, zero_fr]).expect("Poseidon hash failed");
+        let hash_fr = poseidon_hash(&[secret_fr]);
         fr_to_bytes_le(&hash_fr).try_into().unwrap()
     }
 
@@ -1092,6 +1212,7 @@ mod tests {
     /// - pre_states[2]: User's payment token holding
     /// - pre_states[3]: Treasury payment token holding
     /// - pre_states[4]: Bottom subtree account
+    /// - pre_states[5]: CLOCK_50 system account (read-only timestamp)
     /// (membership PDA is derived internally by guest)
     #[allow(dead_code)]
     fn build_register_tx(
@@ -1107,17 +1228,16 @@ mod tests {
         let sid = subtree_id_for_index(next_index);
         let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
 
-        // Account list: config, tree_main, user_payment, treasury, subtree
         let account_ids = vec![
             config_id,
             tree_main_id,
             setup.user_payment_id.clone(),
             setup.treasury_id.clone(),
             subtree_account_id,
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
         let instruction = Instruction::Register {
-            registration_program_id: bytemuck::cast(setup.registration.id()),
             id_commitment,
             rate_limit,
         };
@@ -1189,6 +1309,7 @@ mod tests {
     /// - pre_states[2]: Tree main
     /// - pre_states[3]: User's credit token holding (authorized)
     /// - pre_states[4]: Bottom subtree account
+    /// - pre_states[5]: CLOCK_50 system account (read-only timestamp)
     /// (membership PDA is derived internally by guest)
     #[allow(dead_code)]
     fn build_register_with_credits_tx(
@@ -1207,17 +1328,16 @@ mod tests {
         let sid = subtree_id_for_index(next_index);
         let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
 
-        // Account list: config, credit_def, tree_main, user_credit, subtree
         let account_ids = vec![
             config_id,
             credit_token_id,
             tree_main_id,
             user_credit_id.clone(),
             subtree_account_id,
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
         let instruction = Instruction::RegisterWithCredits {
-            registration_program_id: bytemuck::cast(setup.registration.id()),
             id_commitment,
             amount_to_burn,
         };
@@ -1583,7 +1703,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = [0x42u8; 32];
+        let id_commitment = valid_id_commitment(0x42);
         let rate_limit = 300u64;
 
         let register_tx = build_register_tx(
@@ -1614,7 +1734,7 @@ mod tests {
             "Initial count should be 0"
         );
 
-        let register_tx = build_register_tx(&setup, &TREE_ID, [0x42u8; 32], 300, Nonce(0), 0);
+        let register_tx = build_register_tx(&setup, &TREE_ID, valid_id_commitment(0x42), 300, Nonce(0), 0);
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
 
@@ -1636,7 +1756,7 @@ mod tests {
             "Initial next_index should be 0"
         );
 
-        let register_tx = build_register_tx(&setup, &TREE_ID, [0x42u8; 32], 300, Nonce(0), 0);
+        let register_tx = build_register_tx(&setup, &TREE_ID, valid_id_commitment(0x42), 300, Nonce(0), 0);
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
 
@@ -1740,7 +1860,7 @@ mod tests {
             .expect("Buy should succeed");
 
         // Now register with credits
-        let id_commitment = [0x42u8; 32];
+        let id_commitment = valid_id_commitment(0x42);
         let register_tx = build_register_with_credits_tx(
             &setup,
             &TREE_ID,
@@ -1772,7 +1892,7 @@ mod tests {
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
-            [0x42u8; 32], 300, Nonce(1), 0,
+            valid_id_commitment(0x42), 300, Nonce(1), 0,
         );
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
@@ -1803,7 +1923,7 @@ mod tests {
 
         let register_tx = build_register_with_credits_tx(
             &setup, &TREE_ID, &user_credit_id, &user_credit_key,
-            [0x42u8; 32], 300, Nonce(1), 0,
+            valid_id_commitment(0x42), 300, Nonce(1), 0,
         );
         setup.state.transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
@@ -1829,7 +1949,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = [0x42u8; 32];
+        let id_commitment = valid_id_commitment(0x42);
         let rate_limit = 300u64;
 
         let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, rate_limit, Nonce(0), 0);
@@ -1849,7 +1969,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = [0x42u8; 32];
+        let id_commitment = valid_id_commitment(0x42);
 
         let register_tx1 = build_register_tx(&setup, &TREE_ID, id_commitment, 300, Nonce(0), 0);
         setup.state.transition_from_public_transaction(&register_tx1, 1, 0)
@@ -1869,7 +1989,7 @@ mod tests {
 
         // Buy and register
         let (user_credit_key, user_credit_id) = create_test_keypair(10);
-        let id_commitment = [0x99u8; 32];
+        let id_commitment = valid_id_commitment(0x99);
         let rate_limit = 300u64;
 
         let buy_tx = build_buy_credits_tx(
@@ -2146,7 +2266,7 @@ mod tests {
     fn compute_rate_commitment(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] {
         let (id_fr, _) = bytes_le_to_fr(id_commitment).expect("Invalid id_commitment");
         let rate_fr = Fr::from(rate_limit);
-        let hash_fr = poseidon_hash(&[id_fr, rate_fr]).expect("Poseidon hash failed");
+        let hash_fr = poseidon_hash(&[id_fr, rate_fr]);
         fr_to_bytes_le(&hash_fr).try_into().unwrap()
     }
 
@@ -2263,7 +2383,7 @@ mod tests {
                 (sibling, current)
             };
 
-            current = poseidon_hash(&[left, right]).expect("Poseidon hash failed");
+            current = poseidon_hash(&[left, right]);
         }
 
         fr_to_bytes_le(&current).try_into().unwrap()
@@ -2274,7 +2394,7 @@ mod tests {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
 
-        let id_commitment = [0x42u8; 32];
+        let id_commitment = valid_id_commitment(0x42);
         let rate_limit = 300u64;
 
         // Register a member
@@ -2310,7 +2430,7 @@ mod tests {
         // Create identity using zerokit's seeded_keygen (like run_rln_proof does)
         let seed = [0x42u8; 32]; // deterministic seed for testing
         let (mut identity_secret_fr, id_commitment_fr) =
-            seeded_keygen(&seed).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed);
         let identity_secret = IdSecret::from(&mut identity_secret_fr);
 
         let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
@@ -2344,13 +2464,12 @@ mod tests {
         let message_id = Fr::from(0u64);
 
         // Compute external nullifier = poseidon(epoch, rln_identifier)
-        let epoch_fr = hash_to_field_le(b"test-epoch").expect("Failed to hash epoch");
-        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test").expect("Failed to hash rln_identifier");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr])
-            .expect("Failed to compute external nullifier");
+        let epoch_fr = hash_to_field_le(b"test-epoch");
+        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
+        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
 
         // Compute signal hash (x) = hash of message
-        let x = hash_to_field_le(b"Hello, RLN!").expect("Failed to hash message");
+        let x = hash_to_field_le(b"Hello, RLN!");
 
         // Create RLN witness input
         let witness = RLNWitnessInput::new(
@@ -2372,7 +2491,7 @@ mod tests {
             .expect("Failed to generate RLN proof");
 
         // Verify proof values match
-        assert_eq!(proof_values.root, root, "Proof root should match on-chain root");
+        assert_eq!(*proof_values.root(), root, "Proof root should match on-chain root");
 
         // Verify the RLN proof with root check
         let is_valid = rln
@@ -2393,7 +2512,7 @@ mod tests {
         // Register first identity
         let seed1 = [0x01u8; 32];
         let (mut identity_secret_fr1, id_commitment_fr1) =
-            seeded_keygen(&seed1).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed1);
         let _identity_secret1 = IdSecret::from(&mut identity_secret_fr1);
         let id_commitment1: [u8; 32] = fr_to_bytes_le(&id_commitment_fr1).try_into().unwrap();
 
@@ -2406,7 +2525,7 @@ mod tests {
         // Register second identity (this is the one we'll prove)
         let seed2 = [0x02u8; 32];
         let (mut identity_secret_fr2, id_commitment_fr2) =
-            seeded_keygen(&seed2).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed2);
         let identity_secret2 = IdSecret::from(&mut identity_secret_fr2);
         let id_commitment2: [u8; 32] = fr_to_bytes_le(&id_commitment_fr2).try_into().unwrap();
         let rate_limit2 = 100u64;
@@ -2420,7 +2539,7 @@ mod tests {
         // Register third identity
         let seed3 = [0x03u8; 32];
         let (mut identity_secret_fr3, id_commitment_fr3) =
-            seeded_keygen(&seed3).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed3);
         let _identity_secret3 = IdSecret::from(&mut identity_secret_fr3);
         let id_commitment3: [u8; 32] = fr_to_bytes_le(&id_commitment_fr3).try_into().unwrap();
 
@@ -2449,10 +2568,10 @@ mod tests {
         // Create and verify RLN proof
         let user_message_limit = Fr::from(rate_limit2);
         let message_id = Fr::from(0u64);
-        let epoch_fr = hash_to_field_le(b"test-epoch-2").expect("Failed to hash epoch");
-        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test").expect("Failed to hash rln_identifier");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]).unwrap();
-        let x = hash_to_field_le(b"Another message").expect("Failed to hash message");
+        let epoch_fr = hash_to_field_le(b"test-epoch-2");
+        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
+        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let x = hash_to_field_le(b"Another message");
 
         let witness = RLNWitnessInput::new(
             identity_secret2,
@@ -2469,7 +2588,7 @@ mod tests {
             .generate_rln_proof(&witness)
             .expect("Failed to generate RLN proof");
 
-        assert_eq!(proof_values.root, root, "Proof root should match on-chain root");
+        assert_eq!(*proof_values.root(), root, "Proof root should match on-chain root");
 
         let is_valid = rln
             .verify_with_roots(&rln_proof, &proof_values, &x, &[root])
@@ -2484,7 +2603,7 @@ mod tests {
             .expect("Setup should succeed");
 
         // Create identity using poseidon derivation (for slash compatibility)
-        let identity_secret_bytes = [0x42u8; 32];
+        let identity_secret_bytes = valid_id_commitment(0x42);
         let id_commitment = derive_id_commitment_from_secret(&identity_secret_bytes);
         let rate_limit = 300u64;
 
@@ -2537,7 +2656,7 @@ mod tests {
         // Create identity
         let seed = [0x99u8; 32];
         let (mut identity_secret_fr, id_commitment_fr) =
-            seeded_keygen(&seed).expect("seeded_keygen should succeed");
+            seeded_keygen(&seed);
         let identity_secret = IdSecret::from(&mut identity_secret_fr);
         let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
         let rate_limit = 300u64;
@@ -2564,12 +2683,12 @@ mod tests {
         let user_message_limit = Fr::from(rate_limit);
         let message_id = Fr::from(0u64); // Same message_id for both
 
-        let epoch_fr = hash_to_field_le(b"epoch-1").expect("Failed to hash epoch");
-        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test").expect("Failed to hash rln_identifier");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]).unwrap();
+        let epoch_fr = hash_to_field_le(b"epoch-1");
+        let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
+        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
 
         // First message
-        let x1 = hash_to_field_le(b"First message").expect("Failed to hash message");
+        let x1 = hash_to_field_le(b"First message");
         let witness1 = RLNWitnessInput::new(
             identity_secret.clone(),
             user_message_limit,
@@ -2581,7 +2700,7 @@ mod tests {
         ).expect("Failed to create witness 1");
 
         // Second message (different content, same message_id)
-        let x2 = hash_to_field_le(b"Second message").expect("Failed to hash message");
+        let x2 = hash_to_field_le(b"Second message");
         let witness2 = RLNWitnessInput::new(
             identity_secret,
             user_message_limit,
@@ -2606,7 +2725,7 @@ mod tests {
 
         // But they should have the SAME nullifier (since same identity, epoch, message_id)
         assert_eq!(
-            values1.nullifier, values2.nullifier,
+            values1.nullifier(), values2.nullifier(),
             "Same identity + epoch + message_id should produce same nullifier"
         );
 
@@ -2716,7 +2835,7 @@ mod tests {
         );
 
         // Step 4: Public register_with_credits
-        let id_commitment = [0x99u8; 32];
+        let id_commitment = valid_id_commitment(0x99);
         let register_tx = build_register_with_credits_tx(
             &setup,
             &TREE_ID,
@@ -2751,5 +2870,374 @@ mod tests {
             0,
             "Credit account should be empty after registration"
         );
+    }
+
+    // ========================================================================
+    // Expiration — time-travel helpers
+    // ========================================================================
+
+    /// Overwrite the CLOCK_50 system account with a specific timestamp so
+    /// subsequent program invocations observe `now == timestamp`. Uses the
+    /// `test-utils` `force_insert_account` escape hatch instead of issuing
+    /// 50 clock-ticks, because CLOCK_50 only refreshes every 50 blocks.
+    fn set_clock_50(state: &mut V03State, timestamp: u64, block_id: u64) {
+        use clock_core::{CLOCK_50_PROGRAM_ACCOUNT_ID, ClockAccountData};
+        let data = ClockAccountData { block_id, timestamp }.to_bytes();
+        let clock_program_id = Program::clock().id();
+        state.force_insert_account(
+            CLOCK_50_PROGRAM_ACCOUNT_ID,
+            Account {
+                program_owner: clock_program_id,
+                data: data.try_into().expect("clock data fits"),
+                ..Account::default()
+            },
+        );
+    }
+
+    fn read_membership(
+        state: &V03State,
+        registration: &Program,
+        tree_id: &[u8; 24],
+        id_commitment: &[u8; 32],
+    ) -> Option<Vec<u8>> {
+        let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
+        let bytes = state.get_account_by_id(membership_id).data.into_inner();
+        if bytes.is_empty() { None } else { Some(bytes) }
+    }
+
+    fn read_grace_start(
+        state: &V03State,
+        registration: &Program,
+        tree_id: &[u8; 24],
+        id_commitment: &[u8; 32],
+    ) -> u64 {
+        let data = read_membership(state, registration, tree_id, id_commitment)
+            .expect("membership must exist");
+        u64::from_le_bytes(
+            data[MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP
+                ..MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn read_active_duration(
+        state: &V03State,
+        registration: &Program,
+        tree_id: &[u8; 24],
+        id_commitment: &[u8; 32],
+    ) -> u32 {
+        let data = read_membership(state, registration, tree_id, id_commitment)
+            .expect("membership must exist");
+        u32::from_le_bytes(
+            data[MEMBERSHIP_OFFSET_ACTIVE_DURATION..MEMBERSHIP_OFFSET_ACTIVE_DURATION + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn read_grace_duration(
+        state: &V03State,
+        registration: &Program,
+        tree_id: &[u8; 24],
+        id_commitment: &[u8; 32],
+    ) -> u32 {
+        let data = read_membership(state, registration, tree_id, id_commitment)
+            .expect("membership must exist");
+        u32::from_le_bytes(
+            data[MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION
+                ..MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    // ========================================================================
+    // Expiration — transaction builders
+    // ========================================================================
+
+    fn build_extend_tx(
+        setup: &TestSetup,
+        tree_id: &[u8; 24],
+        id_commitment: [u8; 32],
+    ) -> PublicTransaction {
+        let config_id = derive_config_pda(setup.registration.id(), tree_id);
+        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+
+        let account_ids = vec![
+            config_id,
+            membership_id,
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+        ];
+
+        let instruction = Instruction::Extend;
+
+        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
+            .expect("valid message");
+
+        PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
+    }
+
+    fn build_erase_tx(
+        setup: &TestSetup,
+        tree_id: &[u8; 24],
+        id_commitment: [u8; 32],
+        leaf_index: u64,
+    ) -> PublicTransaction {
+        let config_id = derive_config_pda(setup.registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(setup.registration.id(), tree_id);
+        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+        let sid = subtree_id_for_index(leaf_index);
+        let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
+
+        let account_ids = vec![
+            config_id,
+            tree_main_id,
+            membership_id,
+            subtree_account_id,
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+        ];
+
+        let instruction = Instruction::Erase;
+
+        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
+            .expect("valid message");
+
+        PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
+    }
+
+    // ========================================================================
+    // Expiration — state tests
+    // ========================================================================
+
+    /// Rate limit used across the expiration tests (within [MIN, MAX]).
+    const EXP_RATE_LIMIT: u64 = 300;
+
+    fn setup_with_expiration() -> Option<TestSetup> {
+        state_with_initialized_registration_durations(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION,
+            DEFAULT_GRACE_PERIOD_DURATION,
+        )
+    }
+
+    fn register_for_expiration_test(setup: &mut TestSetup, id_commitment: [u8; 32]) {
+        let register_tx = build_register_tx(
+            setup, &TREE_ID, id_commitment, EXP_RATE_LIMIT, Nonce(0), 0,
+        );
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("register should succeed");
+    }
+
+    #[test]
+    fn test_register_snapshots_grace_period_start() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        let register_clock = GENESIS_TIMESTAMP + 500;
+        set_clock_50(&mut setup.state, register_clock, 50);
+
+        let id_commitment = valid_id_commitment(0xA1);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        assert_eq!(
+            read_grace_start(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            register_clock + DEFAULT_ACTIVE_DURATION as u64,
+            "grace_period_start_timestamp = now + active_duration",
+        );
+        assert_eq!(
+            read_active_duration(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            DEFAULT_ACTIVE_DURATION,
+        );
+        assert_eq!(
+            read_grace_duration(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            DEFAULT_GRACE_PERIOD_DURATION,
+        );
+    }
+
+    #[test]
+    fn test_extend_succeeds_in_grace_period() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA2);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let grace_start = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64;
+        let in_grace = grace_start + (DEFAULT_GRACE_PERIOD_DURATION as u64 / 2);
+        set_clock_50(&mut setup.state, in_grace, 100);
+
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 2, 0)
+            .expect("extend during grace must succeed");
+
+        let new_grace_start =
+            read_grace_start(&setup.state, &setup.registration, &TREE_ID, &id_commitment);
+        let expected = grace_start
+            + DEFAULT_GRACE_PERIOD_DURATION as u64
+            + DEFAULT_ACTIVE_DURATION as u64;
+        assert_eq!(new_grace_start, expected, "grace_start += grace + active");
+    }
+
+    #[test]
+    fn test_extend_fails_when_still_active() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA3);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 10, 100);
+
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let result = setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 2, 0);
+        assert!(
+            result.is_err(),
+            "extend during active period must fail, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extend_fails_when_expired() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA4);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let expiration = GENESIS_TIMESTAMP
+            + DEFAULT_ACTIVE_DURATION as u64
+            + DEFAULT_GRACE_PERIOD_DURATION as u64;
+        set_clock_50(&mut setup.state, expiration + 1, 100);
+
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let result = setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 2, 0);
+        assert!(
+            result.is_err(),
+            "extend after expiration must fail, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extend_by_any_caller_succeeds_in_grace() {
+        // Sanity: Extend carries no authorization — the builder signs with no keys.
+        // If this test fails, something is asserting caller identity.
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA5);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
+        set_clock_50(&mut setup.state, in_grace, 100);
+
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 2, 0)
+            .expect("extend with no signer must succeed");
+    }
+
+    #[test]
+    fn test_erase_succeeds_when_expired() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA6);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let expiration = GENESIS_TIMESTAMP
+            + DEFAULT_ACTIVE_DURATION as u64
+            + DEFAULT_GRACE_PERIOD_DURATION as u64;
+        set_clock_50(&mut setup.state, expiration + 1, 100);
+
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 2, 0)
+            .expect("erase of expired membership must succeed");
+
+        assert!(
+            read_membership(&setup.state, &setup.registration, &TREE_ID, &id_commitment)
+                .is_none(),
+            "membership data should be cleared",
+        );
+    }
+
+    #[test]
+    fn test_erase_fails_when_active() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA7);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 1, 100);
+
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        let result = setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 2, 0);
+        assert!(
+            result.is_err(),
+            "erase during active period must fail, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_erase_fails_in_grace_period() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xA8);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
+        set_clock_50(&mut setup.state, in_grace, 100);
+
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        let result = setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 2, 0);
+        assert!(
+            result.is_err(),
+            "erase during grace period must fail (use extend, or wait until expired)"
+        );
+    }
+
+    #[test]
+    fn test_erase_decrements_total_rate_limit() {
+        let Some(mut setup) = setup_with_expiration() else { return };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_id_commitment(0xAA);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let before = get_current_total_rate_limit(&setup.state, &setup.registration, &TREE_ID);
+        assert_eq!(before, EXP_RATE_LIMIT);
+
+        let expiration = GENESIS_TIMESTAMP
+            + DEFAULT_ACTIVE_DURATION as u64
+            + DEFAULT_GRACE_PERIOD_DURATION as u64;
+        set_clock_50(&mut setup.state, expiration + 1, 100);
+
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 2, 0)
+            .expect("erase must succeed");
+
+        let after = get_current_total_rate_limit(&setup.state, &setup.registration, &TREE_ID);
+        assert_eq!(after, 0, "current_total_rate_limit must drop back to 0");
     }
 }

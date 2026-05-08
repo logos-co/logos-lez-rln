@@ -407,6 +407,7 @@ pub struct RlnRegisterPlan {
     pub tree_main_account_id: [u8; 32],
     pub treasury_account_id: [u8; 32],
     pub subtree_account_id: [u8; 32],
+    pub clock_account_id: [u8; 32],
     pub subtree_id: u32,
     pub next_leaf_index: u64,
 }
@@ -431,11 +432,7 @@ pub unsafe extern "C" fn rln_ffi_generate_identity(
 
     let seed = unsafe { &*(seed_ptr as *const [u8; 32]) };
 
-    let keygen_result = rln::prelude::seeded_keygen(seed);
-    let (mut identity_secret_fr, id_commitment_fr) = match keygen_result {
-        Ok(result) => result,
-        Err(_) => return Error::KeygenFailed,
-    };
+    let (mut identity_secret_fr, id_commitment_fr) = rln::prelude::seeded_keygen(seed);
 
     let id_commitment_bytes = rln::utils::fr_to_bytes_le(&id_commitment_fr);
     let id_secret_hash_bytes = rln::utils::fr_to_bytes_le(&identity_secret_fr);
@@ -479,10 +476,7 @@ pub unsafe extern "C" fn rln_ffi_compute_rate_commitment(
 
     let rate_limit_fr = rln::prelude::Fr::from(rate_limit);
 
-    let rate_commitment_fr = match rln::hashers::poseidon_hash(&[id_commitment_fr, rate_limit_fr]) {
-        Ok(hash) => hash,
-        Err(_) => return Error::HashFailed,
-    };
+    let rate_commitment_fr = rln::hashers::poseidon_hash(&[id_commitment_fr, rate_limit_fr]);
 
     let leaf_bytes = rln::utils::fr_to_bytes_le(&rate_commitment_fr);
 
@@ -546,6 +540,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     plan.tree_main_account_id = tree_main_account_id;
     plan.treasury_account_id = config.treasury_account_id;
     plan.subtree_account_id = subtree_account_id;
+    plan.clock_account_id = rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
     plan.subtree_id = subtree_id;
     plan.next_leaf_index = next_leaf_index;
 
@@ -557,32 +552,27 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
 /// Returns a borsh-serialized instruction payload that can be used
 /// to construct the transaction message.
 ///
-/// `registration_program_id_ptr`: 32-byte registration program ID
 /// `id_commitment_ptr`: 32-byte id_commitment
 /// `rate_limit`: the user's rate limit
 /// `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
 /// Caller must free with `rln_ffi_free_string`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_build_instruction(
-    registration_program_id_ptr: *const u8,
     id_commitment_ptr: *const u8,
     rate_limit: u64,
     out_data_ptr: *mut *mut u8,
     out_data_len: *mut usize,
 ) -> Error {
-    if registration_program_id_ptr.is_null()
-        || id_commitment_ptr.is_null()
+    if id_commitment_ptr.is_null()
         || out_data_ptr.is_null()
         || out_data_len.is_null()
     {
         return Error::NullPointer;
     }
 
-    let registration_program_id = unsafe { &*(registration_program_id_ptr as *const [u8; 32]) };
     let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
     let instruction = rln_layouts::Instruction::Register {
-        registration_program_id: *registration_program_id,
         id_commitment: *id_commitment,
         rate_limit,
     };
