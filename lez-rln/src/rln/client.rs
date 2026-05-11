@@ -21,10 +21,9 @@ use wallet::program_facades::token::Token;
 use crate::merkle_tree::SUBTREE_LEAVES;
 use crate::rln::{
     CONFIG_OFFSET_TREASURY_ACCOUNT_ID, derive_config_account, derive_subtree_account,
-    derive_tree_main_account, layouts::Instruction,
+    derive_tree_main_account, instruction::Instruction,
 };
 
-// Setup constants
 pub const PRICE_PER_UNIT: u128 = 10_000;
 pub const TOKEN_SUPPLY: u128 = 1_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
@@ -43,8 +42,11 @@ pub fn clock_account_id() -> AccountId {
 pub const REGISTRATION_BINARY: &str = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
 pub const MERKLE_TREE_BINARY: &str =
     "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
-pub const TREE_ID: [u8; 24] = [
+/// Default tree id used by the example binaries. SPEL's `ToSeed` is only
+/// implemented for `[u8; 32]`, so all tree ids in this codebase are 32 bytes.
+pub const TREE_ID: [u8; 32] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    0, 0, 0, 0, 0, 0, 0, 0,
 ];
 pub const DATA_DIR: &str = ".logos-lez-rln";
 
@@ -87,14 +89,24 @@ pub fn load_programs() -> (Program, Program) {
 pub async fn is_initialized(
     wallet_core: &WalletCore,
     registration_program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
 ) -> bool {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
-    wallet_core
+    let account = wallet_core
         .get_account_public(config_id)
         .await
-        .map(|acc| !acc.data.as_ref().is_empty())
-        .unwrap_or(false)
+        .expect("Failed to fetch config account from sequencer");
+    !account.data.as_ref().is_empty()
+}
+
+/// Sleep long enough for the sequencer to seal the current block.
+///
+/// Used between back-to-back program deployments so each deploy lands in its own block.
+/// The bedrock encoding caps a single block's inscription data at MAX_BLOCK_SIZE * 7/8
+/// (≈ 896 KiB), so two ~500 KiB program ELFs in the same block fatally panic the
+/// sequencer at encode time. Block create timeout is 15 s; we wait 20 s for margin.
+pub async fn wait_for_block_seal() {
+    tokio::time::sleep(Duration::from_secs(20)).await;
 }
 
 /// Wait for an account to have non-empty data.
@@ -120,7 +132,7 @@ pub async fn wait_for_account_data(
 }
 
 /// Get the path to the supply holding file for a given tree_id.
-pub fn get_supply_holding_path(tree_id: &[u8; 24]) -> PathBuf {
+pub fn get_supply_holding_path(tree_id: &[u8; 32]) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(DATA_DIR)
@@ -128,7 +140,7 @@ pub fn get_supply_holding_path(tree_id: &[u8; 24]) -> PathBuf {
 }
 
 /// Save the supply holding account ID for later reuse.
-pub fn save_supply_holding(tree_id: &[u8; 24], supply_holding_id: &AccountId) {
+pub fn save_supply_holding(tree_id: &[u8; 32], supply_holding_id: &AccountId) {
     let path = get_supply_holding_path(tree_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -137,7 +149,7 @@ pub fn save_supply_holding(tree_id: &[u8; 24], supply_holding_id: &AccountId) {
 }
 
 /// Load a previously saved supply holding account ID.
-pub fn load_supply_holding(tree_id: &[u8; 24]) -> Option<AccountId> {
+pub fn load_supply_holding(tree_id: &[u8; 32]) -> Option<AccountId> {
     let path = get_supply_holding_path(tree_id);
     std::fs::read_to_string(&path)
         .ok()
@@ -145,7 +157,7 @@ pub fn load_supply_holding(tree_id: &[u8; 24]) -> Option<AccountId> {
 }
 
 /// Get the path to the payment account file for a given tree_id.
-pub fn get_payment_account_path(tree_id: &[u8; 24]) -> PathBuf {
+pub fn get_payment_account_path(tree_id: &[u8; 32]) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(DATA_DIR)
@@ -153,7 +165,7 @@ pub fn get_payment_account_path(tree_id: &[u8; 24]) -> PathBuf {
 }
 
 /// Save the payment account ID for later reuse.
-pub fn save_payment_account(tree_id: &[u8; 24], account_id: &AccountId) {
+pub fn save_payment_account(tree_id: &[u8; 32], account_id: &AccountId) {
     let path = get_payment_account_path(tree_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -162,7 +174,7 @@ pub fn save_payment_account(tree_id: &[u8; 24], account_id: &AccountId) {
 }
 
 /// Load a previously saved payment account ID.
-pub fn load_payment_account(tree_id: &[u8; 24]) -> Option<AccountId> {
+pub fn load_payment_account(tree_id: &[u8; 32]) -> Option<AccountId> {
     let path = get_payment_account_path(tree_id);
     std::fs::read_to_string(&path)
         .ok()
@@ -347,11 +359,13 @@ pub async fn run_setup(
     wallet_core: &mut WalletCore,
     registration_program: &Program,
     merkle_program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     user_funding: u128,
 ) -> AccountId {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_id = derive_tree_main_account(&registration_program.id(), tree_id);
+    let credit_token_id = crate::rln::derive_credit_token_account(&registration_program.id(), tree_id);
+    let credit_supply_id = crate::rln::derive_credit_supply_account(&registration_program.id(), tree_id);
 
     println!("Setup Step 1: Checking/deploying programs...");
 
@@ -364,7 +378,7 @@ pub async fn run_setup(
     )
     .await;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_block_seal().await;
 
     ensure_program_deployed(
         wallet_core,
@@ -375,7 +389,11 @@ pub async fn run_setup(
     )
     .await;
 
+    wait_for_block_seal().await;
+
     deploy_builtin_program(wallet_core, &Program::token(), "Token program").await;
+
+    wait_for_block_seal().await;
 
     println!("Setup Step 2: Creating accounts...");
     let (token_definition_id, _) = wallet_core.create_new_account_public(None);
@@ -419,8 +437,18 @@ pub async fn run_setup(
         grace_period_duration_for_new_memberships: DEFAULT_GRACE_PERIOD_DURATION_SECS,
     };
 
-    let message = Message::try_new(registration_program.id(), vec![], vec![], instruction)
-        .expect("Failed to create init message");
+    let message = Message::try_new(
+        registration_program.id(),
+        vec![
+            config_id.clone(),
+            credit_token_id.clone(),
+            credit_supply_id.clone(),
+            tree_main_id.clone(),
+        ],
+        vec![],
+        instruction,
+    )
+    .expect("Failed to create init message");
 
     let witness_set = WitnessSet::for_message(&message, &[]);
     let tx = PublicTransaction::new(message, witness_set);
@@ -461,7 +489,7 @@ pub async fn run_setup(
 /// Create a new user account and fund it from the saved supply holding.
 pub async fn create_funded_user(
     wallet_core: &mut WalletCore,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     user_funding: u128,
 ) -> AccountId {
     let supply_holding_id = load_supply_holding(tree_id).unwrap_or_else(|| {
@@ -504,7 +532,7 @@ pub async fn create_funded_user(
 pub async fn register_identity(
     wallet_core: &WalletCore,
     registration_program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     user_holding_id: &AccountId,
     rate_limit: u64,
@@ -539,6 +567,11 @@ pub async fn register_identity(
     let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
 
+    let membership_account = crate::rln::derive_membership_account(
+        &registration_program.id(),
+        tree_id,
+        id_commitment,
+    );
     let accounts = vec![
         config_account,
         tree_main_account,
@@ -546,6 +579,7 @@ pub async fn register_identity(
         treasury_account_id,
         subtree_account,
         clock_account_id(),
+        membership_account,
     ];
 
     let signing_key = wallet_core
@@ -563,8 +597,10 @@ pub async fn register_identity(
     };
 
     let instruction = Instruction::Register {
+        tree_id: *tree_id,
         id_commitment: *id_commitment,
         rate_limit,
+        subtree_id,
     };
 
     let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
@@ -587,7 +623,7 @@ pub async fn register_identity(
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     fee_payer_id: &AccountId,
 ) {
@@ -614,7 +650,10 @@ pub async fn extend_membership(
         .await
         .expect("Failed to fetch account nonces");
 
-    let instruction = Instruction::Extend;
+    let instruction = Instruction::Extend {
+        tree_id: *tree_id,
+        id_commitment: *id_commitment,
+    };
 
     let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
         .expect("Failed to create extend message");
@@ -634,7 +673,7 @@ pub async fn extend_membership(
 pub async fn erase_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     leaf_index: u64,
     fee_payer_id: &AccountId,
@@ -671,7 +710,11 @@ pub async fn erase_membership(
         .await
         .expect("Failed to fetch account nonces");
 
-    let instruction = Instruction::Erase;
+    let instruction = Instruction::Erase {
+        tree_id: *tree_id,
+        id_commitment: *id_commitment,
+        subtree_id,
+    };
 
     let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
         .expect("Failed to create erase message");

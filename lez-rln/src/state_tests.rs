@@ -59,13 +59,20 @@ mod tests {
         MEMBERSHIP_OFFSET_ACTIVE_DURATION,
         MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION,
         CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
+        CONFIG_OFFSET_MERKLE_PROGRAM_ID,
+        CONFIG_OFFSET_TREE_ID,
+        CONFIG_OFFSET_PAYMENT_TOKEN_ID,
+        CONFIG_OFFSET_PRICE_PER_UNIT,
+        CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
+        CONFIG_OFFSET_TOTAL_REGISTRATIONS,
+        CONFIG_SIZE,
         CLOCK_50_ACCOUNT_ID_BYTES,
         derive_tree_main_account, derive_subtree_account,
         derive_config_account, derive_credit_token_account, derive_membership_account,
         subtree_id_for_index,
     };
 
-    use crate::rln::layouts::Instruction;
+    use crate::rln::instruction::Instruction;
 
     // ========================================================================
     // Program Paths
@@ -78,22 +85,23 @@ mod tests {
     }
 
     fn merkle_tree_binary_path() -> std::path::PathBuf {
-        repo_root().join("target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin")
+        repo_root().join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin")
     }
 
     fn rln_registration_binary_path() -> std::path::PathBuf {
-        repo_root().join("target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin")
+        repo_root().join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin")
     }
 
     // ========================================================================
     // Constants
     // ========================================================================
 
-    /// Test tree ID (24 bytes)
-    const TREE_ID: [u8; 24] = [
+    /// Test tree ID (32 bytes; first 24 carry data, last 8 zero-padded for SPEL).
+    const TREE_ID: [u8; 32] = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
 
     // Test-specific constant
@@ -140,29 +148,33 @@ mod tests {
     // PDA Derivation Wrappers
     // ========================================================================
 
-    fn derive_tree_main_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 24]) -> AccountId {
+    fn derive_tree_main_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
         derive_tree_main_account(&program_id, tree_id)
     }
 
     fn derive_subtree_pda(
         program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         subtree_id: u32,
     ) -> AccountId {
         derive_subtree_account(&program_id, tree_id, subtree_id)
     }
 
-    fn derive_config_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 24]) -> AccountId {
+    fn derive_config_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
         derive_config_account(&program_id, tree_id)
     }
 
-    fn derive_credit_token_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 24]) -> AccountId {
+    fn derive_credit_token_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
         derive_credit_token_account(&program_id, tree_id)
+    }
+
+    fn derive_credit_supply_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
+        crate::rln::derive_credit_supply_account(&program_id, tree_id)
     }
 
     fn derive_membership_pda(
         program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> AccountId {
         derive_membership_account(&program_id, tree_id, id_commitment)
@@ -181,7 +193,7 @@ mod tests {
         let merkle_program = Program::new(merkle_bytecode.clone()).ok()?;
         let registration_program = Program::new(registration_bytecode.clone()).ok()?;
 
-        let mut state = V03State::new_with_genesis_accounts(&[], &[], GENESIS_TIMESTAMP);
+        let mut state = V03State::new_with_genesis_accounts(&[], Vec::new(), GENESIS_TIMESTAMP);
 
         // Deploy merkle tree program
         let merkle_deploy_tx = ProgramDeploymentTransaction::new(
@@ -199,7 +211,7 @@ mod tests {
     }
 
     /// Builds a public transaction for merkle tree initialization.
-    fn build_merkle_init_tx(program: &Program, tree_id: &[u8; 24]) -> PublicTransaction {
+    fn build_merkle_init_tx(program: &Program, tree_id: &[u8; 32]) -> PublicTransaction {
         let tree_main_id = derive_tree_main_pda(program.id(), tree_id);
         let instruction = vec![0u8]; // opcode 0 = init
 
@@ -219,7 +231,7 @@ mod tests {
     /// Accounts: [tree_main, subtree] (subtree at index 1 for the merkle program).
     fn build_merkle_insert_tx(
         program: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         expected_index: u64,
         leaf_value: [u8; 32],
     ) -> PublicTransaction {
@@ -640,7 +652,7 @@ mod tests {
     #[allow(dead_code)]
     fn private_buy_credits(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         payment_keys: &PrivateAccountKeys,
         payment_account: &Account,
         credit_keys: &PrivateAccountKeys,
@@ -671,7 +683,7 @@ mod tests {
         let payment_commitment = Commitment::new(&payment_keys.npk(), payment_account);
 
         // buy_credits instruction
-        let instruction = Instruction::BuyCredits { amount };
+        let instruction = Instruction::BuyCredits { tree_id: *tree_id, amount };
         let instruction_data = Program::serialize_instruction(instruction).unwrap();
 
         // Ephemeral keys for the two private accounts
@@ -836,7 +848,7 @@ mod tests {
     fn build_registration_init_tx(
         registration: &Program,
         merkle: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         payment_token_id: &AccountId,
         price_per_unit: u128,
         treasury_id: &AccountId,
@@ -856,7 +868,7 @@ mod tests {
     fn build_registration_init_tx_with_config(
         registration: &Program,
         merkle: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         payment_token_id: &AccountId,
         price_per_unit: u128,
         treasury_id: &AccountId,
@@ -878,7 +890,7 @@ mod tests {
     fn build_registration_init_tx_with_durations(
         registration: &Program,
         merkle: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         payment_token_id: &AccountId,
         price_per_unit: u128,
         treasury_id: &AccountId,
@@ -898,9 +910,14 @@ mod tests {
             grace_period_duration_for_new_memberships: grace_period_duration,
         };
 
+        let config_id = derive_config_pda(registration.id(), tree_id);
+        let credit_token_id = derive_credit_token_pda(registration.id(), tree_id);
+        let credit_supply_id = derive_credit_supply_pda(registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+
         let message = Message::try_new(
             registration.id(),
-            vec![], // All accounts derived as PDAs
+            vec![config_id, credit_token_id, credit_supply_id, tree_main_id],
             vec![],
             instruction,
         ).expect("valid message");
@@ -1085,15 +1102,20 @@ mod tests {
 
     /// Gets total_registrations from config account.
     #[allow(dead_code)]
-    fn get_total_registrations(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
+    fn get_total_registrations(state: &V03State, registration: &Program, tree_id: &[u8; 32]) -> u64 {
         let config_id = derive_config_pda(registration.id(), tree_id);
         let config = state.get_account_by_id(config_id);
-        u64::from_le_bytes(config.data.as_ref()[168..176].try_into().unwrap())
+        u64::from_le_bytes(
+            config.data.as_ref()
+                [CONFIG_OFFSET_TOTAL_REGISTRATIONS..CONFIG_OFFSET_TOTAL_REGISTRATIONS + 8]
+                .try_into()
+                .unwrap(),
+        )
     }
 
     /// Gets current_total_rate_limit from config account.
     #[allow(dead_code)]
-    fn get_current_total_rate_limit(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
+    fn get_current_total_rate_limit(state: &V03State, registration: &Program, tree_id: &[u8; 32]) -> u64 {
         let config_id = derive_config_pda(registration.id(), tree_id);
         let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(
@@ -1104,7 +1126,7 @@ mod tests {
 
     /// Gets next_index from tree main account.
     #[allow(dead_code)]
-    fn get_tree_next_index(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> u64 {
+    fn get_tree_next_index(state: &V03State, registration: &Program, tree_id: &[u8; 32]) -> u64 {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
         let tree = state.get_account_by_id(tree_main_id);
         u64::from_le_bytes(tree.data.as_ref()[1..9].try_into().unwrap())
@@ -1112,7 +1134,7 @@ mod tests {
 
     /// Gets merkle root from tree main account.
     #[allow(dead_code)]
-    fn get_tree_root(state: &V03State, registration: &Program, tree_id: &[u8; 24]) -> [u8; 32] {
+    fn get_tree_root(state: &V03State, registration: &Program, tree_id: &[u8; 32]) -> [u8; 32] {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
         let tree = state.get_account_by_id(tree_main_id);
         tree.data.as_ref()[9..41].try_into().unwrap()
@@ -1145,7 +1167,7 @@ mod tests {
 
     /// Checks if a membership PDA exists (has non-empty data).
     #[allow(dead_code)]
-    fn membership_exists(state: &V03State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> bool {
+    fn membership_exists(state: &V03State, registration: &Program, tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> bool {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
         let membership = state.get_account_by_id(membership_id);
         !membership.data.as_ref().is_empty()
@@ -1162,7 +1184,7 @@ mod tests {
 
     /// Gets membership data from PDA. Returns None if membership doesn't exist.
     #[allow(dead_code)]
-    fn get_membership_data(state: &V03State, registration: &Program, tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> Option<MembershipData> {
+    fn get_membership_data(state: &V03State, registration: &Program, tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> Option<MembershipData> {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
         let membership = state.get_account_by_id(membership_id);
         let data = membership.data.as_ref();
@@ -1216,7 +1238,7 @@ mod tests {
     #[allow(dead_code)]
     fn build_register_tx(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: [u8; 32],
         rate_limit: u64,
         user_nonce: Nonce,
@@ -1227,6 +1249,7 @@ mod tests {
         let sid = subtree_id_for_index(next_index);
         let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
 
+        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
         let account_ids = vec![
             config_id,
             tree_main_id,
@@ -1234,11 +1257,14 @@ mod tests {
             setup.treasury_id.clone(),
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+            membership_id,
         ];
 
         let instruction = Instruction::Register {
+            tree_id: *tree_id,
             id_commitment,
             rate_limit,
+            subtree_id: sid,
         };
 
         let message = Message::try_new(
@@ -1269,7 +1295,7 @@ mod tests {
     #[allow(dead_code)]
     fn build_buy_credits_tx(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         user_credit_id: &AccountId,
         user_credit_key: &PrivateKey,
         amount: u128,
@@ -1279,7 +1305,7 @@ mod tests {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let credit_token_id = derive_credit_token_pda(setup.registration.id(), tree_id);
 
-        let instruction = Instruction::BuyCredits { amount };
+        let instruction = Instruction::BuyCredits { tree_id: *tree_id, amount };
 
         let message = Message::try_new(
             setup.registration.id(),
@@ -1313,7 +1339,7 @@ mod tests {
     #[allow(dead_code)]
     fn build_register_with_credits_tx(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         user_credit_id: &AccountId,
         user_credit_key: &PrivateKey,
         id_commitment: [u8; 32],
@@ -1327,6 +1353,7 @@ mod tests {
         let sid = subtree_id_for_index(next_index);
         let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
 
+        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
         let account_ids = vec![
             config_id,
             credit_token_id,
@@ -1334,11 +1361,14 @@ mod tests {
             user_credit_id.clone(),
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+            membership_id,
         ];
 
         let instruction = Instruction::RegisterWithCredits {
+            tree_id: *tree_id,
             id_commitment,
             amount_to_burn,
+            subtree_id: sid,
         };
 
         let message = Message::try_new(
@@ -1364,7 +1394,7 @@ mod tests {
     #[allow(dead_code)]
     fn build_slash_tx(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         identity_secret: [u8; 32],
         id_commitment: [u8; 32],
         leaf_index: u64,
@@ -1383,7 +1413,12 @@ mod tests {
             subtree_account_id,
         ];
 
-        let instruction = Instruction::Slash { identity_secret };
+        let instruction = Instruction::Slash {
+            tree_id: *tree_id,
+            id_commitment,
+            identity_secret,
+            subtree_id: sid,
+        };
 
         let message = Message::try_new(
             setup.registration.id(),
@@ -1457,52 +1492,48 @@ mod tests {
             "Config account should have data"
         );
 
-        // Verify config data layout (192 bytes total)
+        // Verify Borsh-encoded ConfigState layout (240 bytes under SPEL).
         let data = config_account.data.as_ref();
-        assert!(data.len() >= 192, "Config should be at least 192 bytes");
+        assert!(data.len() >= CONFIG_SIZE, "Config should be at least {CONFIG_SIZE} bytes");
 
-        // Check merkle_program_id at offset 0
         let merkle_id_bytes: [u8; 32] = bytemuck::cast(merkle.id());
         assert_eq!(
-            &data[0..32],
+            &data[CONFIG_OFFSET_MERKLE_PROGRAM_ID..CONFIG_OFFSET_MERKLE_PROGRAM_ID + 32],
             &merkle_id_bytes,
             "Config should store merkle program ID"
         );
 
-        // Check tree_id at offset 32
         assert_eq!(
-            &data[32..56],
+            &data[CONFIG_OFFSET_TREE_ID..CONFIG_OFFSET_TREE_ID + 32],
             &TREE_ID,
             "Config should store tree ID"
         );
 
-        // Check payment_token_id at offset 56
         assert_eq!(
-            &data[56..88],
+            &data[CONFIG_OFFSET_PAYMENT_TOKEN_ID..CONFIG_OFFSET_PAYMENT_TOKEN_ID + 32],
             payment_token_id.value(),
             "Config should store payment token ID"
         );
 
-        // Check price_per_unit at offset 120
-        let stored_price = u128::from_le_bytes(data[120..136].try_into().unwrap());
-        assert_eq!(
-            stored_price, PRICE_PER_UNIT,
-            "Config should store price per unit"
+        let stored_price = u128::from_le_bytes(
+            data[CONFIG_OFFSET_PRICE_PER_UNIT..CONFIG_OFFSET_PRICE_PER_UNIT + 16]
+                .try_into()
+                .unwrap(),
         );
+        assert_eq!(stored_price, PRICE_PER_UNIT, "Config should store price per unit");
 
-        // Check treasury at offset 136
         assert_eq!(
-            &data[136..168],
+            &data[CONFIG_OFFSET_TREASURY_ACCOUNT_ID..CONFIG_OFFSET_TREASURY_ACCOUNT_ID + 32],
             treasury_id.value(),
             "Config should store treasury ID"
         );
 
-        // Check total_registrations at offset 168 (should be 0)
-        let total_registrations = u64::from_le_bytes(data[168..176].try_into().unwrap());
-        assert_eq!(
-            total_registrations, 0,
-            "Initial total_registrations should be 0"
+        let total_registrations = u64::from_le_bytes(
+            data[CONFIG_OFFSET_TOTAL_REGISTRATIONS..CONFIG_OFFSET_TOTAL_REGISTRATIONS + 8]
+                .try_into()
+                .unwrap(),
         );
+        assert_eq!(total_registrations, 0, "Initial total_registrations should be 0");
     }
 
     #[test]
@@ -2277,7 +2308,7 @@ mod tests {
     fn fetch_node_from_state(
         state: &V03State,
         registration: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         level: u8,
         node_index: u64,
         cached_defaults: &[[u8; 32]],
@@ -2315,7 +2346,7 @@ mod tests {
     fn get_merkle_proof_from_state(
         state: &V03State,
         registration: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         leaf_index: u64,
     ) -> (Vec<[u8; 32]>, Vec<u8>, [u8; 32], [u8; 32]) {
         let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
@@ -2896,7 +2927,7 @@ mod tests {
     fn read_membership(
         state: &V03State,
         registration: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> Option<Vec<u8>> {
         let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
@@ -2907,7 +2938,7 @@ mod tests {
     fn read_grace_start(
         state: &V03State,
         registration: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> u64 {
         let data = read_membership(state, registration, tree_id, id_commitment)
@@ -2923,7 +2954,7 @@ mod tests {
     fn read_active_duration(
         state: &V03State,
         registration: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> u32 {
         let data = read_membership(state, registration, tree_id, id_commitment)
@@ -2938,7 +2969,7 @@ mod tests {
     fn read_grace_duration(
         state: &V03State,
         registration: &Program,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> u32 {
         let data = read_membership(state, registration, tree_id, id_commitment)
@@ -2957,7 +2988,7 @@ mod tests {
 
     fn build_extend_tx(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: [u8; 32],
     ) -> PublicTransaction {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
@@ -2969,7 +3000,10 @@ mod tests {
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
-        let instruction = Instruction::Extend;
+        let instruction = Instruction::Extend {
+            tree_id: *tree_id,
+            id_commitment,
+        };
 
         let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
             .expect("valid message");
@@ -2979,7 +3013,7 @@ mod tests {
 
     fn build_erase_tx(
         setup: &TestSetup,
-        tree_id: &[u8; 24],
+        tree_id: &[u8; 32],
         id_commitment: [u8; 32],
         leaf_index: u64,
     ) -> PublicTransaction {
@@ -2997,7 +3031,11 @@ mod tests {
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
-        let instruction = Instruction::Erase;
+        let instruction = Instruction::Erase {
+            tree_id: *tree_id,
+            id_commitment,
+            subtree_id: sid,
+        };
 
         let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
             .expect("valid message");

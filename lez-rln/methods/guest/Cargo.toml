@@ -11,19 +11,21 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
-token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
-clock_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
 rln-layouts = { path = "../../rln-layouts", default-features = false }
 rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
-
-[[bin]]
-name = "rln_registration"
-path = "src/bin/rln_registration.rs"
+spel-framework = { git = "https://github.com/logos-co/spel.git", rev = "ea2f998" }
+serde = { version = "1", default-features = false, features = ["derive"] }
 
 [[bin]]
 name = "incremental_merkle_tree"
 path = "src/bin/incremental_merkle_tree.rs"
+
+[[bin]]
+name = "rln_registration"
+path = "src/bin/rln_registration.rs"
