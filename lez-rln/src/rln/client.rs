@@ -21,7 +21,7 @@ use wallet::program_facades::token::Token;
 use crate::merkle_tree::SUBTREE_LEAVES;
 use crate::rln::{
     CONFIG_OFFSET_TREASURY_ACCOUNT_ID, derive_config_account, derive_subtree_account,
-    derive_tree_main_account, instruction::Instruction,
+    derive_tree_main_account, Instruction,
 };
 
 pub const PRICE_PER_UNIT: u128 = 10_000;
@@ -39,9 +39,9 @@ pub fn clock_account_id() -> AccountId {
     AccountId::new(crate::rln::CLOCK_50_ACCOUNT_ID_BYTES)
 }
 
-pub const REGISTRATION_BINARY: &str = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
+pub const REGISTRATION_BINARY: &str = "target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
 pub const MERKLE_TREE_BINARY: &str =
-    "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
+    "target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
 /// Default tree id used by the example binaries. SPEL's `ToSeed` is only
 /// implemented for `[u8; 32]`, so all tree ids in this codebase are 32 bytes.
 pub const TREE_ID: [u8; 32] = [

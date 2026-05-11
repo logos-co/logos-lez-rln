@@ -72,7 +72,7 @@ mod tests {
         subtree_id_for_index,
     };
 
-    use crate::rln::instruction::Instruction;
+    use crate::rln::Instruction;
 
     // ========================================================================
     // Program Paths
@@ -85,11 +85,11 @@ mod tests {
     }
 
     fn merkle_tree_binary_path() -> std::path::PathBuf {
-        repo_root().join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin")
+        repo_root().join("target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin")
     }
 
     fn rln_registration_binary_path() -> std::path::PathBuf {
-        repo_root().join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin")
+        repo_root().join("target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin")
     }
 
     // ========================================================================

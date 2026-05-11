@@ -1,7 +1,3 @@
-[workspace]
-resolver = "3"
-members = ["."]
-
 [package]
 name = "logos_lez_rln_guest"
 version = "0.1.0"

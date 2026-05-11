@@ -1,6 +1,3 @@
-[workspace]
-resolver = "3"
-
 [package]
 name = "logos_lez_rln_methods"
 version = "0.1.0"

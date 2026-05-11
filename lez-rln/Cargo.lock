@@ -3631,6 +3631,7 @@ dependencies = [
  "clock_core",
  "common",
  "hex",
+ "logos_lez_rln_guest",
  "nssa",
  "nssa_core",
  "rln",
@@ -3640,6 +3641,22 @@ dependencies = [
  "token_core",
  "tokio",
  "wallet",
+]
+
+[[package]]
+name = "logos_lez_rln_guest"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "bytemuck",
+ "clock_core",
+ "nssa_core",
+ "risc0-zkvm",
+ "rln-layouts",
+ "rust-poseidon-bn254-pure",
+ "serde",
+ "spel-framework",
+ "token_core",
 ]
 
 [[package]]
@@ -5118,6 +5135,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 
 [[package]]
+name = "rust-poseidon-bn254-pure"
+version = "0.0.1"
+source = "git+https://github.com/logos-storage/rust-poseidon-bn254-pure?rev=49e1042#49e10423d0fbf24703e1b1cdb45be724cd55b362"
+dependencies = [
+ "unroll",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5677,6 +5702,46 @@ dependencies = [
  "log",
  "rand 0.8.5",
  "sha1",
+]
+
+[[package]]
+name = "spel-framework"
+version = "0.2.0"
+source = "git+https://github.com/logos-co/spel.git?rev=ea2f998#ea2f998ed13c5ad66ef1cafe51de859bef27f872"
+dependencies = [
+ "borsh",
+ "nssa_core",
+ "serde_json",
+ "spel-framework-core",
+ "spel-framework-macros",
+]
+
+[[package]]
+name = "spel-framework-core"
+version = "0.2.0"
+source = "git+https://github.com/logos-co/spel.git?rev=ea2f998#ea2f998ed13c5ad66ef1cafe51de859bef27f872"
+dependencies = [
+ "borsh",
+ "nssa_core",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "syn 2.0.117",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "spel-framework-macros"
+version = "0.2.0"
+source = "git+https://github.com/logos-co/spel.git?rev=ea2f998#ea2f998ed13c5ad66ef1cafe51de859bef27f872"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "sha2",
+ "spel-framework-core",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6465,6 +6530,16 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "unroll"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ad948c1cb799b1a70f836077721a92a35ac177d4daddf4c20a633786d4cf618"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
