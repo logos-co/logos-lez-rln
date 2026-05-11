@@ -3,7 +3,6 @@ resolver = "3"
 members = [
   "rln-layouts",
   "lez-rln-ffi",
-  "methods/guest",
 ]
 
 [package]
@@ -23,11 +22,7 @@ wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git",
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3", features = ["client"] }
 
-# Shared layouts
 rln-layouts = { path = "rln-layouts" }
-
-# Guest crate — host imports the SPEL macro-emitted Instruction enum from here.
-logos_lez_rln_guest = { path = "methods/guest" }
 
 # External dependencies
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }

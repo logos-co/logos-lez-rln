@@ -8,5 +8,5 @@ pub mod layouts;
 pub mod pda;
 
 pub use constants::*;
-pub use logos_lez_rln_guest::program::Instruction;
+pub use rln_layouts::Instruction;
 pub use pda::*;

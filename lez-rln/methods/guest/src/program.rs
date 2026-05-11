@@ -134,7 +134,7 @@ fn new_membership_state(
     }
 }
 
-#[lez_program]
+#[lez_program(instruction = "rln_layouts::Instruction")]
 pub mod rln_registration {
     #[allow(unused_imports)]
     use super::*;

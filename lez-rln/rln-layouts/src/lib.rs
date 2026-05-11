@@ -26,12 +26,15 @@ pub use spel_pda::{combine_seeds, label_seed, u32_seed};
 pub mod state;
 pub use state::{ConfigState, MembershipState};
 
+pub mod instruction;
+pub use instruction::Instruction;
+
 // ============================================================================
-// Instruction Enum
+// Legacy Instruction Enum (kept for lez-rln-ffi; new SPEL Instruction lives in instruction.rs)
 // ============================================================================
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Instruction {
+pub enum LegacyInstruction {
     Initialize {
         merkle_program_id: [u8; 32],
         tree_id: [u8; 24],

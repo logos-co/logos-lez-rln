@@ -572,7 +572,7 @@ pub unsafe extern "C" fn rln_ffi_register_build_instruction(
 
     let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
-    let instruction = rln_layouts::Instruction::Register {
+    let instruction = rln_layouts::LegacyInstruction::Register {
         id_commitment: *id_commitment,
         rate_limit,
     };
