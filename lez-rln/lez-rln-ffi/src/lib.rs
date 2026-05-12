@@ -408,6 +408,7 @@ pub struct RlnRegisterPlan {
     pub treasury_account_id: [u8; 32],
     pub subtree_account_id: [u8; 32],
     pub clock_account_id: [u8; 32],
+    pub membership_account_id: [u8; 32],
     pub subtree_id: u32,
     pub next_leaf_index: u64,
 }
@@ -491,6 +492,7 @@ pub unsafe extern "C" fn rln_ffi_compute_rate_commitment(
 /// `config_data_ptr`/`config_data_len`: raw bytes of config account (tree_id is read from here)
 /// `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account (for next_leaf_index)
 /// `program_owner_ptr`: 32-byte registration program ID
+/// `id_commitment_ptr`: 32-byte id_commitment (needed to derive membership PDA)
 /// `out_plan`: pointer to caller-allocated RlnRegisterPlan
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_plan(
@@ -499,11 +501,13 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     tree_main_data_ptr: *const u8,
     tree_main_data_len: usize,
     program_owner_ptr: *const u8,
+    id_commitment_ptr: *const u8,
     out_plan: *mut RlnRegisterPlan,
 ) -> Error {
     if config_data_ptr.is_null()
         || tree_main_data_ptr.is_null()
         || program_owner_ptr.is_null()
+        || id_commitment_ptr.is_null()
         || out_plan.is_null()
     {
         return Error::NullPointer;
@@ -518,6 +522,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
     let tree_main_data = unsafe { core::slice::from_raw_parts(tree_main_data_ptr, tree_main_data_len) };
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
+    let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
     let config = ConfigLayout::parse(config_data);
     let tree_main = TreeMainLayout::parse(tree_main_data);
@@ -535,12 +540,16 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let subtree_seed = rln_layouts::subtree_seed(tree_id, subtree_id);
     let subtree_account_id = derive_pda(program_owner, &subtree_seed);
 
+    let membership_seed = rln_layouts::membership_seed(tree_id, id_commitment);
+    let membership_account_id = derive_pda(program_owner, &membership_seed);
+
     let plan = unsafe { &mut *out_plan };
     plan.config_account_id = config_account_id;
     plan.tree_main_account_id = tree_main_account_id;
     plan.treasury_account_id = config.treasury_account_id;
     plan.subtree_account_id = subtree_account_id;
     plan.clock_account_id = rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
+    plan.membership_account_id = membership_account_id;
     plan.subtree_id = subtree_id;
     plan.next_leaf_index = next_leaf_index;
 
@@ -549,32 +558,40 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
 
 /// Build the serialized instruction data for a Register transaction.
 ///
-/// Returns a borsh-serialized instruction payload that can be used
+/// Returns a risc0-serialized instruction payload that can be used
 /// to construct the transaction message.
 ///
+/// `tree_id_ptr`: 32-byte tree_id
 /// `id_commitment_ptr`: 32-byte id_commitment
 /// `rate_limit`: the user's rate limit
+/// `subtree_id`: the subtree index (from RlnRegisterPlan)
 /// `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
 /// Caller must free with `rln_ffi_free_string`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_build_instruction(
+    tree_id_ptr: *const u8,
     id_commitment_ptr: *const u8,
     rate_limit: u64,
+    subtree_id: u32,
     out_data_ptr: *mut *mut u8,
     out_data_len: *mut usize,
 ) -> Error {
-    if id_commitment_ptr.is_null()
+    if tree_id_ptr.is_null()
+        || id_commitment_ptr.is_null()
         || out_data_ptr.is_null()
         || out_data_len.is_null()
     {
         return Error::NullPointer;
     }
 
+    let tree_id = unsafe { &*(tree_id_ptr as *const [u8; 32]) };
     let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
-    let instruction = rln_layouts::LegacyInstruction::Register {
+    let instruction = rln_layouts::Instruction::Register {
+        tree_id: *tree_id,
         id_commitment: *id_commitment,
         rate_limit,
+        subtree_id,
     };
 
     // Serialize using risc0 serde (same format the on-chain program expects)
@@ -612,13 +629,13 @@ mod tests {
         for i in 0..32 {
             config_data[i] = (i + 1) as u8;
         }
-        for i in 0..24 {
+        for i in 0..32 {
             config_data[32 + i] = (i + 0x40) as u8;
         }
 
         let program_owner: [u8; 32] = [0xAA; 32];
 
-        let tree_id: [u8; 24] = config_data[32..56].try_into().unwrap();
+        let tree_id: [u8; 32] = config_data[32..64].try_into().unwrap();
         let expected_main_seed = rln_layouts::main_seed(&tree_id);
         let expected_main_id = derive_pda(&program_owner, &expected_main_seed);
 
@@ -652,4 +669,5 @@ mod tests {
                 "subtree {} account ID mismatch!", plan.subtree_ids[i]);
         }
     }
+
 }

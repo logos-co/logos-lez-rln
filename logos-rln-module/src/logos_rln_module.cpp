@@ -343,6 +343,10 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     }
 
     // Plan the registration (tree_id is read from config internally)
+    qDebug() << "register_member: configData.size=" << configData.size()
+             << "program_owner=" << bytesToHex(reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()), 32)
+             << "tree_id=" << bytesToHex(reinterpret_cast<const uint8_t*>(configData.constData()) + 32, 32);
+
     RlnFfiRlnRegisterPlan plan = {};
     err = rln_ffi_register_plan(
         reinterpret_cast<const uint8_t*>(configData.constData()),
@@ -350,18 +354,26 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
         reinterpret_cast<const uint8_t*>(treeMainData.constData()),
         static_cast<size_t>(treeMainData.size()),
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
         &plan);
     if (err != RLN_FFI_ERROR_SUCCESS) {
         qWarning() << "register_member: register_plan FFI error" << static_cast<int>(err);
         return {};
     }
+    qDebug() << "register_member: subtree=" << bytesToHex(plan.subtree_account_id, 32)
+             << "subtree_id=" << plan.subtree_id;
 
-    // Build instruction JSON
+    // Extract tree_id from config for instruction building (offset 32, length 32)
+    const uint8_t* treeIdPtr = reinterpret_cast<const uint8_t*>(configData.constData()) + 32;
+
+    // Build instruction data
     uint8_t* instrPtr = nullptr;
     size_t instrLen = 0;
     err = rln_ffi_register_build_instruction(
+        treeIdPtr,
         reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
         rate_limit,
+        plan.subtree_id,
         &instrPtr, &instrLen);
     if (err != RLN_FFI_ERROR_SUCCESS) {
         qWarning() << "register_member: build_instruction FFI error" << static_cast<int>(err);
@@ -371,7 +383,7 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     const QString instructionHex = bytesToHex(instrPtr, instrLen);
     rln_ffi_free_string(instrPtr, instrLen);
 
-    // Build accounts list for the transaction (6 accounts: config, tree_main, user_holding, treasury, subtree, clock)
+    // Build accounts list for the transaction (7 accounts: config, tree_main, user_holding, treasury, subtree, clock, membership)
     QJsonArray accountsList;
     accountsList.append(bytesToHex(plan.config_account_id, 32));
     accountsList.append(bytesToHex(plan.tree_main_account_id, 32));
@@ -379,6 +391,7 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     accountsList.append(bytesToHex(plan.treasury_account_id, 32));
     accountsList.append(bytesToHex(plan.subtree_account_id, 32));
     accountsList.append(bytesToHex(plan.clock_account_id, 32));
+    accountsList.append(bytesToHex(plan.membership_account_id, 32));
 
     // Build transaction request for wallet module
     QJsonObject txRequest;
@@ -459,6 +472,10 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
     }
 
     // 3. Phase 1: ask Rust which accounts we need to fetch
+    qDebug() << "get_merkle_proofs: configData.size=" << configData.size()
+             << "program_owner=" << bytesToHex(reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()), 32)
+             << "tree_id=" << bytesToHex(reinterpret_cast<const uint8_t*>(configData.constData()) + 32, 32);
+
     RlnFfiMerkleProofsPlan plan = {};
     RlnFfiError err = rln_ffi_merkle_proofs_plan(
         reinterpret_cast<const uint8_t*>(configData.constData()),
@@ -474,6 +491,10 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
 
     // 4. Fetch main account
     const QString mainHex = bytesToHex(plan.main_account_id, 32);
+    for (uint32_t i = 0; i < plan.subtree_count; ++i) {
+        qDebug() << "get_merkle_proofs: subtree" << plan.subtree_ids[i]
+                 << "=" << bytesToHex(plan.subtree_account_ids[i], 32);
+    }
     QByteArray mainData;
     if (!fetchAccountData(walletClient, mainHex, mainData)) {
         qWarning() << "get_merkle_proofs: failed to fetch main account" << mainHex;

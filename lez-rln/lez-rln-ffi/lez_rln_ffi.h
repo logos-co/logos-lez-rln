@@ -56,6 +56,7 @@ typedef struct RlnFfiRlnRegisterPlan {
   uint8_t treasury_account_id[32];
   uint8_t subtree_account_id[32];
   uint8_t clock_account_id[32];
+  uint8_t membership_account_id[32];
   uint32_t subtree_id;
   uint64_t next_leaf_index;
 } RlnFfiRlnRegisterPlan;
@@ -158,6 +159,7 @@ enum RlnFfiError rln_ffi_compute_rate_commitment(const uint8_t *id_commitment_pt
  * `config_data_ptr`/`config_data_len`: raw bytes of config account (tree_id is read from here)
  * `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account (for next_leaf_index)
  * `program_owner_ptr`: 32-byte registration program ID
+ * `id_commitment_ptr`: 32-byte id_commitment (needed to derive membership PDA)
  * `out_plan`: pointer to caller-allocated RlnRegisterPlan
  */
 enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
@@ -165,21 +167,26 @@ enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
                                        const uint8_t *tree_main_data_ptr,
                                        uintptr_t tree_main_data_len,
                                        const uint8_t *program_owner_ptr,
+                                       const uint8_t *id_commitment_ptr,
                                        struct RlnFfiRlnRegisterPlan *out_plan);
 
 /**
  * Build the serialized instruction data for a Register transaction.
  *
- * Returns a borsh-serialized instruction payload that can be used
+ * Returns a risc0-serialized instruction payload that can be used
  * to construct the transaction message.
  *
+ * `tree_id_ptr`: 32-byte tree_id
  * `id_commitment_ptr`: 32-byte id_commitment
  * `rate_limit`: the user's rate limit
+ * `subtree_id`: the subtree index (from RlnRegisterPlan)
  * `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
  * Caller must free with `rln_ffi_free_string`.
  */
-enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *id_commitment_ptr,
+enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *tree_id_ptr,
+                                                    const uint8_t *id_commitment_ptr,
                                                     uint64_t rate_limit,
+                                                    uint32_t subtree_id,
                                                     uint8_t **out_data_ptr,
                                                     uintptr_t *out_data_len);
 
