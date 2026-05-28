@@ -10,9 +10,16 @@ if ! command -v cargo &>/dev/null; then
   exit 1
 fi
 
-# --- Init submodule ---
-echo "Initializing lssa submodule..."
-git submodule update --init lssa
+# --- Ensure lssa is present ---
+# Best-effort: if lssa is a registered submodule (.gitmodules), init it; otherwise
+# expect it to already exist as a sibling working directory at lssa/.
+if [ -f .gitmodules ] && grep -q "submodule \"lssa\"" .gitmodules 2>/dev/null; then
+  echo "Initializing lssa submodule..."
+  git submodule update --init lssa
+elif [ ! -d lssa ]; then
+  echo "Error: lssa/ not found. Either register it as a submodule or clone it as a sibling working dir."
+  exit 1
+fi
 
 # --- Check port is free ---
 if nc -z 127.0.0.1 3040 2>/dev/null; then
@@ -34,4 +41,4 @@ echo "In another terminal: source dev/env.sh && cargo run --bin run_rln_proof"
 echo ""
 
 cd lssa
-exec env RUST_LOG=info cargo run --features standalone -p sequencer_runner -- sequencer_runner/configs/debug
+exec env RUST_LOG=info cargo run --features standalone -p sequencer_service -- sequencer/service/configs/debug/sequencer_config.json

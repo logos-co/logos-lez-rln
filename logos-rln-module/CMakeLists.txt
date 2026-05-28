@@ -196,3 +196,4 @@ install(TARGETS ${PLUGIN_TARGET}
 )
 install(DIRECTORY "${LEZ_RLN_FFI_INCLUDE}/" DESTINATION include)
 install(FILES "${LEZ_RLN_FFI_DYLIB}" DESTINATION lib)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/liblogos_rln_module_api.h" DESTINATION include)

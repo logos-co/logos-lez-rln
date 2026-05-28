@@ -1,181 +1,139 @@
-//! PDA (Program Derived Account) derivation for RLN registration.
+//! Program-Derived Account derivations for the RLN registration program.
 //!
-//! Seed construction is defined in `rln-layouts` (shared with guest).
+//! Every PDA address is `compute_pda(SHA-256(seed_1 || seed_2 || ...))` where
+//! each seed is a 32-byte value: string labels are zero-padded, `u32` args are
+//! little-endian in the first 4 bytes, 32-byte args pass through.
 
 use nssa::AccountId;
-use nssa_core::program::{PdaSeed, ProgramId};
+use nssa_core::program::ProgramId;
 
-// Re-export tree PDAs from the merkle_tree module (canonical definitions)
+// The tree main and subtree PDAs sit under the registration program's id (the
+// merkle program never owns its own data accounts), but their canonical
+// derivation lives next to the merkle program's other client code.
 pub use crate::merkle_tree::{
     derive_main_account as derive_tree_main_account,
     derive_subtree_account,
 };
 
-/// Derive config account for a registration program.
-pub fn derive_config_account(program_id: &ProgramId, tree_id: &[u8; 24]) -> AccountId {
-    AccountId::from((program_id, &PdaSeed::new(rln_layouts::config_seed(tree_id))))
+// `spel_seeds` is a leaf module so both this and `merkle_tree::pda` can depend
+// on it without a cross-module cycle.
+pub use crate::spel_seeds::{combine_seeds, derive_pda, label_seed, u32_seed};
+
+/// Config account: `seeds = [literal("config"), arg("tree_id")]`.
+pub fn derive_config_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("config"), tree_id])
 }
 
-/// Derive credit token definition account.
-pub fn derive_credit_token_account(program_id: &ProgramId, tree_id: &[u8; 24]) -> AccountId {
-    AccountId::from((program_id, &PdaSeed::new(rln_layouts::credit_token_seed(tree_id))))
+/// Credit (receipt) token definition: `seeds = [literal("receipt"), arg("tree_id")]`.
+pub fn derive_credit_token_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("receipt"), tree_id])
 }
 
-/// Derive credit supply holder account.
-pub fn derive_credit_supply_account(program_id: &ProgramId, tree_id: &[u8; 24]) -> AccountId {
-    AccountId::from((program_id, &PdaSeed::new(rln_layouts::credit_supply_seed(tree_id))))
+/// Credit supply holder: `seeds = [literal("supply"), arg("tree_id")]`.
+pub fn derive_credit_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("supply"), tree_id])
 }
 
-/// Derive membership account for a registered identity.
-///
-/// The seed is derived by hashing (tree_id || id_commitment) to create a unique
-/// 32-byte seed for each (tree_id, id_commitment) pair.
+/// Membership account: `seeds = [literal("membership"), arg("tree_id"), arg("id_commitment")]`.
 pub fn derive_membership_account(
     program_id: &ProgramId,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
 ) -> AccountId {
-    let seed = membership_pda_seed(tree_id, id_commitment);
-    AccountId::from((program_id, &PdaSeed::new(seed)))
+    derive_pda(
+        program_id,
+        &[&label_seed("membership"), tree_id, id_commitment],
+    )
 }
 
-/// Build the PDA seed for a membership account.
-///
-/// This returns the 32-byte seed that can be used as a PdaSeed for
-/// authorization when tail-calling to modify the membership account.
-pub fn membership_pda_seed(tree_id: &[u8; 24], id_commitment: &[u8; 32]) -> [u8; 32] {
-    use rln::hashers::poseidon_hash;
-    use rln::utils::{bytes_le_to_fr, fr_to_bytes_le};
-
-    let mut tree_id_padded = [0u8; 32];
-    tree_id_padded[0..24].copy_from_slice(tree_id);
-
-    let (tree_fr, _) = bytes_le_to_fr(&tree_id_padded)
-        .expect("tree_id is not a valid BN254 field element");
-    let (commit_fr, _) = bytes_le_to_fr(id_commitment)
-        .expect("id_commitment is not a valid BN254 field element");
-
-    let seed_fr = poseidon_hash(&[tree_fr, commit_fr]);
-    fr_to_bytes_le(&seed_fr).try_into().unwrap()
+/// Raw seed bytes for the membership PDA (used as `pda_seeds` in chained calls).
+pub fn membership_pda_seed(tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("membership"), tree_id, id_commitment])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nssa_core::program::PdaSeed;
 
     fn mock_program_id() -> ProgramId {
-        let bytes: [u8; 32] = [1u8; 32];
-        bytemuck::cast(bytes)
+        bytemuck::cast([1u8; 32])
+    }
+
+    fn tree_id_a() -> [u8; 32] {
+        let mut t = [0u8; 32];
+        t[0] = 7;
+        t
     }
 
     #[test]
-    fn test_pda_derivation_is_deterministic() {
-        let program_id = mock_program_id();
-        let tree_id: [u8; 24] = [2u8; 24];
-
-        let pda1 = derive_config_account(&program_id, &tree_id);
-        let pda2 = derive_config_account(&program_id, &tree_id);
-
-        assert_eq!(pda1, pda2, "PDA derivation should be deterministic");
+    fn pda_derivation_is_deterministic() {
+        let p = mock_program_id();
+        let t = tree_id_a();
+        assert_eq!(derive_config_account(&p, &t), derive_config_account(&p, &t));
+        assert_eq!(
+            derive_membership_account(&p, &t, &[2u8; 32]),
+            derive_membership_account(&p, &t, &[2u8; 32]),
+        );
     }
 
     #[test]
-    fn test_different_tree_ids_produce_different_pdas() {
-        let program_id = mock_program_id();
-        let tree_id1: [u8; 24] = [1u8; 24];
-        let tree_id2: [u8; 24] = [2u8; 24];
-
-        let pda1 = derive_config_account(&program_id, &tree_id1);
-        let pda2 = derive_config_account(&program_id, &tree_id2);
-
-        assert_ne!(pda1, pda2, "Different tree IDs should produce different PDAs");
+    fn different_tree_ids_produce_different_pdas() {
+        let p = mock_program_id();
+        let mut t2 = tree_id_a();
+        t2[1] = 9;
+        assert_ne!(derive_config_account(&p, &tree_id_a()), derive_config_account(&p, &t2));
     }
 
     #[test]
-    fn test_all_pda_types_are_distinct() {
-        let program_id = mock_program_id();
-        let tree_id: [u8; 24] = [1u8; 24];
-
-        let config = derive_config_account(&program_id, &tree_id);
-        let main = derive_tree_main_account(&program_id, &tree_id);
-        let credit = derive_credit_token_account(&program_id, &tree_id);
-        let supply = derive_credit_supply_account(&program_id, &tree_id);
-        let subtree = derive_subtree_account(&program_id, &tree_id, 0);
-
-        assert_ne!(config, main, "config and main should differ");
-        assert_ne!(config, credit, "config and credit should differ");
-        assert_ne!(config, supply, "config and supply should differ");
-        assert_ne!(config, subtree, "config and subtree should differ");
-        assert_ne!(main, credit, "main and credit should differ");
-        assert_ne!(main, supply, "main and supply should differ");
-        assert_ne!(main, subtree, "main and subtree should differ");
-        assert_ne!(credit, supply, "credit and supply should differ");
-        assert_ne!(credit, subtree, "credit and subtree should differ");
-        assert_ne!(supply, subtree, "supply and subtree should differ");
+    fn all_pda_types_are_distinct() {
+        let p = mock_program_id();
+        let t = tree_id_a();
+        let config = derive_config_account(&p, &t);
+        let main = derive_tree_main_account(&p, &t);
+        let credit = derive_credit_token_account(&p, &t);
+        let supply = derive_credit_supply_account(&p, &t);
+        let subtree = derive_subtree_account(&p, &t, 0);
+        let mem = derive_membership_account(&p, &t, &[3u8; 32]);
+        for (a, b) in [
+            (&config, &main), (&config, &credit), (&config, &supply),
+            (&config, &subtree), (&config, &mem), (&main, &credit),
+            (&main, &supply), (&main, &subtree), (&main, &mem),
+            (&credit, &supply), (&credit, &subtree), (&credit, &mem),
+            (&supply, &subtree), (&supply, &mem), (&subtree, &mem),
+        ] {
+            assert_ne!(a, b, "PDA types must be distinct");
+        }
     }
 
     #[test]
-    fn test_subtree_pdas_vary_by_id() {
-        let program_id = mock_program_id();
-        let tree_id: [u8; 24] = [1u8; 24];
-
-        let subtree_0 = derive_subtree_account(&program_id, &tree_id, 0);
-        let subtree_1 = derive_subtree_account(&program_id, &tree_id, 1);
-
-        assert_ne!(subtree_0, subtree_1, "Different subtree IDs should differ");
+    fn membership_pdas_differ_by_commitment() {
+        let p = mock_program_id();
+        let t = tree_id_a();
+        assert_ne!(
+            derive_membership_account(&p, &t, &[1u8; 32]),
+            derive_membership_account(&p, &t, &[2u8; 32]),
+        );
     }
 
     #[test]
-    fn test_membership_pda_derivation_is_deterministic() {
-        let program_id = mock_program_id();
-        let tree_id: [u8; 24] = [1u8; 24];
-        let id_commitment: [u8; 32] = [2u8; 32];
-
-        let pda1 = derive_membership_account(&program_id, &tree_id, &id_commitment);
-        let pda2 = derive_membership_account(&program_id, &tree_id, &id_commitment);
-
-        assert_eq!(pda1, pda2, "PDA derivation should be deterministic");
+    fn membership_pdas_differ_by_tree() {
+        let p = mock_program_id();
+        let mut t2 = tree_id_a();
+        t2[1] = 9;
+        assert_ne!(
+            derive_membership_account(&p, &tree_id_a(), &[5u8; 32]),
+            derive_membership_account(&p, &t2, &[5u8; 32]),
+        );
     }
 
     #[test]
-    fn test_membership_pdas_differ_by_commitment() {
-        let program_id = mock_program_id();
-        let tree_id: [u8; 24] = [1u8; 24];
-        let commit1: [u8; 32] = [1u8; 32];
-        let commit2: [u8; 32] = [2u8; 32];
-
-        let pda1 = derive_membership_account(&program_id, &tree_id, &commit1);
-        let pda2 = derive_membership_account(&program_id, &tree_id, &commit2);
-
-        assert_ne!(pda1, pda2, "Different commitments should produce different PDAs");
-    }
-
-    #[test]
-    fn test_membership_pdas_differ_by_tree() {
-        let program_id = mock_program_id();
-        let tree_id1: [u8; 24] = [1u8; 24];
-        let tree_id2: [u8; 24] = [2u8; 24];
-        let id_commitment: [u8; 32] = [3u8; 32];
-
-        let pda1 = derive_membership_account(&program_id, &tree_id1, &id_commitment);
-        let pda2 = derive_membership_account(&program_id, &tree_id2, &id_commitment);
-
-        assert_ne!(pda1, pda2, "Different trees should produce different PDAs");
-    }
-
-    #[test]
-    fn test_membership_pda_distinct_from_other_pdas() {
-        let program_id = mock_program_id();
-        let tree_id: [u8; 24] = [1u8; 24];
-        let id_commitment: [u8; 32] = [2u8; 32];
-
-        let membership = derive_membership_account(&program_id, &tree_id, &id_commitment);
-        let config = derive_config_account(&program_id, &tree_id);
-        let main = derive_tree_main_account(&program_id, &tree_id);
-        let credit = derive_credit_token_account(&program_id, &tree_id);
-
-        assert_ne!(membership, config, "membership and config should differ");
-        assert_ne!(membership, main, "membership and main should differ");
-        assert_ne!(membership, credit, "membership and credit should differ");
+    fn membership_seed_matches_derive() {
+        let p = mock_program_id();
+        let t = tree_id_a();
+        let id = [4u8; 32];
+        let seed = membership_pda_seed(&t, &id);
+        let from_seed = AccountId::for_public_pda(&p, &PdaSeed::new(seed));
+        assert_eq!(from_seed, derive_membership_account(&p, &t, &id));
     }
 }

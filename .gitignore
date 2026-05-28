@@ -4,6 +4,11 @@ storage.json
 wallet_config.json
 dev/storage.json
 dev/wallet_config.json
+!testnet/wallet_config.json
+!testnet/storage.json.seed
+!testnet/supply_holding.txt
+!testnet/payment_account.txt
+!testnet/config_account.txt
 dev/logs/
 .DS_Store
 result

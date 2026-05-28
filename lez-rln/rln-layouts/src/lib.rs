@@ -20,12 +20,21 @@ use bytemuck::{Pod, Zeroable};
 pub mod sparse;
 pub use sparse::{read_sparse_node, subtree_node_offset};
 
+pub mod spel_pda;
+pub use spel_pda::{combine_seeds, label_seed, u32_seed};
+
+pub mod state;
+pub use state::{ConfigState, MembershipState};
+
+pub mod instruction;
+pub use instruction::Instruction;
+
 // ============================================================================
-// Instruction Enum
+// Legacy Instruction Enum (kept for lez-rln-ffi; new SPEL Instruction lives in instruction.rs)
 // ============================================================================
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Instruction {
+pub enum LegacyInstruction {
     Initialize {
         merkle_program_id: [u8; 32],
         tree_id: [u8; 24],
@@ -109,16 +118,6 @@ macro_rules! le_int {
             pub fn get(&self) -> $int {
                 <$int>::from_le_bytes(self.0)
             }
-
-            #[inline]
-            pub fn set(&mut self, value: $int) {
-                self.0 = value.to_le_bytes();
-            }
-
-            #[inline]
-            pub fn new(value: $int) -> Self {
-                Self(value.to_le_bytes())
-            }
         }
     };
 }
@@ -168,66 +167,9 @@ impl ConfigLayout {
     pub const SIZE: usize = 200;
 
     #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
-    #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }
-
-    #[inline] pub fn price_per_unit(&self) -> u128 { self.price_per_unit.get() }
-    #[inline] pub fn set_price_per_unit(&mut self, v: u128) { self.price_per_unit.set(v); }
-    #[inline] pub fn total_registrations(&self) -> u64 { self.total_registrations.get() }
-    #[inline] pub fn set_total_registrations(&mut self, v: u64) { self.total_registrations.set(v); }
-    #[inline] pub fn max_total_rate_limit(&self) -> u64 { self.max_total_rate_limit.get() }
-    #[inline] pub fn set_max_total_rate_limit(&mut self, v: u64) { self.max_total_rate_limit.set(v); }
-    #[inline] pub fn current_total_rate_limit(&self) -> u64 { self.current_total_rate_limit.get() }
-    #[inline] pub fn set_current_total_rate_limit(&mut self, v: u64) { self.current_total_rate_limit.set(v); }
-    #[inline] pub fn active_duration_for_new_memberships(&self) -> u32 { self.active_duration_for_new_memberships.get() }
-    #[inline] pub fn set_active_duration_for_new_memberships(&mut self, v: u32) { self.active_duration_for_new_memberships.set(v); }
-    #[inline] pub fn grace_period_duration_for_new_memberships(&self) -> u32 { self.grace_period_duration_for_new_memberships.get() }
-    #[inline] pub fn set_grace_period_duration_for_new_memberships(&mut self, v: u32) { self.grace_period_duration_for_new_memberships.set(v); }
 }
 
 const _: () = assert!(core::mem::size_of::<ConfigLayout>() == ConfigLayout::SIZE);
-
-/// Zero-copy layout for membership account data (96 bytes).
-///
-/// ```text
-/// Offset  Size  Field
-/// ------  ----  -----
-/// 0       8     leaf_index (u64 le)
-/// 8       8     rate_limit (u64 le)
-/// 16      32    id_commitment
-/// 48      8     grace_period_start_timestamp (u64 le, unix seconds)
-/// 56      4     active_duration (u32 le, seconds; snapshot of global at registration)
-/// 60      4     grace_period_duration (u32 le, seconds; snapshot of global at registration)
-/// ```
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct MembershipLayout {
-    pub leaf_index: U64Le,
-    pub rate_limit: U64Le,
-    pub id_commitment: [u8; 32],
-    pub grace_period_start_timestamp: U64Le,
-    pub active_duration: U32Le,
-    pub grace_period_duration: U32Le,
-}
-
-impl MembershipLayout {
-    pub const SIZE: usize = 64;
-
-    #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
-    #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }
-
-    #[inline] pub fn leaf_index(&self) -> u64 { self.leaf_index.get() }
-    #[inline] pub fn set_leaf_index(&mut self, v: u64) { self.leaf_index.set(v); }
-    #[inline] pub fn rate_limit(&self) -> u64 { self.rate_limit.get() }
-    #[inline] pub fn set_rate_limit(&mut self, v: u64) { self.rate_limit.set(v); }
-    #[inline] pub fn grace_period_start_timestamp(&self) -> u64 { self.grace_period_start_timestamp.get() }
-    #[inline] pub fn set_grace_period_start_timestamp(&mut self, v: u64) { self.grace_period_start_timestamp.set(v); }
-    #[inline] pub fn active_duration(&self) -> u32 { self.active_duration.get() }
-    #[inline] pub fn set_active_duration(&mut self, v: u32) { self.active_duration.set(v); }
-    #[inline] pub fn grace_period_duration(&self) -> u32 { self.grace_period_duration.get() }
-    #[inline] pub fn set_grace_period_duration(&mut self, v: u32) { self.grace_period_duration.set(v); }
-}
-
-const _: () = assert!(core::mem::size_of::<MembershipLayout>() == MembershipLayout::SIZE);
 
 /// Zero-copy layout for token holding account (49 bytes).
 #[repr(C, packed)]
@@ -242,35 +184,43 @@ impl TokenHoldingLayout {
     pub const SIZE: usize = 49;
 
     #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
-    #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }
 
     #[inline] pub fn balance(&self) -> u128 { self.balance.get() }
-    #[inline] pub fn set_balance(&mut self, v: u128) { self.balance.set(v); }
 }
 
 const _: () = assert!(core::mem::size_of::<TokenHoldingLayout>() == TokenHoldingLayout::SIZE);
 
-/// Zero-copy layout for token definition account (55 bytes).
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct TokenDefinitionLayout {
-    pub account_type: u8,
-    pub name: [u8; 6],
-    pub total_supply: U128Le,
-    pub metadata_id: [u8; 32],
+// ============================================================================
+// Merkle Tree Opcodes
+// ============================================================================
+
+/// Opcodes for the incremental merkle tree program.
+///
+/// The opcode is the first byte of `instruction_data` passed to the merkle
+/// program. Numeric values are part of the cross-program wire format and MUST
+/// NOT be changed without coordinated guest+host updates.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MerkleOpcode {
+    Initialize = 0,
+    Insert = 1,
+    Remove = 2,
+    Set = 3,
 }
 
-impl TokenDefinitionLayout {
-    pub const SIZE: usize = 55;
-
-    #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
-    #[inline] pub fn parse_mut(data: &mut [u8]) -> &mut Self { bytemuck::from_bytes_mut(&mut data[..Self::SIZE]) }
-
-    #[inline] pub fn total_supply(&self) -> u128 { self.total_supply.get() }
-    #[inline] pub fn set_total_supply(&mut self, v: u128) { self.total_supply.set(v); }
+impl MerkleOpcode {
+    /// Decode an opcode byte. Returns `None` for unknown values.
+    #[inline]
+    pub fn from_u8(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Initialize),
+            1 => Some(Self::Insert),
+            2 => Some(Self::Remove),
+            3 => Some(Self::Set),
+            _ => None,
+        }
+    }
 }
-
-const _: () = assert!(core::mem::size_of::<TokenDefinitionLayout>() == TokenDefinitionLayout::SIZE);
 
 // ============================================================================
 // Merkle Tree Constants
@@ -336,22 +286,6 @@ pub fn config_seed(tree_id: &[u8; 24]) -> [u8; 32] {
     let mut seed = [0u8; 32];
     seed[0..24].copy_from_slice(tree_id);
     seed[24..32].copy_from_slice(b"_config_");
-    seed
-}
-
-/// Build the raw 32-byte PDA seed for the credit token definition account.
-pub fn credit_token_seed(tree_id: &[u8; 24]) -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[0..24].copy_from_slice(tree_id);
-    seed[24..32].copy_from_slice(b"_receipt");
-    seed
-}
-
-/// Build the raw 32-byte PDA seed for the credit supply holder account.
-pub fn credit_supply_seed(tree_id: &[u8; 24]) -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[0..24].copy_from_slice(tree_id);
-    seed[24..32].copy_from_slice(b"_supply_");
     seed
 }
 

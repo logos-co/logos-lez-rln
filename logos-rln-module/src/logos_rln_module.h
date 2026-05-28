@@ -39,6 +39,8 @@ public:
                                          const QString& user_holding_account_id,
                                          const QString& id_commitment_hex,
                                          int rate_limit) override;
+    Q_INVOKABLE QString is_member_registered(const QString& config_account_id,
+                                              const QString& id_commitment_hex) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& data);

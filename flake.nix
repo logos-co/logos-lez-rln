@@ -11,11 +11,14 @@
 
     crane.url = "github:ipetkov/crane";
 
-    logos-core.url = "github:logos-co/logos-cpp-sdk/a4bd66c";
+    logos-core.url = "github:logos-co/logos-cpp-sdk/1468180b2567f4c59346bb94f74951e76341f5c5";
+
+    logos-execution-zone.url = "github:adklempner/lssa/feat/rln-sim-98e98c62-wallet-ffi";
 
     logos-wallet-module = {
       url = "github:logos-blockchain/logos-execution-zone-module";
       inputs.logos-core.follows = "logos-core";
+      inputs.logos-execution-zone.follows = "logos-execution-zone";
     };
 
     logos-module-viewer.url = "github:logos-co/logos-module-viewer";
@@ -87,7 +90,13 @@
 
           # --- C++: logos-rln-module ---
           llvmPkgs = pkgs.llvmPackages;
-          logosCore = logos-core.packages.${system}.default;
+          logosCore = pkgs.symlinkJoin {
+            name = "logos-cpp-sdk";
+            paths = [
+              logos-core.packages.${system}.logos-cpp-lib
+              logos-core.packages.${system}.logos-cpp-include
+            ];
+          };
 
           logosRlnModulePackage = pkgs.stdenv.mkDerivation {
             pname = "logos-rln-module";
@@ -166,7 +175,13 @@
           pkgs = mkPkgs system;
           lezRlnFfiPackage = self.packages.${system}.lez-rln-ffi;
           logosRlnModulePackage = self.packages.${system}.logos-rln-module;
-          logosCorePackage = logos-core.packages.${system}.default;
+          logosCorePackage = pkgs.symlinkJoin {
+            name = "logos-cpp-sdk";
+            paths = [
+              logos-core.packages.${system}.logos-cpp-lib
+              logos-core.packages.${system}.logos-cpp-include
+            ];
+          };
         in
         {
           default = pkgs.mkShell {

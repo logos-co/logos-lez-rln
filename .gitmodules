@@ -1,0 +1,9 @@
+[submodule "lssa"]
+	path = lssa
+	url = git@github.com:adklempner/lssa.git
+[submodule "logos-delivery-module"]
+	path = logos-delivery-module
+	url = git@github.com:adklempner/logos-delivery-module.git
+[submodule "logos-execution-zone-module"]
+	path = logos-execution-zone-module
+	url = git@github.com:adklempner/logos-execution-zone-module.git

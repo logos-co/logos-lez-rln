@@ -13,7 +13,7 @@ use logos_lez_rln::rln::client::{
 };
 use logos_lez_rln::rln::{derive_config_account, derive_tree_main_account};
 
-const USER_FUNDING: u128 = 100_000_000;
+const USER_FUNDING: u128 = 1_000_000_000;
 
 #[tokio::main]
 async fn main() {
