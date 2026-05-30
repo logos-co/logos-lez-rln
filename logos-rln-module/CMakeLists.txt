@@ -161,12 +161,16 @@ target_include_directories(${PLUGIN_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+find_package(OpenSSL REQUIRED)
+
 target_link_libraries(${PLUGIN_TARGET} PRIVATE
         Qt6::Core
         Qt6::RemoteObjects
         lez_rln_ffi
         logos_cpp_sdk
         logos_core
+        OpenSSL::SSL
+        OpenSSL::Crypto
 )
 
 target_compile_definitions(${PLUGIN_TARGET} PRIVATE

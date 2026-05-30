@@ -6,7 +6,7 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
-static const char* WALLET_MODULE = "liblogos_execution_zone_wallet_module";
+static const char* WALLET_MODULE = "logos_execution_zone";
 
 static QString bytesToHex(const uint8_t* data, const size_t length) {
     const QByteArray bytearray(reinterpret_cast<const char*>(data), static_cast<int>(length));
