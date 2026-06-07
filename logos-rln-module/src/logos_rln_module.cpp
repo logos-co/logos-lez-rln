@@ -108,7 +108,8 @@ static QString resolveAccountId(LogosAPIClient* walletClient, const QString& id)
     // Drain event loop before blocking RPC — keeps other protocols alive.
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     const QVariant hexResult = walletClient->invokeRemoteMethod(
-        WALLET_MODULE, "account_id_from_base58", QVariant(id));
+        QStringLiteral("logos_execution_zone"), QStringLiteral("account_id_from_base58"),
+        QVariant(id), Timeout(60000));
     return hexResult.toString();
 }
 
@@ -201,7 +202,8 @@ static bool fetchAccountDataQuiet(LogosAPIClient* walletClient,
                                    QByteArray& outData) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     const QVariant result = walletClient->invokeRemoteMethod(
-        WALLET_MODULE, "get_account_public", QVariant(accountIdHex));
+        QStringLiteral("logos_execution_zone"), QStringLiteral("get_account_public"),
+        QVariant(accountIdHex), Timeout(60000));
     const QString json = result.toString();
     if (json.isEmpty()) return false;
     const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
@@ -238,7 +240,8 @@ static bool fetchAccountData(LogosAPIClient* walletClient,
     // Drain event loop before blocking RPC — keeps lightpush etc. alive.
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     const QVariant result = walletClient->invokeRemoteMethod(
-        WALLET_MODULE, "get_account_public", QVariant(accountIdHex));
+        QStringLiteral("logos_execution_zone"), QStringLiteral("get_account_public"),
+        QVariant(accountIdHex), Timeout(60000));
     const QString json = result.toString();
     if (json.isEmpty()) {
         qWarning() << "fetchAccountData failed: empty response for" << accountIdHex;
@@ -460,7 +463,8 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
 
     // Send the transaction via wallet module
     const QVariant sendResult = walletClient->invokeRemoteMethod(
-        WALLET_MODULE, "send_public_transaction", QVariant(txRequestJson));
+        QStringLiteral("logos_execution_zone"), QStringLiteral("send_public_transaction"),
+        QVariant(txRequestJson), Timeout(180000));
     const QString sendResultStr = sendResult.toString();
 
     if (sendResultStr.isEmpty()) {
