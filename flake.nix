@@ -11,13 +11,13 @@
 
     crane.url = "github:ipetkov/crane";
 
-    logos-core.url = "github:logos-co/logos-cpp-sdk/1468180b2567f4c59346bb94f74951e76341f5c5";
+    logos-core.url = "github:logos-co/logos-cpp-sdk/25c88f4d48fa95ea4437194bcf60bd8d0cf84a74";
 
     logos-execution-zone.url = "github:adklempner/lssa/feat/rln-sim-98e98c62-wallet-ffi";
 
     logos-wallet-module = {
       url = "github:logos-blockchain/logos-execution-zone-module";
-      inputs.logos-core.follows = "logos-core";
+      inputs.logos-cpp-sdk.follows = "logos-core";
       inputs.logos-execution-zone.follows = "logos-execution-zone";
     };
 
