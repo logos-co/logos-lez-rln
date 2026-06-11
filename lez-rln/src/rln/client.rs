@@ -51,7 +51,7 @@ pub const MERKLE_TREE_BINARY: &str =
 /// implemented for `[u8; 32]`, so all tree ids in this codebase are 32 bytes.
 pub const TREE_ID: [u8; 32] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-    160, 203, 166, 232, 92, 161, 226, 107,
+    160, 203, 166, 232, 92, 161, 226, 110,
 ];
 pub const DATA_DIR: &str = ".logos-lez-rln";
 
