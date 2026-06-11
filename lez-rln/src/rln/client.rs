@@ -24,7 +24,13 @@ use crate::rln::{
 };
 
 pub const PRICE_PER_UNIT: u128 = 10_000;
-pub const TOKEN_SUPPLY: u128 = 10_000_000_000;
+/// 100 B RLNTOK minted per tree deploy. At PRICE_PER_UNIT=10_000 and the
+/// demo's rateLimit=100, each registration burns 1 M tokens — so this
+/// supply funds roughly 100K registrations across the tree's lifetime
+/// before depletion forces a fresh deploy. Previous 10 B baseline ran
+/// out after sustained testnet use and silently stranded fresh clones
+/// at `Timeout waiting for account ... to be initialized` in run_setup.
+pub const TOKEN_SUPPLY: u128 = 100_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
 /// 30 days, in seconds.

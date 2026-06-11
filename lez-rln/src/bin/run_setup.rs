@@ -13,7 +13,12 @@ use logos_lez_rln::rln::client::{
 };
 use logos_lez_rln::rln::{derive_config_account, derive_tree_main_account};
 
-const USER_FUNDING: u128 = 1_000_000_000;
+/// 10 B RLNTOK funded per payment account. At PRICE_PER_UNIT=10_000 and the
+/// demo's rateLimit=100, each registration burns 1 M tokens — so each payment
+/// account hands out ~10K registrations before depletion forces a re-fund
+/// from supply_holding. Tracks the TOKEN_SUPPLY 10x bump in client.rs (10 B
+/// supply funded only ~1K regs per account, hit the wall in long dev cycles).
+const USER_FUNDING: u128 = 10_000_000_000;
 
 #[tokio::main]
 async fn main() {
