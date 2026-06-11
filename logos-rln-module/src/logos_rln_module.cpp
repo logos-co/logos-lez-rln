@@ -676,16 +676,32 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
                                                   static_cast<int>(jsonLen));
     rln_ffi_free_string(jsonPtr, jsonLen);
 
-    // 7. Extract valid_roots from the SAME mainData buffer we just used to
-    //    build the proofs. Avoids a race where a follow-up get_valid_roots
-    //    call would re-fetch the main account after another registration TX
-    //    landed, returning a roots window that no longer contains the root
-    //    encoded in the proofs we just computed.
+    // 7. Refetch mainData after subtree fetches, extract valid_roots from the
+    //    refreshed snapshot. The proofs' path-implied root is computed by
+    //    zerokit's FFI from `path_elements`, which derive from subtree data
+    //    fetched at T_subtree >= T_main. If a registration lands between the
+    //    T_main fetch (step 4) and the T_subtree fetch (step 5), the proof's
+    //    actual cryptographic root advances to T_subtree's state, but the
+    //    valid_roots window read from the T_main snapshot lags behind and
+    //    doesn't include it — which surfaces as
+    //    "Self-verify: Expected one of the provided roots" downstream.
+    //
+    //    A second mainData fetch (T_refetch >= T_subtree) guarantees the
+    //    valid_roots window reflects at least T_subtree's tree state, so the
+    //    proofs' path-implied root will land in the window unless more than
+    //    `validRoots.len` (typically 5) new registrations land between
+    //    T_subtree and T_refetch — vanishingly rare given the gifter's
+    //    single-writer registration worker.
+    QByteArray mainDataRefresh;
+    if (!fetchAccountData(walletClient, mainHex, mainDataRefresh)) {
+        qWarning() << "get_merkle_proofs: refetch main account failed; falling back to original buffer";
+        mainDataRefresh = mainData;
+    }
     uint8_t rootsBuf[160] = {};
     uint32_t rootsCount = 0;
     err = rln_ffi_get_valid_roots(
-        reinterpret_cast<const uint8_t*>(mainData.constData()),
-        static_cast<size_t>(mainData.size()),
+        reinterpret_cast<const uint8_t*>(mainDataRefresh.constData()),
+        static_cast<size_t>(mainDataRefresh.size()),
         rootsBuf, &rootsCount);
     QJsonArray rootsArray;
     if (err == RLN_FFI_ERROR_SUCCESS) {
