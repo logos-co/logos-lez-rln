@@ -209,7 +209,6 @@ dependencies = [
  "digest",
  "fnv",
  "merlin",
- "rayon",
  "sha2",
 ]
 
@@ -259,7 +258,6 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
- "rayon",
  "zeroize",
 ]
 
@@ -300,7 +298,6 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "paste",
- "rayon",
  "zeroize",
 ]
 
@@ -378,7 +375,6 @@ dependencies = [
  "ark-relations 0.5.1",
  "ark-serialize 0.5.0",
  "ark-std 0.5.0",
- "rayon",
 ]
 
 [[package]]
@@ -407,7 +403,6 @@ dependencies = [
  "educe",
  "fnv",
  "hashbrown 0.15.5",
- "rayon",
 ]
 
 [[package]]
@@ -474,7 +469,6 @@ dependencies = [
  "arrayvec",
  "digest",
  "num-bigint",
- "rayon",
 ]
 
 [[package]]
@@ -541,7 +535,6 @@ checksum = "246a225cc6131e9ee4f24619af0f19d67761fff15d7ccc22e42b80846e69449a"
 dependencies = [
  "num-traits",
  "rand 0.8.5",
- "rayon",
 ]
 
 [[package]]
@@ -4995,9 +4988,9 @@ dependencies = [
 
 [[package]]
 name = "rln"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "927f89b31cd4a7e98c7311dc5ba93236d8adef8b455e69eadf1bc8d1f4ecb05b"
+checksum = "ba799769e5c1230b6fcf357de13d32a59ea0071894eaf2832d9ee822b6ee6db0"
 dependencies = [
  "ark-bn254 0.5.0",
  "ark-ec 0.5.0",
@@ -5014,7 +5007,6 @@ dependencies = [
  "prost 0.14.3",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "rayon",
  "ruint",
  "safer-ffi",
  "serde",
@@ -6512,12 +6504,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
-name = "vacp2p_pmtree"
-version = "2.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47145034d8885c2f7ff7562c504ee8be6e78b564a60cc26fc174f861c61bdec2"
-
-[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7330,7 +7316,6 @@ dependencies = [
  "serde_json",
  "sled",
  "thiserror 2.0.18",
- "vacp2p_pmtree",
 ]
 
 [[package]]

@@ -28,7 +28,7 @@ rln-layouts = { path = "rln-layouts" }
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
 hex = "0.4.3"
 bytemuck = "1.24.0"
-rln = "2.0.1"
+rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
 serde = { version = "1", features = ["derive"] }
 
 [[bin]]
