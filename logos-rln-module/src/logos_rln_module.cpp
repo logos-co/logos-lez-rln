@@ -633,83 +633,136 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
         return {};
     }
 
-    // 4. Fetch main account
-    const QString mainHex = bytesToHex(plan.main_account_id, 32);
-    QByteArray mainData;
-    if (!fetchAccountData(walletClient, mainHex, mainData)) {
-        qWarning() << "get_merkle_proofs: failed to fetch main account" << mainHex;
-        return {};
-    }
-
-    // 5. Fetch subtree accounts
-    QVector<QByteArray> subtreeDataBufs(static_cast<int>(plan.subtree_count));
-    QVector<RlnFfiSubtreeEntry> subtreeEntries(static_cast<int>(plan.subtree_count));
-    for (uint32_t i = 0; i < plan.subtree_count; ++i) {
-        const QString subtreeHex = bytesToHex(plan.subtree_account_ids[i], 32);
-        fetchAccountData(walletClient, subtreeHex, subtreeDataBufs[i]);
-        // Empty data is OK — subtree may not exist yet
-
-        subtreeEntries[i].subtree_id = plan.subtree_ids[i];
-        subtreeEntries[i].data_ptr = subtreeDataBufs[i].isEmpty()
-            ? nullptr
-            : reinterpret_cast<const uint8_t*>(subtreeDataBufs[i].constData());
-        subtreeEntries[i].data_len = static_cast<size_t>(subtreeDataBufs[i].size());
-    }
-
-    // 6. Phase 2: build all proofs in Rust, get JSON back
-    uint8_t* jsonPtr = nullptr;
-    size_t jsonLen = 0;
-    err = rln_ffi_merkle_proofs_exec(
-        reinterpret_cast<const uint8_t*>(mainData.constData()),
-        static_cast<size_t>(mainData.size()),
-        subtreeEntries.isEmpty() ? nullptr : subtreeEntries.constData(),
-        static_cast<size_t>(subtreeEntries.size()),
-        leafIndices.constData(),
-        static_cast<size_t>(leafIndices.size()),
-        &jsonPtr, &jsonLen);
-    if (err != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "get_merkle_proofs: exec FFI error" << static_cast<int>(err);
-        return {};
-    }
-
-    const QString proofsJson = QString::fromUtf8(reinterpret_cast<const char*>(jsonPtr),
-                                                  static_cast<int>(jsonLen));
-    rln_ffi_free_string(jsonPtr, jsonLen);
-
-    // 7. Refetch mainData after subtree fetches, extract valid_roots from the
-    //    refreshed snapshot. The proofs' path-implied root is computed by
-    //    zerokit's FFI from `path_elements`, which derive from subtree data
-    //    fetched at T_subtree >= T_main. If a registration lands between the
-    //    T_main fetch (step 4) and the T_subtree fetch (step 5), the proof's
-    //    actual cryptographic root advances to T_subtree's state, but the
-    //    valid_roots window read from the T_main snapshot lags behind and
-    //    doesn't include it — which surfaces as
-    //    "Self-verify: Expected one of the provided roots" downstream.
+    // 4-7. Stable-snapshot loop.
     //
-    //    A second mainData fetch (T_refetch >= T_subtree) guarantees the
-    //    valid_roots window reflects at least T_subtree's tree state, so the
-    //    proofs' path-implied root will land in the window unless more than
-    //    `validRoots.len` (typically 5) new registrations land between
-    //    T_subtree and T_refetch — vanishingly rare given the gifter's
-    //    single-writer registration worker.
-    QByteArray mainDataRefresh;
-    if (!fetchAccountData(walletClient, mainHex, mainDataRefresh)) {
-        qWarning() << "get_merkle_proofs: refetch main account failed; falling back to original buffer";
-        mainDataRefresh = mainData;
-    }
-    uint8_t rootsBuf[160] = {};
-    uint32_t rootsCount = 0;
-    err = rln_ffi_get_valid_roots(
-        reinterpret_cast<const uint8_t*>(mainDataRefresh.constData()),
-        static_cast<size_t>(mainDataRefresh.size()),
-        rootsBuf, &rootsCount);
-    QJsonArray rootsArray;
-    if (err == RLN_FFI_ERROR_SUCCESS) {
-        for (uint32_t i = 0; i < rootsCount; ++i) {
-            rootsArray.append(bytesToHex(rootsBuf + i * 32, 32));
+    //   A proof's cryptographic root is determined jointly by the main account
+    //   (top-tree nodes + cached defaults) and the subtree accounts (bottom-tree
+    //   nodes). The wallet's get_account_public reads are NOT snapshot-bound —
+    //   each observes whatever block the wallet has synced at call time. If a
+    //   registration lands between the main fetch and the subtree fetches, those
+    //   two halves come from different chain states and the resulting proof root
+    //   exists in NEITHER state's valid_roots window — surfacing downstream as
+    //   "Self-verify: Expected one of the provided roots" and a silently dropped
+    //   sphinx packet.
+    //
+    //   The previous mitigation refetched main *only* to repair the valid_roots
+    //   window; it left the path_elements half (and thus the proof root) on a
+    //   possibly-torn (main, subtree) pair. The real fix is to detect mutation
+    //   across the read window and retry. We bracket the subtree reads with two
+    //   main fetches and compare their valid_roots windows. The window is a pure
+    //   tree-state digest: it changes iff the tree mutates (a registration pushes
+    //   a fresh root) and is immune to any volatile non-tree account bytes. Equal
+    //   windows ⇒ no registration landed while we were reading subtrees ⇒ main
+    //   and subtrees are from one consistent state ⇒ the proof root equals the
+    //   current root and is in the window. On mismatch we re-read everything.
+    const QString mainHex = bytesToHex(plan.main_account_id, 32);
+
+    // Raw concatenated 32-byte valid roots from a main-account buffer. Doubles
+    // as the consistency sentinel and as the window injected into the response.
+    auto extractValidRoots = [](const QByteArray& md, QByteArray& outRaw) -> bool {
+        uint8_t rootsBuf[160] = {};
+        uint32_t rootsCount = 0;
+        RlnFfiError e = rln_ffi_get_valid_roots(
+            reinterpret_cast<const uint8_t*>(md.constData()),
+            static_cast<size_t>(md.size()), rootsBuf, &rootsCount);
+        if (e != RLN_FFI_ERROR_SUCCESS) return false;
+        outRaw = QByteArray(reinterpret_cast<const char*>(rootsBuf),
+                            static_cast<int>(rootsCount) * 32);
+        return true;
+    };
+
+    constexpr int kMaxSnapshotAttempts = 5;
+    QString proofsJson;
+    QByteArray stableRootsRaw;
+    bool consistent = false;
+
+    for (int attempt = 0; attempt < kMaxSnapshotAttempts; ++attempt) {
+        // 4. Fetch main account (snapshot A — opens the read window).
+        QByteArray mainData;
+        if (!fetchAccountData(walletClient, mainHex, mainData)) {
+            qWarning() << "get_merkle_proofs: failed to fetch main account" << mainHex;
+            return {};
         }
-    } else {
-        qWarning() << "get_merkle_proofs: get_valid_roots FFI error" << static_cast<int>(err);
+        QByteArray rootsA;
+        if (!extractValidRoots(mainData, rootsA)) {
+            qWarning() << "get_merkle_proofs: get_valid_roots(A) FFI error";
+            return {};
+        }
+
+        // 5. Fetch subtree accounts.
+        QVector<QByteArray> subtreeDataBufs(static_cast<int>(plan.subtree_count));
+        QVector<RlnFfiSubtreeEntry> subtreeEntries(static_cast<int>(plan.subtree_count));
+        for (uint32_t i = 0; i < plan.subtree_count; ++i) {
+            const QString subtreeHex = bytesToHex(plan.subtree_account_ids[i], 32);
+            fetchAccountData(walletClient, subtreeHex, subtreeDataBufs[i]);
+            // Empty data is OK — subtree may not exist yet.
+            subtreeEntries[i].subtree_id = plan.subtree_ids[i];
+            subtreeEntries[i].data_ptr = subtreeDataBufs[i].isEmpty()
+                ? nullptr
+                : reinterpret_cast<const uint8_t*>(subtreeDataBufs[i].constData());
+            subtreeEntries[i].data_len = static_cast<size_t>(subtreeDataBufs[i].size());
+        }
+
+        // 6. Refetch main account (snapshot B — closes the read window) and
+        //    compare windows. Mismatch ⇒ the tree mutated while we read
+        //    subtrees; the (main, subtree) pair is torn — discard and retry.
+        QByteArray mainDataB;
+        if (!fetchAccountData(walletClient, mainHex, mainDataB)) {
+            qWarning() << "get_merkle_proofs: refetch main account failed (attempt"
+                       << attempt << ")";
+            continue;
+        }
+        QByteArray rootsB;
+        if (!extractValidRoots(mainDataB, rootsB)) {
+            qWarning() << "get_merkle_proofs: get_valid_roots(B) FFI error";
+            return {};
+        }
+        if (rootsA != rootsB) {
+            qInfo() << "get_merkle_proofs: tree advanced during subtree reads; "
+                       "retrying for a consistent snapshot (attempt" << attempt << ")";
+            continue;
+        }
+
+        // 7. Window stable across the subtree reads ⇒ main and subtrees are from
+        //    one consistent state. Build proofs from that main; the proof root
+        //    equals the current root, which is in rootsB. Phase 2 in Rust.
+        uint8_t* jsonPtr = nullptr;
+        size_t jsonLen = 0;
+        err = rln_ffi_merkle_proofs_exec(
+            reinterpret_cast<const uint8_t*>(mainData.constData()),
+            static_cast<size_t>(mainData.size()),
+            subtreeEntries.isEmpty() ? nullptr : subtreeEntries.constData(),
+            static_cast<size_t>(subtreeEntries.size()),
+            leafIndices.constData(),
+            static_cast<size_t>(leafIndices.size()),
+            &jsonPtr, &jsonLen);
+        if (err != RLN_FFI_ERROR_SUCCESS) {
+            qWarning() << "get_merkle_proofs: exec FFI error" << static_cast<int>(err);
+            return {};
+        }
+        proofsJson = QString::fromUtf8(reinterpret_cast<const char*>(jsonPtr),
+                                       static_cast<int>(jsonLen));
+        rln_ffi_free_string(jsonPtr, jsonLen);
+        stableRootsRaw = rootsB;
+        consistent = true;
+        break;
+    }
+
+    if (!consistent) {
+        // Never ship an internally-inconsistent proof: erroring lets the Nim
+        // pollLoop keep its previous (consistent) cachedProof rather than cache
+        // a self-verify-failing one. Sustained churn beyond kMaxSnapshotAttempts
+        // is itself a signal worth surfacing.
+        qWarning() << "get_merkle_proofs: no consistent tree snapshot after"
+                   << kMaxSnapshotAttempts << "attempts";
+        return {};
+    }
+
+    // Rebuild the valid_roots JSON array from the stable window.
+    QJsonArray rootsArray;
+    for (int i = 0; i + 32 <= stableRootsRaw.size(); i += 32) {
+        rootsArray.append(bytesToHex(
+            reinterpret_cast<const uint8_t*>(stableRootsRaw.constData()) + i, 32));
     }
 
     // Inject valid_roots into each proof object so a single RPC returns both.
