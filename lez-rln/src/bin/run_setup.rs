@@ -8,8 +8,8 @@
 //! ```
 
 use logos_lez_rln::rln::client::{
-    TREE_ID, init_wallet, load_programs, is_initialized,
-    run_setup, create_funded_user, save_payment_account,
+    init_wallet, load_programs, is_initialized,
+    run_setup, create_funded_user, save_payment_account, tree_id_from_env,
 };
 use logos_lez_rln::rln::{derive_config_account, derive_tree_main_account};
 
@@ -23,7 +23,7 @@ const USER_FUNDING: u128 = 10_000_000_000;
 #[tokio::main]
 async fn main() {
     let mut wallet_core = init_wallet();
-    let tree_id = TREE_ID;
+    let tree_id = tree_id_from_env();
     let (registration_program, merkle_program) = load_programs();
 
     println!("=== RLN Setup ===\n");

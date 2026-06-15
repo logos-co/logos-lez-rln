@@ -47,12 +47,6 @@ pub fn clock_account_id() -> AccountId {
 pub const REGISTRATION_BINARY: &str = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
 pub const MERKLE_TREE_BINARY: &str =
     "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
-/// Default tree id used by the example binaries. SPEL's `ToSeed` is only
-/// implemented for `[u8; 32]`, so all tree ids in this codebase are 32 bytes.
-pub const TREE_ID: [u8; 32] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-    160, 203, 166, 232, 92, 161, 226, 110,
-];
 pub const DATA_DIR: &str = ".logos-lez-rln";
 
 /// Initialize a WalletCore, creating storage if missing.
@@ -121,6 +115,33 @@ pub fn wait_account_attempts() -> u32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(360)
+}
+
+/// RLN tree id, read from `LEZ_RLN_TREE_ID_HEX` (32 bytes, 64 hex chars).
+/// Strict: aborts with an actionable error if unset or malformed. Kept out
+/// of source to prevent the drift class where a deployment bump in this
+/// file silently desyncs from shell scripts that key persistent caches
+/// off the hex form (see project_tree_id_drift memory note).
+pub fn tree_id_from_env() -> [u8; 32] {
+    let hex = std::env::var("LEZ_RLN_TREE_ID_HEX").unwrap_or_else(|_| {
+        eprintln!(
+            "LEZ_RLN_TREE_ID_HEX not set (expected 64 hex chars).\n\
+             Example: LEZ_RLN_TREE_ID_HEX=000102030405060708090a0b0c0d0e0f\
+             1011121314151617a0cba6e85ca1e26e cargo run --bin run_setup"
+        );
+        std::process::exit(2);
+    });
+    let bytes = hex::decode(&hex).unwrap_or_else(|e| {
+        eprintln!("LEZ_RLN_TREE_ID_HEX is not valid hex: {e}");
+        std::process::exit(2);
+    });
+    bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+        eprintln!(
+            "LEZ_RLN_TREE_ID_HEX must decode to exactly 32 bytes, got {}",
+            v.len()
+        );
+        std::process::exit(2);
+    })
 }
 
 /// Wait for an account to have non-empty data.

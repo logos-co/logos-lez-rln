@@ -9,7 +9,7 @@
 
 use logos_lez_rln::merkle_tree::wait_for_leaf;
 use logos_lez_rln::rln::client::{
-    TREE_ID, init_wallet, load_programs, create_funded_user, register_identity,
+    init_wallet, load_programs, create_funded_user, register_identity, tree_id_from_env,
 };
 use logos_lez_rln::rln::derive_config_account;
 use rln::hashers::poseidon_hash;
@@ -62,7 +62,7 @@ async fn main() {
     eprintln!("Registering {} identity commitments on-chain...", entries.len());
 
     let mut wallet_core = init_wallet();
-    let tree_id = TREE_ID;
+    let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 
