@@ -453,45 +453,59 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     }
     RLNDIAG("build_instruction ok; instrLen=%zu", instrLen);
 
-    const QString instructionHex = bytesToHex(instrPtr, instrLen);
+    // Instruction bytes are a borsh Vec<u32> serialized LE; upstream's
+    // send_generic_public_transaction takes the u32 words directly.
+    if ((instrLen % 4) != 0) {
+        qWarning() << "register_member: instruction not word-aligned" << instrLen;
+        rln_ffi_free_string(instrPtr, instrLen);
+        RLNDIAG("FAIL instrLen%%4 (=%zu)", instrLen);
+        return {};
+    }
+    QVariantList instructionWords;
+    instructionWords.reserve(static_cast<int>(instrLen / 4));
+    for (size_t k = 0; k < instrLen / 4; ++k) {
+        const uint8_t* p = instrPtr + k * 4;
+        const uint32_t w = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+                         | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+        instructionWords.append(QVariant(static_cast<uint>(w)));
+    }
     rln_ffi_free_string(instrPtr, instrLen);
 
     // Account order must match methods/guest/src/program.rs::register:
     //   config, tree_main, user_holding (signer), treasury, bottom_subtree,
     //   clock_account, membership (init).
-    QJsonArray accountsList;
-    accountsList.append(bytesToHex(plan.config_account_id, 32));
-    accountsList.append(bytesToHex(plan.tree_main_account_id, 32));
-    accountsList.append(userHoldingHex);
-    accountsList.append(bytesToHex(plan.treasury_account_id, 32));
-    accountsList.append(bytesToHex(plan.subtree_account_id, 32));
-    accountsList.append(bytesToHex(plan.clock_account_id, 32));
-    accountsList.append(bytesToHex(plan.membership_account_id, 32));
+    QVariantList accountIds;
+    accountIds << bytesToHex(plan.config_account_id, 32)
+               << bytesToHex(plan.tree_main_account_id, 32)
+               << userHoldingHex
+               << bytesToHex(plan.treasury_account_id, 32)
+               << bytesToHex(plan.subtree_account_id, 32)
+               << bytesToHex(plan.clock_account_id, 32)
+               << bytesToHex(plan.membership_account_id, 32);
+    // Only the user-holding (payer) account signs; the rest are read/PDA/init.
+    QVariantList signingReqs;
+    for (const QVariant& a : accountIds) signingReqs << (a.toString() == userHoldingHex);
 
-    // Build transaction request for wallet module
-    QJsonObject txRequest;
-    txRequest["program_id"] = bytesToHex(
+    const QString programIdHex = bytesToHex(
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()), 32);
-    txRequest["accounts"] = accountsList;
-    txRequest["instruction"] = instructionHex;
-    txRequest["signer_account"] = userHoldingHex;
 
-    const QString txRequestJson = QJsonDocument(txRequest).toJson(QJsonDocument::Compact);
-
-    // Send the transaction via wallet module
-    RLNDIAG("submitting send_public_transaction; accounts=%d program=%s",
-            accountsList.size(), txRequest["program_id"].toString().toUtf8().constData());
+    // Submit via upstream rc6's native program-id-based generic transaction
+    // (typed multi-arg invokeRemoteMethod — confirmed to marshal arrays).
+    RLNDIAG("submitting send_generic_public_transaction; accounts=%d words=%d program=%s",
+            accountIds.size(), instructionWords.size(), programIdHex.toUtf8().constData());
     const QVariant sendResult = walletClient->invokeRemoteMethod(
-        QStringLiteral("logos_execution_zone"), QStringLiteral("send_public_transaction"),
-        QVariant(txRequestJson), Timeout(180000));
+        QStringLiteral("logos_execution_zone"),
+        QStringLiteral("send_generic_public_transaction"),
+        QVariant(accountIds), QVariant(signingReqs), QVariant(instructionWords),
+        QVariant(programIdHex), Timeout(180000));
     const QString sendResultStr = sendResult.toString();
 
     if (sendResultStr.isEmpty()) {
         qWarning() << "register_member: transaction failed";
-        RLNDIAG("FAIL send_public_transaction returned empty");
+        RLNDIAG("FAIL send_generic_public_transaction returned empty");
         return {};
     }
-    RLNDIAG("send_public_transaction ok; result=%s", sendResultStr.left(120).toUtf8().constData());
+    RLNDIAG("send_generic_public_transaction ok; result=%s", sendResultStr.left(120).toUtf8().constData());
 
     // Submission accepted by the sequencer; we DO NOT block here waiting
     // for on-chain confirmation. Two reasons:
