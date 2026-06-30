@@ -1,9 +1,15 @@
+use borsh::BorshDeserialize;
 use rln_layouts::{
-    ConfigLayout, TreeMainLayout, ROOT_HISTORY_SIZE,
+    combine_seeds, label_seed,
+    ConfigState, MembershipState, TreeMainLayout, ROOT_HISTORY_SIZE,
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA,
     TOP_DEPTH, TREE_DEPTH, SUBTREE_LEAVES,
     read_sparse_node,
 };
+
+/// Borsh size of the on-chain SPEL-aligned `ConfigState` (used by both the
+/// merkle-proofs-plan and register-plan precheck + decode).
+const CONFIG_STATE_SIZE: usize = 240;
 use serde::Serialize;
 use sha2::{Sha256, Digest};
 
@@ -50,7 +56,7 @@ pub struct SubtreeEntry {
     pub data_len: usize,
 }
 
-const PDA_PREFIX: &[u8; 32] = b"/NSSA/v0.2/AccountId/PDA/\x00\x00\x00\x00\x00\x00\x00";
+const PDA_PREFIX: &[u8; 32] = b"/LEE/v0.2/AccountId/PDA/\x00\x00\x00\x00\x00\x00\x00\x00";
 
 fn derive_pda(program_id: &[u8; 32], pda_seed: &[u8; 32]) -> [u8; 32] {
     let mut input = [0u8; 96];
@@ -103,8 +109,8 @@ pub unsafe extern "C" fn rln_ffi_get_valid_roots(
     Error::Success
 }
 
-/// Internal proof-building logic, safe Rust. Used by both the C FFI entry point
-/// and the batch `rln_ffi_merkle_proofs_exec`.
+/// Safe-Rust proof builder shared by `rln_ffi_build_merkle_proof` and the
+/// batch `rln_ffi_merkle_proofs_exec`.
 fn build_merkle_proof_inner(
     main_data: &[u8],
     subtree_data: &[u8],
@@ -235,12 +241,15 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     if leaf_indices_count > 0 && leaf_indices_ptr.is_null() {
         return Error::NullPointer;
     }
-    if config_data_len < ConfigLayout::SIZE {
+    if config_data_len < CONFIG_STATE_SIZE {
         return Error::InvalidConfig;
     }
 
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
-    let config = ConfigLayout::parse(config_data);
+    let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
+        Ok(c) => c,
+        Err(_) => return Error::InvalidConfig,
+    };
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
     let leaf_indices: &[u64] = if leaf_indices_count == 0 {
         &[]
@@ -248,9 +257,10 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
         unsafe { core::slice::from_raw_parts(leaf_indices_ptr, leaf_indices_count) }
     };
 
-    // Tree accounts are PDAs of the registration program (program_owner), not of the merkle program.
-    let main_seed = rln_layouts::main_seed(&config.tree_id);
-    let main_account_id = derive_pda(program_owner, &main_seed);
+    // Tree PDAs derive from the registration program, not the merkle program.
+    let tree_id: &[u8; 32] = &config.tree_id;
+    let main_account_id =
+        derive_pda(program_owner, &combine_seeds(&[&label_seed("main"), tree_id]));
 
     let mut unique_ids: Vec<u32> = leaf_indices
         .iter()
@@ -268,8 +278,12 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     plan.subtree_count = unique_ids.len() as u32;
 
     for (i, &subtree_id) in unique_ids.iter().enumerate() {
-        let seed = rln_layouts::subtree_seed(&config.tree_id, subtree_id);
-        plan.subtree_account_ids[i] = derive_pda(program_owner, &seed);
+        let mut subtree_id_seed = [0u8; 32];
+        subtree_id_seed[..4].copy_from_slice(&subtree_id.to_le_bytes());
+        plan.subtree_account_ids[i] = derive_pda(
+            program_owner,
+            &combine_seeds(&[&label_seed("subtree"), tree_id, &subtree_id_seed]),
+        );
         plan.subtree_ids[i] = subtree_id;
     }
 
@@ -408,6 +422,9 @@ pub struct RlnRegisterPlan {
     pub treasury_account_id: [u8; 32],
     pub subtree_account_id: [u8; 32],
     pub clock_account_id: [u8; 32],
+    /// Membership PDA from (program_owner, tree_id, id_commitment).
+    /// Required by the `Register` instruction's `init`-marked membership account.
+    pub membership_account_id: [u8; 32],
     pub subtree_id: u32,
     pub next_leaf_index: u64,
 }
@@ -437,9 +454,8 @@ pub unsafe extern "C" fn rln_ffi_generate_identity(
     let id_commitment_bytes = rln::utils::fr_to_bytes_le(&id_commitment_fr);
     let id_secret_hash_bytes = rln::utils::fr_to_bytes_le(&identity_secret_fr);
 
-    // Zero the secret field element after extracting bytes
     identity_secret_fr = rln::prelude::Fr::from(0u64);
-    let _ = identity_secret_fr; // silence unused warning
+    let _ = identity_secret_fr;
 
     let out_commit = unsafe { core::slice::from_raw_parts_mut(out_id_commitment, 32) };
     out_commit.copy_from_slice(&id_commitment_bytes);
@@ -491,6 +507,7 @@ pub unsafe extern "C" fn rln_ffi_compute_rate_commitment(
 /// `config_data_ptr`/`config_data_len`: raw bytes of config account (tree_id is read from here)
 /// `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account (for next_leaf_index)
 /// `program_owner_ptr`: 32-byte registration program ID
+/// `id_commitment_ptr`: 32-byte id_commitment (used to derive the membership PDA)
 /// `out_plan`: pointer to caller-allocated RlnRegisterPlan
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_plan(
@@ -499,16 +516,18 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     tree_main_data_ptr: *const u8,
     tree_main_data_len: usize,
     program_owner_ptr: *const u8,
+    id_commitment_ptr: *const u8,
     out_plan: *mut RlnRegisterPlan,
 ) -> Error {
     if config_data_ptr.is_null()
         || tree_main_data_ptr.is_null()
         || program_owner_ptr.is_null()
+        || id_commitment_ptr.is_null()
         || out_plan.is_null()
     {
         return Error::NullPointer;
     }
-    if config_data_len < ConfigLayout::SIZE {
+    if config_data_len < CONFIG_STATE_SIZE {
         return Error::InvalidConfig;
     }
     if tree_main_data_len < TreeMainLayout::SIZE {
@@ -518,22 +537,39 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
     let tree_main_data = unsafe { core::slice::from_raw_parts(tree_main_data_ptr, tree_main_data_len) };
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
+    let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
-    let config = ConfigLayout::parse(config_data);
+    // Always decode via ConfigState (SPEL-aligned, 240 bytes borsh). The
+    // pre-SPEL `ConfigLayout::parse` reads a 24-byte tree_id at a different
+    // treasury offset and produces wrong PDAs against current program.
+    let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
+        Ok(c) => c,
+        Err(_) => return Error::InvalidConfig,
+    };
     let tree_main = TreeMainLayout::parse(tree_main_data);
-    let tree_id = &config.tree_id;
+    let tree_id: &[u8; 32] = &config.tree_id;
 
-    let config_seed = rln_layouts::config_seed(tree_id);
-    let config_account_id = derive_pda(program_owner, &config_seed);
-
-    let main_seed = rln_layouts::main_seed(tree_id);
-    let tree_main_account_id = derive_pda(program_owner, &main_seed);
+    let config_account_id =
+        derive_pda(program_owner, &combine_seeds(&[&label_seed("config"), tree_id]));
+    let tree_main_account_id =
+        derive_pda(program_owner, &combine_seeds(&[&label_seed("main"), tree_id]));
 
     let next_leaf_index = tree_main.next_index();
     let subtree_id = (next_leaf_index / SUBTREE_LEAVES as u64) as u32;
+    let subtree_id_seed = {
+        let mut s = [0u8; 32];
+        s[..4].copy_from_slice(&subtree_id.to_le_bytes());
+        s
+    };
+    let subtree_account_id = derive_pda(
+        program_owner,
+        &combine_seeds(&[&label_seed("subtree"), tree_id, &subtree_id_seed]),
+    );
 
-    let subtree_seed = rln_layouts::subtree_seed(tree_id, subtree_id);
-    let subtree_account_id = derive_pda(program_owner, &subtree_seed);
+    let membership_account_id = derive_pda(
+        program_owner,
+        &combine_seeds(&[&label_seed("membership"), tree_id, id_commitment]),
+    );
 
     let plan = unsafe { &mut *out_plan };
     plan.config_account_id = config_account_id;
@@ -541,6 +577,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     plan.treasury_account_id = config.treasury_account_id;
     plan.subtree_account_id = subtree_account_id;
     plan.clock_account_id = rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
+    plan.membership_account_id = membership_account_id;
     plan.subtree_id = subtree_id;
     plan.next_leaf_index = next_leaf_index;
 
@@ -549,41 +586,48 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
 
 /// Build the serialized instruction data for a Register transaction.
 ///
-/// Returns a borsh-serialized instruction payload that can be used
-/// to construct the transaction message.
+/// Returns a serialized SPEL `Instruction::Register` payload (risc0-serde),
+/// suitable for the registration program's #[lez_program] handler.
 ///
+/// `tree_id_ptr`: 32-byte tree_id (same as in ConfigState)
 /// `id_commitment_ptr`: 32-byte id_commitment
 /// `rate_limit`: the user's rate limit
+/// `subtree_id`: which bottom subtree the leaf will land in (= next_leaf_index / SUBTREE_LEAVES)
 /// `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
 /// Caller must free with `rln_ffi_free_string`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rln_ffi_register_build_instruction(
+    tree_id_ptr: *const u8,
     id_commitment_ptr: *const u8,
     rate_limit: u64,
+    subtree_id: u32,
     out_data_ptr: *mut *mut u8,
     out_data_len: *mut usize,
 ) -> Error {
-    if id_commitment_ptr.is_null()
+    if tree_id_ptr.is_null()
+        || id_commitment_ptr.is_null()
         || out_data_ptr.is_null()
         || out_data_len.is_null()
     {
         return Error::NullPointer;
     }
 
-    let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
+    let tree_id = unsafe { *(tree_id_ptr as *const [u8; 32]) };
+    let id_commitment = unsafe { *(id_commitment_ptr as *const [u8; 32]) };
 
     let instruction = rln_layouts::Instruction::Register {
-        id_commitment: *id_commitment,
+        tree_id,
+        id_commitment,
         rate_limit,
+        subtree_id,
     };
 
-    // Serialize using risc0 serde (same format the on-chain program expects)
+    // risc0 serde — matches the on-chain program's wire format.
     let u32_vec = match risc0_zkvm::serde::to_vec(&instruction) {
         Ok(v) => v,
         Err(_) => return Error::SerializationError,
     };
 
-    // Convert Vec<u32> to Vec<u8> (LE bytes)
     let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
     for word in &u32_vec {
         bytes.extend_from_slice(&word.to_le_bytes());
@@ -601,26 +645,87 @@ pub unsafe extern "C" fn rln_ffi_register_build_instruction(
     Error::Success
 }
 
+/// Decode a fetched membership PDA's account data into its scalar fields.
+///
+/// Used by callers (e.g. logos_rln_module) to check whether a given
+/// id_commitment already has an on-chain membership before submitting a
+/// Register tx (idempotency / restart recovery / retry-after-tx-loss).
+///
+/// `account_data_ptr` / `account_data_len`: raw account.data bytes from the
+/// wallet. Must be at least 64 bytes (MembershipState borsh size).
+/// `out_leaf_index` / `out_rate_limit`: receive the corresponding fields.
+/// `out_id_commitment_ptr`: caller-allocated 32-byte buffer for id_commitment.
+///
+/// Returns `DataTooShort` if the buffer is too small; `SerializationError`
+/// if borsh decode fails (account exists but isn't a valid MembershipState —
+/// caller should treat as "not a membership PDA").
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_decode_membership(
+    account_data_ptr: *const u8,
+    account_data_len: usize,
+    out_leaf_index: *mut u64,
+    out_rate_limit: *mut u64,
+    out_id_commitment_ptr: *mut u8,
+) -> Error {
+    if account_data_ptr.is_null()
+        || out_leaf_index.is_null()
+        || out_rate_limit.is_null()
+        || out_id_commitment_ptr.is_null()
+    {
+        return Error::NullPointer;
+    }
+    // MembershipState is 8+8+32+8+4+4 = 64 bytes borsh.
+    if account_data_len < 64 {
+        return Error::DataTooShort;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(account_data_ptr, account_data_len) };
+    let state = match MembershipState::try_from_slice(&bytes[..64]) {
+        Ok(s) => s,
+        Err(_) => return Error::SerializationError,
+    };
+    unsafe {
+        *out_leaf_index = state.leaf_index;
+        *out_rate_limit = state.rate_limit;
+        core::ptr::copy_nonoverlapping(
+            state.id_commitment.as_ptr(),
+            out_id_commitment_ptr,
+            32,
+        );
+    }
+    Error::Success
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::BorshSerialize;
+
+    fn make_config_state() -> Vec<u8> {
+        let cfg = ConfigState {
+            merkle_program_id: [0x11; 32],
+            tree_id: [0x42; 32],
+            payment_token_id: [0x22; 32],
+            receipt_token_id: [0x23; 32],
+            price_per_unit: 1,
+            treasury_account_id: [0x33; 32],
+            total_registrations: 0,
+            max_total_rate_limit: 1_000_000,
+            current_total_rate_limit: 0,
+            active_duration_for_new_memberships: 100,
+            grace_period_duration_for_new_memberships: 10,
+            token_program_id: [0x44; 32],
+        };
+        borsh::to_vec(&cfg).unwrap()
+    }
 
     #[test]
     fn plan_derives_correct_ids_with_program_owner() {
-        // Tree PDAs derive from program_owner, not from the merkle_program_id embedded in config.
-        let mut config_data = vec![0u8; ConfigLayout::SIZE];
-        for i in 0..32 {
-            config_data[i] = (i + 1) as u8;
-        }
-        for i in 0..24 {
-            config_data[32 + i] = (i + 0x40) as u8;
-        }
-
+        let config_data = make_config_state();
         let program_owner: [u8; 32] = [0xAA; 32];
+        let tree_id: [u8; 32] = [0x42; 32];
 
-        let tree_id: [u8; 24] = config_data[32..56].try_into().unwrap();
-        let expected_main_seed = rln_layouts::main_seed(&tree_id);
-        let expected_main_id = derive_pda(&program_owner, &expected_main_seed);
+        let expected_main_id =
+            derive_pda(&program_owner, &combine_seeds(&[&label_seed("main"), &tree_id]));
 
         let leaf_indices: Vec<u64> = vec![0, 1, 1025];
         let mut plan = MerkleProofsPlan {
@@ -646,8 +751,12 @@ mod tests {
         assert_eq!(plan.subtree_ids[1], 1);
 
         for i in 0..plan.subtree_count as usize {
-            let seed = rln_layouts::subtree_seed(&tree_id, plan.subtree_ids[i]);
-            let expected = derive_pda(&program_owner, &seed);
+            let mut subtree_id_seed = [0u8; 32];
+            subtree_id_seed[..4].copy_from_slice(&plan.subtree_ids[i].to_le_bytes());
+            let expected = derive_pda(
+                &program_owner,
+                &combine_seeds(&[&label_seed("subtree"), &tree_id, &subtree_id_seed]),
+            );
             assert_eq!(expected, plan.subtree_account_ids[i],
                 "subtree {} account ID mismatch!", plan.subtree_ids[i]);
         }

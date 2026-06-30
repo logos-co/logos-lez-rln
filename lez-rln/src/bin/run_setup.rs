@@ -8,17 +8,22 @@
 //! ```
 
 use logos_lez_rln::rln::client::{
-    TREE_ID, init_wallet, load_programs, is_initialized,
-    run_setup, create_funded_user, save_payment_account,
+    init_wallet, load_programs, is_initialized,
+    run_setup, create_funded_user, save_payment_account, tree_id_from_env,
 };
 use logos_lez_rln::rln::{derive_config_account, derive_tree_main_account};
 
-const USER_FUNDING: u128 = 100_000_000;
+/// 10 B RLNTOK funded per payment account. At PRICE_PER_UNIT=10_000 and the
+/// demo's rateLimit=100, each registration burns 1 M tokens — so each payment
+/// account hands out ~10K registrations before depletion forces a re-fund
+/// from supply_holding. Tracks the TOKEN_SUPPLY 10x bump in client.rs (10 B
+/// supply funded only ~1K regs per account, hit the wall in long dev cycles).
+const USER_FUNDING: u128 = 10_000_000_000;
 
 #[tokio::main]
 async fn main() {
     let mut wallet_core = init_wallet();
-    let tree_id = TREE_ID;
+    let tree_id = tree_id_from_env();
     let (registration_program, merkle_program) = load_programs();
 
     println!("=== RLN Setup ===\n");

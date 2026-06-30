@@ -30,12 +30,27 @@ public:
     /// Returns hex-encoded 32-byte rate commitment, or empty on failure.
     virtual QString compute_rate_commitment(const QString& id_commitment_hex, int rate_limit) = 0;
 
-    /// Register a membership on the RLN tree.
-    /// Returns JSON: {"leaf_index": N} on success, or empty on failure.
+    /// Submit an on-chain Register tx for (config, id_commitment). Returns
+    /// fast — does NOT wait for confirmation; callers must poll
+    /// is_member_registered. Pre-checks the membership PDA and short-circuits
+    /// to {leaf_index, already_registered: true} if (id_commitment, tree_id)
+    /// is already registered (idempotent for restart / retry-after-tx-loss).
+    /// Returns JSON: {"leaf_index": N, "tx_result": <wallet response>, "pending": true}
+    ///         or:   {"leaf_index": N, "already_registered": true}
+    ///         or:   {"error": "...", ...} on submission failure.
     virtual QString register_member(const QString& config_account_id,
                                     const QString& user_holding_account_id,
                                     const QString& id_commitment_hex,
                                     int rate_limit) = 0;
+
+    /// Cheap query (no on-chain wait): does the membership PDA for
+    /// (tree_id, id_commitment) currently hold a valid MembershipState?
+    /// Returns JSON: {"registered": true, "leaf_index": N}
+    ///         or:   {"registered": false}
+    /// Used by callers to poll for register_member confirmation without
+    /// blocking the RPC thread.
+    virtual QString is_member_registered(const QString& config_account_id,
+                                          const QString& id_commitment_hex) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

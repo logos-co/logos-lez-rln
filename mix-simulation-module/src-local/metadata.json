@@ -1,0 +1,11 @@
+{
+  "name": "mix_simulation_module",
+  "version": "1.0.0",
+  "description": "Mix Network Simulation Orchestrator - Coordinates delivery and RLN modules",
+  "author": "Logos Core Team",
+  "type": "core",
+  "category": "simulation",
+  "main": "mix_simulation_module",
+  "dependencies": ["delivery_module", "liblogos_rln_module"],
+  "capabilities": []
+}
