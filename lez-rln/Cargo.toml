@@ -34,6 +34,9 @@ rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
 
 [features]
 rc5-state-tests = []
+# Privacy-flow tests use SharedSecretKey::encapsulate_deterministic which is
+# gated behind lee_core's test_utils feature.
+rc5-state-tests-privacy = ["rc5-state-tests", "nssa_core/test_utils"]
 
 [[bin]]
 name = "run_rln_proof"

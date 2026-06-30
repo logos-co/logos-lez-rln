@@ -26,6 +26,7 @@
 #[cfg(test)]
 mod tests {
     use nssa::program::Program;
+    use programs;
     use nssa::program_deployment_transaction::{Message as DeployMessage, ProgramDeploymentTransaction};
     use nssa::public_transaction::{Message, WitnessSet};
     use nssa::{PrivateKey, PublicKey};
@@ -33,21 +34,31 @@ mod tests {
     use nssa_core::account::{AccountId, Nonce};
     use std::fs;
 
-    // Privacy-preserving transaction types
+    // Privacy-preserving transaction types — only used by the rc5-era
+    // privacy-flow helpers/tests that are gated behind rc5-state-tests-privacy.
+    #[cfg(feature = "rc5-state-tests-privacy")]
     use nssa::{
-        execute_and_prove, PrivacyPreservingTransaction, SharedSecretKey, EphemeralPublicKey,
+        execute_and_prove, PrivacyPreservingTransaction, SharedSecretKey,
     };
+    #[cfg(feature = "rc5-state-tests-privacy")]
     use nssa::privacy_preserving_transaction::{
         message::Message as PrivacyMessage,
         witness_set::WitnessSet as PrivacyWitnessSet,
         circuit::ProgramWithDependencies,
     };
+    #[cfg(feature = "rc5-state-tests-privacy")]
     use nssa_core::{
         Commitment, NullifierPublicKey, NullifierSecretKey,
     };
-    use nssa_core::account::{Account, AccountWithMetadata, Data};
+    use nssa_core::account::{Account, Data};
+    #[cfg(feature = "rc5-state-tests-privacy")]
+    use nssa_core::account::AccountWithMetadata;
+    #[cfg(feature = "rc5-state-tests-privacy")]
     use nssa_core::encryption::ViewingPublicKey;
+    #[cfg(feature = "rc5-state-tests-privacy")]
+    use nssa_core::{EncryptedAccountData, InputAccountIdentity};
     use token_core::{TokenDefinition, TokenHolding};
+    #[cfg(feature = "rc5-state-tests-privacy")]
     use std::collections::HashMap;
 
     // Import shared constants and PDA functions from rln module
@@ -135,13 +146,13 @@ mod tests {
     fn load_merkle_tree_program() -> Option<Program> {
         fs::read(merkle_tree_binary_path())
             .ok()
-            .and_then(|bytecode| Program::new(bytecode).ok())
+            .and_then(|bytecode| Program::new(bytecode.into()).ok())
     }
 
     fn load_rln_registration_program() -> Option<Program> {
         fs::read(rln_registration_binary_path())
             .ok()
-            .and_then(|bytecode| Program::new(bytecode).ok())
+            .and_then(|bytecode| Program::new(bytecode.into()).ok())
     }
 
     // ========================================================================
@@ -190,10 +201,16 @@ mod tests {
         let merkle_bytecode = fs::read(merkle_tree_binary_path()).ok()?;
         let registration_bytecode = fs::read(rln_registration_binary_path()).ok()?;
 
-        let merkle_program = Program::new(merkle_bytecode.clone()).ok()?;
-        let registration_program = Program::new(registration_bytecode.clone()).ok()?;
+        let merkle_program = Program::new(merkle_bytecode.clone().into()).ok()?;
+        let registration_program = Program::new(registration_bytecode.clone().into()).ok()?;
 
-        let mut state = V03State::new_with_genesis_accounts(&[], Vec::new(), GENESIS_TIMESTAMP);
+        // rc6: V03State::new() replaces new_with_genesis_accounts(...). Seed
+        // the builtin token + clock programs that registration init's chained
+        // calls require, and seed the CLOCK_50 system account at the genesis
+        // timestamp so the registration program's clock-reads succeed — both
+        // were implicit in the rc5 genesis-accounts path.
+        let mut state = V03State::new().with_programs([programs::token(), programs::clock()]);
+        set_clock_50(&mut state, GENESIS_TIMESTAMP, 0);
 
         // Deploy merkle tree program
         let merkle_deploy_tx = ProgramDeploymentTransaction::new(
@@ -379,31 +396,42 @@ mod tests {
     // ========================================================================
 
     /// Keys for a privacy-preserving (private) account.
+    /// rc6: viewing key derives from the two-half FIPS 203 seed `(d, z)`
+    /// via `ViewingPublicKey::from_seed`; AccountId is bound to (npk, identifier).
     #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     struct PrivateAccountKeys {
         nsk: NullifierSecretKey,
-        isk: [u8; 32],
+        d: [u8; 32],
+        z: [u8; 32],
     }
 
     #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     impl PrivateAccountKeys {
         fn npk(&self) -> NullifierPublicKey {
             NullifierPublicKey::from(&self.nsk)
         }
 
-        fn ivk(&self) -> ViewingPublicKey {
-            ViewingPublicKey::from_scalar(self.isk)
+        fn vpk(&self) -> ViewingPublicKey {
+            ViewingPublicKey::from_seed(&self.d, &self.z)
         }
 
-        fn account_id(&self) -> AccountId {
-            AccountId::from(&self.npk())
+        fn account_id(&self, identifier: u128) -> AccountId {
+            AccountId::for_regular_private_account(&self.npk(), identifier)
         }
     }
 
+    #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     fn private_account_keys(seed1: u8, seed2: u8) -> PrivateAccountKeys {
+        // rc6: ML-KEM-768 needs two 32-byte seed halves (d, z) for the FIPS-203
+        // ViewingPublicKey derivation. Derive z deterministically from seed2 so
+        // the helper's two-seed signature is preserved (call sites don't change).
         PrivateAccountKeys {
             nsk: { let mut b = [0u8; 32]; b[0] = seed1; b },
-            isk: { let mut b = [0u8; 32]; b[0] = seed2; b },
+            d: { let mut b = [0u8; 32]; b[0] = seed2; b },
+            z: { let mut b = [0u8; 32]; b[0] = seed2.wrapping_add(0x80); b[1] = seed2; b },
         }
     }
 
@@ -425,7 +453,7 @@ mod tests {
     #[allow(dead_code)]
     fn token_holding_account(definition_id: &AccountId, balance: u128) -> Account {
         Account {
-            program_owner: Program::token().id(),
+            program_owner: programs::token().id(),
             balance: 0,
             nonce: Nonce(0),
             data: Data::try_from(create_token_holding_data(definition_id, balance)).unwrap(),
@@ -433,9 +461,12 @@ mod tests {
     }
 
     /// Shields tokens: public token holding → new private token holding.
+    /// rc6: encryption is ML-KEM-768; account identities are typed via
+    /// `InputAccountIdentity`; recipient's AccountId binds (npk, identifier=0).
     ///
     /// Returns (transaction, private_account_post_state).
     #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     fn shield_tokens(
         sender_key: &PrivateKey,
         sender_id: &AccountId,
@@ -443,6 +474,7 @@ mod tests {
         amount: u128,
         state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account) {
+        let recipient_id = recipient_keys.account_id(0);
         let sender = AccountWithMetadata::new(
             state.get_account_by_id(sender_id.clone()),
             true,
@@ -452,27 +484,35 @@ mod tests {
         let recipient = AccountWithMetadata::new(
             Account::default(),
             false,
-            &recipient_keys.npk(),
+            (&recipient_keys.npk(), 0_u128),
         );
 
-        let esk = [3; 32];
-        let shared_secret = SharedSecretKey::new(&esk, &recipient_keys.ivk());
-        let epk = EphemeralPublicKey::from_scalar(esk);
+        let (ssk, epk) =
+            SharedSecretKey::encapsulate_deterministic(&recipient_keys.vpk(), &[0_u8; 32], 0);
+        let view_tag = EncryptedAccountData::compute_view_tag(
+            &recipient_keys.npk(),
+            &recipient_keys.vpk(),
+        );
 
         let (output, proof) = execute_and_prove(
             vec![sender, recipient],
             token_transfer_instruction_data(amount),
-            vec![0, 2], // sender=public, recipient=new_private
-            vec![(recipient_keys.npk(), shared_secret)],
-            vec![],
-            vec![None],
-            &Program::token().into(),
+            vec![
+                InputAccountIdentity::Public,
+                InputAccountIdentity::PrivateUnauthorized {
+                    epk,
+                    view_tag,
+                    npk: recipient_keys.npk(),
+                    ssk,
+                    identifier: 0,
+                },
+            ],
+            &programs::token().into(),
         ).expect("shield_tokens: execute_and_prove failed");
 
         let message = PrivacyMessage::try_from_circuit_output(
             vec![*sender_id],
             vec![sender_nonce],
-            vec![(recipient_keys.npk(), recipient_keys.ivk(), epk)],
             output,
         ).expect("shield_tokens: message creation failed");
 
@@ -487,9 +527,9 @@ mod tests {
             .expect("Sender should have valid token holding");
         let definition_id = sender_holding.definition_id();
         let recipient_post = Account {
-            program_owner: Program::token().id(),
+            program_owner: programs::token().id(),
             balance: 0,
-            nonce: Nonce::private_account_nonce_init(&recipient_keys.npk()),
+            nonce: Nonce::private_account_nonce_init(&recipient_id),
             data: Data::try_from(create_token_holding_data(&definition_id, amount)).unwrap(),
         };
 
@@ -497,9 +537,12 @@ mod tests {
     }
 
     /// Transfers tokens between two private accounts.
+    /// rc6: sender is `PrivateAuthorizedUpdate` (has membership proof); recipient
+    /// is `PrivateUnauthorized` (fresh init). Both account_ids bind to (npk, 0).
     ///
     /// Returns (transaction, sender_post_state, recipient_post_state).
     #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     fn private_token_transfer(
         sender_keys: &PrivateAccountKeys,
         sender_account: &Account,
@@ -507,44 +550,54 @@ mod tests {
         amount: u128,
         state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account, Account) {
-        let sender_commitment = Commitment::new(&sender_keys.npk(), sender_account);
+        let sender_id = sender_keys.account_id(0);
+        let recipient_id = recipient_keys.account_id(0);
+        let sender_commitment = Commitment::new(&sender_id, sender_account);
         let sender = AccountWithMetadata::new(
-            sender_account.clone(), true, &sender_keys.npk(),
+            sender_account.clone(), true, (&sender_keys.npk(), 0_u128),
         );
         let recipient = AccountWithMetadata::new(
-            Account::default(), false, &recipient_keys.npk(),
+            Account::default(), false, (&recipient_keys.npk(), 0_u128),
         );
 
-        let esk_sender = [4; 32];
-        let shared_secret_sender = SharedSecretKey::new(&esk_sender, &sender_keys.ivk());
-        let epk_sender = EphemeralPublicKey::from_scalar(esk_sender);
-        let esk_recipient = [5; 32];
-        let shared_secret_recipient = SharedSecretKey::new(&esk_recipient, &recipient_keys.ivk());
-        let epk_recipient = EphemeralPublicKey::from_scalar(esk_recipient);
+        let (ssk_sender, epk_sender) =
+            SharedSecretKey::encapsulate_deterministic(&sender_keys.vpk(), &[0_u8; 32], 0);
+        let (ssk_recipient, epk_recipient) =
+            SharedSecretKey::encapsulate_deterministic(&recipient_keys.vpk(), &[0_u8; 32], 1);
+        let sender_view_tag = EncryptedAccountData::compute_view_tag(
+            &sender_keys.npk(), &sender_keys.vpk());
+        let recipient_view_tag = EncryptedAccountData::compute_view_tag(
+            &recipient_keys.npk(), &recipient_keys.vpk());
+        let sender_proof = state
+            .get_proof_for_commitment(&sender_commitment)
+            .unwrap_or((0, vec![]));
 
         let (output, proof) = execute_and_prove(
             vec![sender, recipient],
             token_transfer_instruction_data(amount),
-            vec![1, 2], // sender=private_auth, recipient=new_private
             vec![
-                (sender_keys.npk(), shared_secret_sender),
-                (recipient_keys.npk(), shared_secret_recipient),
+                InputAccountIdentity::PrivateAuthorizedUpdate {
+                    epk: epk_sender,
+                    view_tag: sender_view_tag,
+                    ssk: ssk_sender,
+                    nsk: sender_keys.nsk,
+                    membership_proof: sender_proof,
+                    identifier: 0,
+                },
+                InputAccountIdentity::PrivateUnauthorized {
+                    epk: epk_recipient,
+                    view_tag: recipient_view_tag,
+                    npk: recipient_keys.npk(),
+                    ssk: ssk_recipient,
+                    identifier: 0,
+                },
             ],
-            vec![sender_keys.nsk],
-            vec![
-                state.get_proof_for_commitment(&sender_commitment),
-                None,
-            ],
-            &Program::token().into(),
+            &programs::token().into(),
         ).expect("private_token_transfer: execute_and_prove failed");
 
         let message = PrivacyMessage::try_from_circuit_output(
             vec![],
             vec![],
-            vec![
-                (sender_keys.npk(), sender_keys.ivk(), epk_sender),
-                (recipient_keys.npk(), recipient_keys.ivk(), epk_recipient),
-            ],
             output,
         ).expect("private_token_transfer: message creation failed");
 
@@ -569,9 +622,9 @@ mod tests {
             ).unwrap(),
         };
         let recipient_post = Account {
-            program_owner: Program::token().id(),
+            program_owner: programs::token().id(),
             balance: 0,
-            nonce: Nonce::private_account_nonce_init(&recipient_keys.npk()),
+            nonce: Nonce::private_account_nonce_init(&recipient_id),
             data: Data::try_from(
                 create_token_holding_data(&definition_id, amount)
             ).unwrap(),
@@ -581,9 +634,11 @@ mod tests {
     }
 
     /// Deshields tokens: private token holding → public account.
+    /// rc6: sender is `PrivateAuthorizedUpdate`; recipient is `Public`.
     ///
     /// Returns (transaction, sender_post_state).
     #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     fn deshield_tokens(
         sender_keys: &PrivateAccountKeys,
         sender_account: &Account,
@@ -591,32 +646,43 @@ mod tests {
         amount: u128,
         state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account) {
-        let sender_commitment = Commitment::new(&sender_keys.npk(), sender_account);
+        let sender_id = sender_keys.account_id(0);
+        let sender_commitment = Commitment::new(&sender_id, sender_account);
         let sender = AccountWithMetadata::new(
-            sender_account.clone(), true, &sender_keys.npk(),
+            sender_account.clone(), true, (&sender_keys.npk(), 0_u128),
         );
         let recipient = AccountWithMetadata::new(
             state.get_account_by_id(recipient_id.clone()), false, *recipient_id,
         );
 
-        let esk = [6; 32];
-        let shared_secret = SharedSecretKey::new(&esk, &sender_keys.ivk());
-        let epk = EphemeralPublicKey::from_scalar(esk);
+        let (ssk, epk) =
+            SharedSecretKey::encapsulate_deterministic(&sender_keys.vpk(), &[0_u8; 32], 0);
+        let view_tag = EncryptedAccountData::compute_view_tag(
+            &sender_keys.npk(), &sender_keys.vpk());
+        let sender_proof = state
+            .get_proof_for_commitment(&sender_commitment)
+            .unwrap_or((0, vec![]));
 
         let (output, proof) = execute_and_prove(
             vec![sender, recipient],
             token_transfer_instruction_data(amount),
-            vec![1, 0], // sender=private_auth, recipient=public
-            vec![(sender_keys.npk(), shared_secret)],
-            vec![sender_keys.nsk],
-            vec![state.get_proof_for_commitment(&sender_commitment)],
-            &Program::token().into(),
+            vec![
+                InputAccountIdentity::PrivateAuthorizedUpdate {
+                    epk,
+                    view_tag,
+                    ssk,
+                    nsk: sender_keys.nsk,
+                    membership_proof: sender_proof,
+                    identifier: 0,
+                },
+                InputAccountIdentity::Public,
+            ],
+            &programs::token().into(),
         ).expect("deshield_tokens: execute_and_prove failed");
 
         let message = PrivacyMessage::try_from_circuit_output(
             vec![*recipient_id],
             vec![],
-            vec![(sender_keys.npk(), sender_keys.ivk(), epk)],
             output,
         ).expect("deshield_tokens: message creation failed");
 
@@ -650,6 +716,7 @@ mod tests {
     ///
     /// Returns (transaction, payment_post_state, credit_post_state).
     #[allow(dead_code)]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     fn private_buy_credits(
         setup: &TestSetup,
         tree_id: &[u8; 32],
@@ -662,6 +729,8 @@ mod tests {
     ) -> (PrivacyPreservingTransaction, Account, Account) {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let credit_token_id = derive_credit_token_pda(setup.registration.id(), tree_id);
+        let payment_id = payment_keys.account_id(0);
+        let credit_id = credit_keys.account_id(0);
 
         // Build pre_states: [config, credit_def, user_payment, treasury, user_credit]
         let config = AccountWithMetadata::new(
@@ -671,50 +740,65 @@ mod tests {
             state.get_account_by_id(credit_token_id.clone()), false, credit_token_id,
         );
         let user_payment = AccountWithMetadata::new(
-            payment_account.clone(), true, &payment_keys.npk(),
+            payment_account.clone(), true, (&payment_keys.npk(), 0_u128),
         );
         let treasury = AccountWithMetadata::new(
             state.get_account_by_id(setup.treasury_id.clone()), false, setup.treasury_id,
         );
         let user_credit = AccountWithMetadata::new(
-            Account::default(), false, &credit_keys.npk(),
+            Account::default(), false, (&credit_keys.npk(), 0_u128),
         );
 
-        let payment_commitment = Commitment::new(&payment_keys.npk(), payment_account);
+        let payment_commitment = Commitment::new(&payment_id, payment_account);
 
         // buy_credits instruction
         let instruction = Instruction::BuyCredits { tree_id: *tree_id, amount };
         let instruction_data = Program::serialize_instruction(instruction).unwrap();
 
-        // Ephemeral keys for the two private accounts
-        let esk_payment = [7; 32];
-        let shared_secret_payment = SharedSecretKey::new(&esk_payment, &payment_keys.ivk());
-        let epk_payment = EphemeralPublicKey::from_scalar(esk_payment);
-        let esk_credit = [8; 32];
-        let shared_secret_credit = SharedSecretKey::new(&esk_credit, &credit_keys.ivk());
-        let epk_credit = EphemeralPublicKey::from_scalar(esk_credit);
+        // rc6: ML-KEM-768 encapsulation per private account.
+        let (ssk_payment, epk_payment) =
+            SharedSecretKey::encapsulate_deterministic(&payment_keys.vpk(), &[0_u8; 32], 0);
+        let (ssk_credit, epk_credit) =
+            SharedSecretKey::encapsulate_deterministic(&credit_keys.vpk(), &[0_u8; 32], 1);
+        let payment_view_tag = EncryptedAccountData::compute_view_tag(
+            &payment_keys.npk(), &payment_keys.vpk());
+        let credit_view_tag = EncryptedAccountData::compute_view_tag(
+            &credit_keys.npk(), &credit_keys.vpk());
+        let payment_proof = state
+            .get_proof_for_commitment(&payment_commitment)
+            .unwrap_or((0, vec![]));
 
         // Dependencies: the RLN program chains to the token program
         let mut dependencies = HashMap::new();
-        dependencies.insert(Program::token().id(), Program::token());
+        dependencies.insert(programs::token().id(), programs::token());
         let program_with_deps = ProgramWithDependencies::new(
             setup.registration.clone(), dependencies,
         );
 
-        // visibility: [config=public, credit_def=public, payment=private_auth,
+        // visibility: [config=public, credit_def=public, payment=private_auth_update,
         //              treasury=public, credit=new_private]
         let (output, proof) = execute_and_prove(
             vec![config, credit_def, user_payment, treasury, user_credit],
             instruction_data,
-            vec![0, 0, 1, 0, 2],
             vec![
-                (payment_keys.npk(), shared_secret_payment),
-                (credit_keys.npk(), shared_secret_credit),
-            ],
-            vec![payment_keys.nsk],
-            vec![
-                state.get_proof_for_commitment(&payment_commitment),
-                None,
+                InputAccountIdentity::Public,
+                InputAccountIdentity::Public,
+                InputAccountIdentity::PrivateAuthorizedUpdate {
+                    epk: epk_payment,
+                    view_tag: payment_view_tag,
+                    ssk: ssk_payment,
+                    nsk: payment_keys.nsk,
+                    membership_proof: payment_proof,
+                    identifier: 0,
+                },
+                InputAccountIdentity::Public,
+                InputAccountIdentity::PrivateUnauthorized {
+                    epk: epk_credit,
+                    view_tag: credit_view_tag,
+                    npk: credit_keys.npk(),
+                    ssk: ssk_credit,
+                    identifier: 0,
+                },
             ],
             &program_with_deps,
         ).expect("private_buy_credits: execute_and_prove failed");
@@ -724,10 +808,6 @@ mod tests {
         let message = PrivacyMessage::try_from_circuit_output(
             vec![config_id, credit_token_id, setup.treasury_id],
             vec![],
-            vec![
-                (payment_keys.npk(), payment_keys.ivk(), epk_payment),
-                (credit_keys.npk(), credit_keys.ivk(), epk_credit),
-            ],
             output,
         ).expect("private_buy_credits: message creation failed");
 
@@ -755,9 +835,9 @@ mod tests {
 
         // Credit token definition_id for the credit holding
         let credit_post = Account {
-            program_owner: Program::token().id(),
+            program_owner: programs::token().id(),
             balance: 0,
-            nonce: Nonce::private_account_nonce_init(&credit_keys.npk()),
+            nonce: Nonce::private_account_nonce_init(&credit_id),
             data: Data::try_from(
                 create_token_holding_data(&credit_token_id, amount)
             ).unwrap(),
@@ -789,7 +869,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            Program::token().id(),
+            programs::token().id(),
             vec![definition_id.clone(), supply_holder_id.clone()],
             vec![Nonce(0), Nonce(0)],
             instruction,
@@ -822,7 +902,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            Program::token().id(),
+            programs::token().id(),
             vec![from_id.clone(), to_id.clone()],
             nonces,
             instruction,
@@ -911,7 +991,7 @@ mod tests {
                 payment_token_id: *payment_token_id.value(),
                 price_per_unit,
                 treasury_account_id: *treasury_id.value(),
-                token_program_id: bytemuck::cast(Program::token().id()),
+                token_program_id: bytemuck::cast(programs::token().id()),
                 max_total_rate_limit,
                 active_duration_for_new_memberships: active_duration,
                 grace_period_duration_for_new_memberships: grace_period_duration,
@@ -922,7 +1002,7 @@ mod tests {
             registration.id(),
             vec![credit_token_id, credit_supply_id],
             Instruction::InitializeCreditToken {
-                token_program_id: bytemuck::cast(Program::token().id()),
+                token_program_id: bytemuck::cast(programs::token().id()),
                 tree_id: *tree_id,
             },
         );
@@ -954,7 +1034,7 @@ mod tests {
     fn apply_registration_init(
         state: &mut V03State,
         txs: &[PublicTransaction; 3],
-    ) -> Result<(), nssa::error::NssaError> {
+    ) -> Result<(), nssa::error::LeeError> {
         for tx in txs {
             state.transition_from_public_transaction(tx, 1, 0)?;
         }
@@ -996,7 +1076,7 @@ mod tests {
         // require both parties to sign for Claim::Authorized on new accounts).
         let total_supply: u128 = 1_000_000_000;
         let user_amount: u128 = 10_000_000;
-        let token_id = Program::token().id();
+        let token_id = programs::token().id();
 
         let token_definition = token_core::TokenDefinition::Fungible {
             name: String::from("PAYTKN"),
@@ -1073,7 +1153,7 @@ mod tests {
 
         let total_supply: u128 = 1_000_000_000;
         let user_amount: u128 = 10_000_000;
-        let token_id = Program::token().id();
+        let token_id = programs::token().id();
 
         let token_definition = token_core::TokenDefinition::Fungible {
             name: String::from("PAYTKN"),
@@ -2550,7 +2630,7 @@ mod tests {
         ).expect("Failed to create RLN witness");
 
         // Initialize RLN instance
-        let rln = RLN::new(TREE_DEPTH, "").expect("Failed to initialize RLN");
+        let rln = RLN::new().expect("Failed to initialize RLN");
 
         // Generate the proof
         let (rln_proof, proof_values) = rln
@@ -2650,7 +2730,7 @@ mod tests {
             external_nullifier,
         ).expect("Failed to create RLN witness");
 
-        let rln = RLN::new(TREE_DEPTH, "").expect("Failed to initialize RLN");
+        let rln = RLN::new().expect("Failed to initialize RLN");
         let (rln_proof, proof_values) = rln
             .generate_rln_proof(&witness)
             .expect("Failed to generate RLN proof");
@@ -2778,7 +2858,7 @@ mod tests {
             external_nullifier,
         ).expect("Failed to create witness 2");
 
-        let rln = RLN::new(TREE_DEPTH, "").expect("Failed to initialize RLN");
+        let rln = RLN::new().expect("Failed to initialize RLN");
 
         // Generate both proofs
         let (proof1, values1) = rln.generate_rln_proof(&witness1).expect("Failed to generate proof 1");
@@ -2810,6 +2890,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[cfg(feature = "rc5-state-tests-privacy")]
     fn test_private_credit_flow() {
         let mut setup = state_with_initialized_registration()
             .expect("Setup should succeed");
@@ -2879,7 +2960,7 @@ mod tests {
             balance: 0,
         };
         setup.state.force_insert_account(deshield_credit_id.clone(), Account {
-            program_owner: Program::token().id(),
+            program_owner: programs::token().id(),
             data: Data::from(&empty_credit_holding),
             ..Account::default()
         });
@@ -2950,7 +3031,7 @@ mod tests {
     fn set_clock_50(state: &mut V03State, timestamp: u64, block_id: u64) {
         use clock_core::{CLOCK_50_PROGRAM_ACCOUNT_ID, ClockAccountData};
         let data = ClockAccountData { block_id, timestamp }.to_bytes();
-        let clock_program_id = Program::clock().id();
+        let clock_program_id = programs::clock().id();
         state.force_insert_account(
             CLOCK_50_PROGRAM_ACCOUNT_ID,
             Account {
