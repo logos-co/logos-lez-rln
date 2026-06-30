@@ -9,12 +9,11 @@
 
 use logos_lez_rln::merkle_tree::wait_for_leaf;
 use logos_lez_rln::rln::client::{
-    init_wallet, load_programs, create_funded_user, register_identity, tree_id_from_env,
+    init_wallet, load_programs, create_funded_user, rate_commitment_from_fr, register_identity,
+    tree_id_from_env,
 };
 use logos_lez_rln::rln::derive_config_account;
-use rln::hashers::poseidon_hash;
-use rln::prelude::Fr;
-use rln::utils::{bytes_le_to_fr, fr_to_bytes_le};
+use rln::utils::bytes_le_to_fr;
 use std::fs;
 use std::time::Duration;
 
@@ -34,9 +33,7 @@ fn hex_to_bytes32(hex: &str) -> [u8; 32] {
 fn compute_rate_commitment(id_commitment_bytes: &[u8; 32], rate_limit: u64) -> [u8; 32] {
     let (id_commitment_fr, _) = bytes_le_to_fr(id_commitment_bytes)
         .expect("Invalid id_commitment bytes");
-    let rate_limit_fr = Fr::from(rate_limit);
-    let rate_commitment = poseidon_hash(&[id_commitment_fr, rate_limit_fr]);
-    fr_to_bytes_le(&rate_commitment).try_into().unwrap()
+    rate_commitment_from_fr(&id_commitment_fr, rate_limit)
 }
 
 #[tokio::main]

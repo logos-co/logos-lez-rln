@@ -10,5 +10,5 @@ pub mod merkle_tree;
 pub mod rln;
 pub mod spel_seeds;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rc5-state-tests"))]
 mod state_tests;

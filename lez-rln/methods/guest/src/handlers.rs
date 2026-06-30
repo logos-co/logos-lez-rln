@@ -22,7 +22,7 @@ use crate::hash::{hash_single, validate_field_element};
 use crate::program::{ConfigState, MembershipState};
 use crate::registration::{
     calculate_payment_amount, compute_registration_leaf, parse_token_holding, read_tree_next_index,
-    require_clock, validate_rate_limit,
+    require_clock, validate_rate_limit, TokenHolding,
 };
 
 type Output = SpelOutput;
@@ -234,7 +234,8 @@ pub fn register(
     let payment_amount = calculate_payment_amount(rate_limit, config_state.price_per_unit);
 
     assert!(user_holding.is_authorized, "User must authorize payment");
-    let (user_token, user_balance) = parse_token_holding(user_holding.account.data.as_ref());
+    let TokenHolding { definition_id: user_token, balance: user_balance } =
+        parse_token_holding(user_holding.account.data.as_ref());
     assert_eq!(user_token, config_state.payment_token_id, "Wrong payment token");
     assert!(user_balance >= payment_amount, "Insufficient balance");
 
@@ -318,7 +319,7 @@ pub fn buy_credits(
     );
 
     assert!(user_payment_holding.is_authorized, "User must authorize payment");
-    let (user_token, user_balance) =
+    let TokenHolding { definition_id: user_token, balance: user_balance } =
         parse_token_holding(user_payment_holding.account.data.as_ref());
     assert_eq!(user_token, config_state.payment_token_id, "Wrong payment token");
     assert!(user_balance >= payment_amount, "Insufficient balance");
@@ -380,7 +381,7 @@ pub fn register_with_credits(
     assert_eq!(receipt_def_id, config_state.receipt_token_id, "Wrong receipt token");
 
     assert!(user_credit_holding.is_authorized, "User must authorize burn");
-    let (user_token, user_balance) =
+    let TokenHolding { definition_id: user_token, balance: user_balance } =
         parse_token_holding(user_credit_holding.account.data.as_ref());
     assert_eq!(user_token, config_state.receipt_token_id, "Wrong token type");
     assert!(user_balance >= rate_limit as u128, "Insufficient receipt tokens");

@@ -1,8 +1,4 @@
 //! Helpers shared by the SPEL `rln_registration` guest binary.
-//!
-//! All legacy bytemuck-path code (RegistrationConfig, MembershipData, OLD-scheme
-//! PDA derivations, chained-call builders) was removed in the SPEL migration.
-//! Only the helpers actually called by `bin/rln_registration.rs` remain.
 
 use crate::hash::{hash_pair, validate_field_element};
 use crate::layouts;
@@ -26,9 +22,18 @@ pub use rln_layouts::OFFSET_NEXT_INDEX as TREE_OFFSET_NEXT_INDEX;
 // Token Operations
 // ============================================================================
 
-pub fn parse_token_holding(data: &[u8]) -> (/* definition_id */ [u8; 32], /* balance */ u128) {
+/// A decoded token-holding account: which token it holds and the balance.
+pub struct TokenHolding {
+    pub definition_id: [u8; 32],
+    pub balance: u128,
+}
+
+pub fn parse_token_holding(data: &[u8]) -> TokenHolding {
     let layout = layouts::TokenHoldingLayout::parse(data);
-    (layout.definition_id, layout.balance())
+    TokenHolding {
+        definition_id: layout.definition_id,
+        balance: layout.balance(),
+    }
 }
 
 // ============================================================================

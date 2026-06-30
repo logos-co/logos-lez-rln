@@ -30,45 +30,6 @@ pub mod instruction;
 pub use instruction::Instruction;
 
 // ============================================================================
-// Legacy Instruction Enum (kept for lez-rln-ffi; new SPEL Instruction lives in instruction.rs)
-// ============================================================================
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum LegacyInstruction {
-    Initialize {
-        merkle_program_id: [u8; 32],
-        tree_id: [u8; 24],
-        payment_token_id: [u8; 32],
-        price_per_unit: u128,
-        treasury_account_id: [u8; 32],
-        token_program_id: [u8; 32],
-        max_total_rate_limit: u64,
-        active_duration_for_new_memberships: u32,
-        grace_period_duration_for_new_memberships: u32,
-    },
-    Register {
-        id_commitment: [u8; 32],
-        rate_limit: u64,
-    },
-    BuyCredits {
-        amount: u128,
-    },
-    RegisterWithCredits {
-        id_commitment: [u8; 32],
-        amount_to_burn: u64,
-    },
-    Slash {
-        identity_secret: [u8; 32],
-    },
-    /// Renew a membership during its grace period. Open to any signer.
-    /// The membership is identified by the membership-PDA pre-state.
-    Extend,
-    /// Remove an expired membership. Open to any signer.
-    /// The membership is identified by the membership-PDA pre-state.
-    Erase,
-}
-
-// ============================================================================
 // Rate Limit Constraints
 // ============================================================================
 
@@ -129,47 +90,6 @@ le_int!(U128Le, u128, 16);
 // ============================================================================
 // Account Layouts
 // ============================================================================
-
-/// Zero-copy layout for config account data (200 bytes).
-///
-/// ```text
-/// Offset  Size  Field
-/// ------  ----  -----
-/// 0       32    merkle_program_id
-/// 32      24    tree_id
-/// 56      32    payment_token_id
-/// 88      32    receipt_token_id (credit token)
-/// 120     16    price_per_unit (u128 le)
-/// 136     32    treasury_account_id
-/// 168     8     total_registrations (u64 le)
-/// 176     8     max_total_rate_limit (u64 le)
-/// 184     8     current_total_rate_limit (u64 le)
-/// 192     4     active_duration_for_new_memberships (u32 le, seconds)
-/// 196     4     grace_period_duration_for_new_memberships (u32 le, seconds)
-/// ```
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct ConfigLayout {
-    pub merkle_program_id: [u8; 32],
-    pub tree_id: [u8; 24],
-    pub payment_token_id: [u8; 32],
-    pub receipt_token_id: [u8; 32],
-    pub price_per_unit: U128Le,
-    pub treasury_account_id: [u8; 32],
-    pub total_registrations: U64Le,
-    pub max_total_rate_limit: U64Le,
-    pub current_total_rate_limit: U64Le,
-    pub active_duration_for_new_memberships: U32Le,
-    pub grace_period_duration_for_new_memberships: U32Le,
-}
-
-impl ConfigLayout {
-    pub const SIZE: usize = 200;
-
-    #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
-}
-
-const _: () = assert!(core::mem::size_of::<ConfigLayout>() == ConfigLayout::SIZE);
 
 /// Zero-copy layout for token holding account (49 bytes).
 #[repr(C, packed)]
@@ -259,35 +179,6 @@ pub const OFFSET_CACHED_NODES: usize = OFFSET_ROOT_HISTORY + ROOT_HISTORY_SIZE *
 
 /// Offset of top tree sparse data in main account data.
 pub const OFFSET_TOP_TREE_DATA: usize = OFFSET_CACHED_NODES + (TREE_DEPTH + 1) * 32;
-
-// ============================================================================
-// PDA Seed Construction
-// ============================================================================
-
-/// Build the raw 32-byte PDA seed for the tree main account.
-pub fn main_seed(tree_id: &[u8; 24]) -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[0..24].copy_from_slice(tree_id);
-    seed[24..32].copy_from_slice(b"__main__");
-    seed
-}
-
-/// Build the raw 32-byte PDA seed for a bottom subtree account.
-pub fn subtree_seed(tree_id: &[u8; 24], subtree_id: u32) -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[0..24].copy_from_slice(tree_id);
-    seed[24] = 0xFF;
-    seed[25..29].copy_from_slice(&subtree_id.to_le_bytes());
-    seed
-}
-
-/// Build the raw 32-byte PDA seed for the config account.
-pub fn config_seed(tree_id: &[u8; 24]) -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[0..24].copy_from_slice(tree_id);
-    seed[24..32].copy_from_slice(b"_config_");
-    seed
-}
 
 // ============================================================================
 // Account Layouts (Tree)

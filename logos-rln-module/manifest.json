@@ -11,7 +11,7 @@
     "linux-amd64": "liblogos_rln_module.so",
     "linux-aarch64": "liblogos_rln_module.so"
   },
-  "dependencies": ["liblogos_execution_zone_wallet_module"],
+  "dependencies": ["logos_execution_zone"],
   "capabilities": [],
   "include": ["liblez_rln_ffi.dylib"]
 }

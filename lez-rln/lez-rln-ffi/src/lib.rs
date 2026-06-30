@@ -449,13 +449,10 @@ pub unsafe extern "C" fn rln_ffi_generate_identity(
 
     let seed = unsafe { &*(seed_ptr as *const [u8; 32]) };
 
-    let (mut identity_secret_fr, id_commitment_fr) = rln::prelude::seeded_keygen(seed);
+    let (identity_secret_fr, id_commitment_fr) = rln::prelude::seeded_keygen(seed);
 
     let id_commitment_bytes = rln::utils::fr_to_bytes_le(&id_commitment_fr);
     let id_secret_hash_bytes = rln::utils::fr_to_bytes_le(&identity_secret_fr);
-
-    identity_secret_fr = rln::prelude::Fr::from(0u64);
-    let _ = identity_secret_fr;
 
     let out_commit = unsafe { core::slice::from_raw_parts_mut(out_id_commitment, 32) };
     out_commit.copy_from_slice(&id_commitment_bytes);
@@ -539,9 +536,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
     let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
-    // Always decode via ConfigState (SPEL-aligned, 240 bytes borsh). The
-    // pre-SPEL `ConfigLayout::parse` reads a 24-byte tree_id at a different
-    // treasury offset and produces wrong PDAs against current program.
+    // Decode via ConfigState (SPEL-aligned, 240 bytes borsh).
     let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
         Ok(c) => c,
         Err(_) => return Error::InvalidConfig,
@@ -698,7 +693,6 @@ pub unsafe extern "C" fn rln_ffi_decode_membership(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use borsh::BorshSerialize;
 
     fn make_config_state() -> Vec<u8> {
         let cfg = ConfigState {

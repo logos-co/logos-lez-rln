@@ -13,11 +13,10 @@
 
     logos-core.url = "github:logos-co/logos-cpp-sdk/25c88f4d48fa95ea4437194bcf60bd8d0cf84a74";
 
-    logos-execution-zone.url = "github:adklempner/lssa/feat/rln-sim-98e98c62-wallet-ffi";
+    logos-execution-zone.url = "github:logos-blockchain/logos-execution-zone?rev=e37876a64028a335eb693198a1ed6a0e875ec5b4";
 
     logos-wallet-module = {
-      url = "github:logos-blockchain/logos-execution-zone-module";
-      inputs.logos-cpp-sdk.follows = "logos-core";
+      url = "github:logos-blockchain/logos-execution-zone-module?rev=d70225ced646934d2294fd9e8f8b03615c104b80";
       inputs.logos-execution-zone.follows = "logos-execution-zone";
     };
 
@@ -63,18 +62,47 @@
           # --- Rust: lez-rln-ffi ---
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          ffiSrc = pkgs.lib.cleanSourceWith {
+          # lez-rln's workspace root (logos-lez-rln) has path = ../lssa/... deps,
+          # so cargo's workspace metadata loader needs lssa in the build sandbox
+          # even when we're only compiling the lez-rln-ffi sub-crate. Include both
+          # lez-rln/ and lssa/ in ffiSrc, then sourceRoot into lez-rln/ at build.
+          # Flake's git-aware filter excludes submodule contents; pull lssa
+          # straight from the filesystem and assemble a build root where lez-rln
+          # and lssa sit as siblings (so lez-rln/Cargo.toml's `path = ../lssa/...`
+          # deps resolve in the sandbox).
+          lezRlnTree = pkgs.lib.cleanSourceWith {
             src = ./lez-rln;
             filter = path: type:
               craneLib.filterCargoSources path type
               || pkgs.lib.hasSuffix ".toml" path
-              || pkgs.lib.hasSuffix ".h" path;
+              || pkgs.lib.hasSuffix ".h" path
+              || pkgs.lib.hasSuffix ".lock" path;
           };
+          lssaTree = builtins.path {
+            # Submodule path: not tracked by parent git, so use a pure absolute
+            # string (no path literal) to bypass nix's git-visibility check.
+            # Path is absolute on the host since lez-rln only ever builds here.
+            path = "/Users/arseniy/Waku/Logos/logos-chat/vendor/logos-lez-rln/lssa";
+            name = "lssa";
+            filter = path: type:
+              type == "directory"
+              || pkgs.lib.hasSuffix ".rs" path
+              || pkgs.lib.hasSuffix ".toml" path
+              || pkgs.lib.hasSuffix ".lock" path;
+          };
+          ffiSrc = pkgs.runCommand "lez-rln-with-lssa" {} ''
+            mkdir -p $out
+            cp -r ${lezRlnTree} $out/lez-rln
+            cp -r ${lssaTree} $out/lssa
+          '';
 
           lezRlnFfiPackage = craneLib.buildPackage {
             src = ffiSrc;
+            cargoToml = ./lez-rln/Cargo.toml;
+            cargoLock = ./lez-rln/Cargo.lock;
             pname = "lez-rln-ffi";
             version = "0.1.0";
+            sourceRoot = "lez-rln-with-lssa/lez-rln";
             cargoExtraArgs = "-p lez-rln-ffi";
             nativeBuildInputs = [
               pkgs.pkg-config
@@ -134,7 +162,7 @@
             ];
           };
 
-          walletModulePackage = logos-wallet-module.packages.${system}.default;
+          walletModulePackage = logos-wallet-module.packages.${system}.lgx;
 
         in
         {

@@ -6,8 +6,7 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
-#include <cstdio>
-#define RLNDIAG(...) do { fprintf(stdout, "[rlndiag] " __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); } while (0)
+
 static const char* WALLET_MODULE = "logos_execution_zone";
 
 static QString bytesToHex(const uint8_t* data, const size_t length) {
@@ -120,62 +119,51 @@ static bool fetchAccountData(LogosAPIClient* walletClient,
                               QByteArray& outData,
                               QByteArray* outProgramOwner = nullptr);
 
-QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
-    qDebug() << "get_valid_roots: called with" << rln_account_id_hex;
-    if (!logosAPI) {
-        qDebug() << "get_valid_roots: FAIL logosAPI not initialized";
-        return {};
-    }
-
-    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
-    if (!walletClient) {
-        qDebug() << "get_valid_roots: FAIL wallet module not available";
-        return {};
-    }
-
-    const QString configHex = resolveAccountId(walletClient, rln_account_id_hex);
-    qDebug() << "get_valid_roots: configHex=" << configHex;
-    if (configHex.isEmpty()) {
-        qDebug() << "get_valid_roots: FAIL resolve account ID";
-        return {};
-    }
-
+// Shared derivation prefix for the on-chain RLN entry points. Bundles the
+// wallet client, the resolved config account id, its raw data, and the
+// 32-byte program owner — the inputs every method needs before talking FFI.
+struct RlnConfigContext {
+    LogosAPIClient* walletClient = nullptr;
+    QString configHex;
     QByteArray configData;
     QByteArray programOwnerBytes;
-    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)) {
-        qDebug() << "get_valid_roots: FAIL fetch config account";
-        return {};
-    }
-    qDebug() << "get_valid_roots: configData.size=" << configData.size()
-             << "programOwner.size=" << programOwnerBytes.size();
-    if (programOwnerBytes.size() != 32) {
-        qDebug() << "get_valid_roots: FAIL program_owner size" << programOwnerBytes.size();
+};
+
+static bool resolveConfigContext(LogosAPI* logosApi,
+                                 const QString& configAccountId,
+                                 const char* who,
+                                 RlnConfigContext& out);
+
+static bool deriveRegisterPlan(const RlnConfigContext& ctx,
+                               const QByteArray& idCommitmentBytes,
+                               const char* who,
+                               RlnFfiRlnRegisterPlan& outPlan);
+
+QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, rln_account_id_hex, "get_valid_roots", ctx)) {
         return {};
     }
 
     // Derive tree main account via merkle_proofs_plan (no leaves needed).
     RlnFfiMerkleProofsPlan accountsPlan = {};
     RlnFfiError err = rln_ffi_merkle_proofs_plan(
-        reinterpret_cast<const uint8_t*>(configData.constData()),
-        static_cast<size_t>(configData.size()),
-        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+        static_cast<size_t>(ctx.configData.size()),
+        reinterpret_cast<const uint8_t*>(ctx.programOwnerBytes.constData()),
         nullptr, 0,
         &accountsPlan);
-    qDebug() << "get_valid_roots: merkle_proofs_plan result=" << static_cast<int>(err);
     if (err != RLN_FFI_ERROR_SUCCESS) {
-        qDebug() << "get_valid_roots: FAIL merkle_proofs_plan FFI error" << static_cast<int>(err);
+        qWarning() << "get_valid_roots: merkle_proofs_plan FFI error" << static_cast<int>(err);
         return {};
     }
-    const uint8_t* mainAccountId = accountsPlan.main_account_id;
 
-    const QString mainHex = bytesToHex(mainAccountId, 32);
-    qDebug() << "get_valid_roots: mainAccountHex=" << mainHex;
+    const QString mainHex = bytesToHex(accountsPlan.main_account_id, 32);
     QByteArray mainData;
-    if (!fetchAccountData(walletClient, mainHex, mainData)) {
-        qDebug() << "get_valid_roots: FAIL fetch tree main account" << mainHex;
+    if (!fetchAccountData(ctx.walletClient, mainHex, mainData)) {
+        qWarning() << "get_valid_roots: failed to fetch tree main account" << mainHex;
         return {};
     }
-    qDebug() << "get_valid_roots: mainData.size=" << mainData.size();
 
     uint8_t rootsBuf[160] = {};
     uint32_t count = 0;
@@ -183,9 +171,8 @@ QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
         reinterpret_cast<const uint8_t*>(mainData.constData()),
         static_cast<size_t>(mainData.size()),
         rootsBuf, &count);
-    qDebug() << "get_valid_roots: ffi_get_valid_roots result=" << static_cast<int>(err) << "count=" << count;
     if (err != RLN_FFI_ERROR_SUCCESS) {
-        qDebug() << "get_valid_roots: FAIL FFI error" << static_cast<int>(err);
+        qWarning() << "get_valid_roots: get_valid_roots FFI error" << static_cast<int>(err);
         return {};
     }
 
@@ -277,6 +264,69 @@ static bool fetchAccountData(LogosAPIClient* walletClient,
     return hexToBytes(dataHex, outData);
 }
 
+static bool resolveConfigContext(LogosAPI* logosApi,
+                                 const QString& configAccountId,
+                                 const char* who,
+                                 RlnConfigContext& out) {
+    if (!logosApi) {
+        qWarning() << who << ": logosAPI not initialized";
+        return false;
+    }
+    out.walletClient = logosApi->getClient(WALLET_MODULE);
+    if (!out.walletClient) {
+        qWarning() << who << ": wallet module not available";
+        return false;
+    }
+    out.configHex = resolveAccountId(out.walletClient, configAccountId);
+    if (out.configHex.isEmpty()) {
+        qWarning() << who << ": failed to resolve config account";
+        return false;
+    }
+    if (!fetchAccountData(out.walletClient, out.configHex, out.configData, &out.programOwnerBytes)) {
+        qWarning() << who << ": failed to fetch config account";
+        return false;
+    }
+    if (out.programOwnerBytes.size() != 32) {
+        qWarning() << who << ": invalid program_owner size" << out.programOwnerBytes.size();
+        return false;
+    }
+    return true;
+}
+
+static bool deriveRegisterPlan(const RlnConfigContext& ctx,
+                               const QByteArray& idCommitmentBytes,
+                               const char* who,
+                               RlnFfiRlnRegisterPlan& outPlan) {
+    RlnFfiMerkleProofsPlan accountsPlan = {};
+    if (rln_ffi_merkle_proofs_plan(
+            reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+            static_cast<size_t>(ctx.configData.size()),
+            reinterpret_cast<const uint8_t*>(ctx.programOwnerBytes.constData()),
+            nullptr, 0,
+            &accountsPlan) != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << who << ": derive tree main failed";
+        return false;
+    }
+    const QString treeMainHex = bytesToHex(accountsPlan.main_account_id, 32);
+    QByteArray treeMainData;
+    if (!fetchAccountData(ctx.walletClient, treeMainHex, treeMainData)) {
+        qWarning() << who << ": fetch tree main failed";
+        return false;
+    }
+    if (rln_ffi_register_plan(
+            reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+            static_cast<size_t>(ctx.configData.size()),
+            reinterpret_cast<const uint8_t*>(treeMainData.constData()),
+            static_cast<size_t>(treeMainData.size()),
+            reinterpret_cast<const uint8_t*>(ctx.programOwnerBytes.constData()),
+            reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
+            &outPlan) != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << who << ": register_plan FFI failed";
+        return false;
+    }
+    return true;
+}
+
 QString LogosRlnModule::generate_identity(const QString& seed_or_account_id) {
     QByteArray seedBytes;
     hexToBytes(seed_or_account_id, seedBytes, 32);
@@ -322,95 +372,39 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
                                          const QString& user_holding_account_id,
                                          const QString& id_commitment_hex,
                                          int rate_limit) {
-    if (!logosAPI) {
-        qWarning() << "register_member: logosAPI not initialized";
-        return {};
-    }
-
-    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
-    if (!walletClient) {
-        qWarning() << "register_member: wallet module not available";
-        return {};
-    }
-
-    const QString configHex = resolveAccountId(walletClient, config_account_id);
-    const QString userHoldingHex = resolveAccountId(walletClient, user_holding_account_id);
-    if (configHex.isEmpty() || userHoldingHex.isEmpty()) {
-        qWarning() << "register_member: failed to resolve account IDs";
-        return {};
-    }
-
     QByteArray idCommitmentBytes;
     if (!hexToBytes(id_commitment_hex, idCommitmentBytes, 32)) {
         qWarning() << "register_member: invalid id_commitment hex";
         return {};
     }
 
-    RLNDIAG("register_member: start config=%s holding=%s rate=%d",
-            configHex.toUtf8().constData(), userHoldingHex.toUtf8().constData(), rate_limit);
-    QByteArray configData;
-    QByteArray programOwnerBytes;
-    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)) {
-        qWarning() << "register_member: failed to fetch config account";
-        RLNDIAG("FAIL fetch config account");
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, config_account_id, "register_member", ctx)) {
         return {};
     }
-    if (programOwnerBytes.size() != 32) {
-        qWarning() << "register_member: invalid program_owner size";
-        RLNDIAG("FAIL program_owner size=%d", programOwnerBytes.size());
-        return {};
-    }
-    RLNDIAG("config fetched: configData=%d programOwner=%d", configData.size(), programOwnerBytes.size());
+    auto* walletClient = ctx.walletClient;
+    const QByteArray& configData = ctx.configData;
+    const QByteArray& programOwnerBytes = ctx.programOwnerBytes;
 
-    RlnFfiMerkleProofsPlan accountsPlan = {};
-    RlnFfiError err = rln_ffi_merkle_proofs_plan(
-        reinterpret_cast<const uint8_t*>(configData.constData()),
-        static_cast<size_t>(configData.size()),
-        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-        nullptr, 0,
-        &accountsPlan);
-    if (err != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "register_member: failed to derive tree main account";
-        RLNDIAG("FAIL merkle_proofs_plan err=%d", static_cast<int>(err));
+    const QString userHoldingHex = resolveAccountId(walletClient, user_holding_account_id);
+    if (userHoldingHex.isEmpty()) {
+        qWarning() << "register_member: failed to resolve user holding account";
         return {};
     }
-
-    const QString treeMainHex = bytesToHex(accountsPlan.main_account_id, 32);
-    RLNDIAG("merkle_proofs_plan ok; treeMain=%s", treeMainHex.toUtf8().constData());
-    QByteArray treeMainData;
-    if (!fetchAccountData(walletClient, treeMainHex, treeMainData)) {
-        qWarning() << "register_member: failed to fetch tree main account";
-        RLNDIAG("FAIL fetch tree main");
-        return {};
-    }
-    RLNDIAG("treeMain fetched: %d bytes", treeMainData.size());
 
     // tree_id comes from config; id_commitment seeds the init-marked
     // membership PDA required by the guest's Register instruction.
     RlnFfiRlnRegisterPlan plan = {};
-    err = rln_ffi_register_plan(
-        reinterpret_cast<const uint8_t*>(configData.constData()),
-        static_cast<size_t>(configData.size()),
-        reinterpret_cast<const uint8_t*>(treeMainData.constData()),
-        static_cast<size_t>(treeMainData.size()),
-        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-        reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
-        &plan);
-    if (err != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "register_member: register_plan FFI error" << static_cast<int>(err);
-        RLNDIAG("FAIL register_plan err=%d", static_cast<int>(err));
+    if (!deriveRegisterPlan(ctx, idCommitmentBytes, "register_member", plan)) {
         return {};
     }
-    RLNDIAG("register_plan ok; subtree_id=%llu", static_cast<unsigned long long>(plan.subtree_id));
 
     const QString membershipPdaHex = bytesToHex(plan.membership_account_id, 32);
 
-    // Idempotency pre-check: if the membership PDA is already populated
-    // for this (tree_id, id_commitment) — either from a previous run that
-    // persisted credentials, or from a prior submit whose root-poll timed
-    // out — skip the tx and return the recovered leaf_index. The on-chain
-    // Register handler enforces uniqueness via Claim::Pda on this PDA, so
-    // resubmitting always fails (state_tests.rs::test_register_same_commitment_twice_fails).
+    // Idempotency pre-check: if the membership PDA is already populated for this
+    // (tree_id, id_commitment), recover its leaf_index instead of resubmitting —
+    // the on-chain Register handler enforces uniqueness via Claim::Pda, so a
+    // resubmit always fails.
     {
         QByteArray existing;
         if (fetchAccountDataQuiet(walletClient, membershipPdaHex, existing)
@@ -431,16 +425,14 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     // SPEL `Instruction::Register` needs all of {tree_id, id_commitment,
     // rate_limit, subtree_id} — missing fields → guest DeserializeUnexpectedEnd.
     // tree_id sits at offset 32..64 of the ConfigState borsh layout.
-    RLNDIAG("membership not pre-existing; building register instruction");
     if (configData.size() < 64) {
         qWarning() << "register_member: configData too short for tree_id";
-        RLNDIAG("FAIL configData<64 (=%d)", configData.size());
         return {};
     }
     const uint8_t* treeIdPtr = reinterpret_cast<const uint8_t*>(configData.constData()) + 32;
     uint8_t* instrPtr = nullptr;
     size_t instrLen = 0;
-    err = rln_ffi_register_build_instruction(
+    RlnFfiError err = rln_ffi_register_build_instruction(
         treeIdPtr,
         reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
         rate_limit,
@@ -448,17 +440,14 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
         &instrPtr, &instrLen);
     if (err != RLN_FFI_ERROR_SUCCESS) {
         qWarning() << "register_member: build_instruction FFI error" << static_cast<int>(err);
-        RLNDIAG("FAIL build_instruction err=%d", static_cast<int>(err));
         return {};
     }
-    RLNDIAG("build_instruction ok; instrLen=%zu", instrLen);
 
     // Instruction bytes are a borsh Vec<u32> serialized LE; upstream's
     // send_generic_public_transaction takes the u32 words directly.
     if ((instrLen % 4) != 0) {
         qWarning() << "register_member: instruction not word-aligned" << instrLen;
         rln_ffi_free_string(instrPtr, instrLen);
-        RLNDIAG("FAIL instrLen%%4 (=%zu)", instrLen);
         return {};
     }
     QVariantList instructionWords;
@@ -489,10 +478,8 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
     const QString programIdHex = bytesToHex(
         reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()), 32);
 
-    // Submit via upstream rc6's native program-id-based generic transaction
-    // (typed multi-arg invokeRemoteMethod — confirmed to marshal arrays).
-    RLNDIAG("submitting send_generic_public_transaction; accounts=%d words=%d program=%s",
-            accountIds.size(), instructionWords.size(), programIdHex.toUtf8().constData());
+    // Submit via the upstream program-id-based generic transaction; the typed
+    // multi-arg invokeRemoteMethod marshals the array arguments over QtRO.
     const QVariant sendResult = walletClient->invokeRemoteMethod(
         QStringLiteral("logos_execution_zone"),
         QStringLiteral("send_generic_public_transaction"),
@@ -502,21 +489,14 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
 
     if (sendResultStr.isEmpty()) {
         qWarning() << "register_member: transaction failed";
-        RLNDIAG("FAIL send_generic_public_transaction returned empty");
         return {};
     }
-    RLNDIAG("send_generic_public_transaction ok; result=%s", sendResultStr.left(120).toUtf8().constData());
 
-    // Submission accepted by the sequencer; we DO NOT block here waiting
-    // for on-chain confirmation. Two reasons:
-    //   1. waitForFinished() on the caller's QtRO call doesn't drain its
-    //      own event loop, so a 120s wait here would stall every other
-    //      QtRO request queued on the caller's thread (host CLI -c
-    //      commands, lightpush, gossipsub ticks).
-    //   2. plan.next_leaf_index is a pre-submit snapshot — it can be
-    //      wrong if our tx loses a race. The authoritative leaf_index
-    //      lives in the membership PDA after the tx executes; callers
-    //      must poll is_member_registered() to recover it.
+    // Return once the sequencer accepts the submission; don't block on
+    // confirmation. A blocking wait here wouldn't drain the caller's QtRO event
+    // loop and would stall its other requests, and next_leaf_index is only a
+    // pre-submit estimate. Callers poll is_member_registered() for the
+    // authoritative leaf_index from the membership PDA.
     QJsonObject result;
     result["leaf_index"] = static_cast<qint64>(plan.next_leaf_index);
     result["tx_result"] = sendResultStr;
@@ -526,21 +506,6 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
 
 QString LogosRlnModule::is_member_registered(const QString& config_account_id,
                                               const QString& id_commitment_hex) {
-    if (!logosAPI) {
-        qWarning() << "is_member_registered: logosAPI not initialized";
-        return {};
-    }
-    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
-    if (!walletClient) {
-        qWarning() << "is_member_registered: wallet module not available";
-        return {};
-    }
-    const QString configHex = resolveAccountId(walletClient, config_account_id);
-    if (configHex.isEmpty()) {
-        qWarning() << "is_member_registered: failed to resolve config account";
-        return {};
-    }
-
     QByteArray idCommitmentBytes;
     if (!hexToBytes(id_commitment_hex, idCommitmentBytes, 32)) {
         qWarning() << "is_member_registered: invalid id_commitment hex";
@@ -549,47 +514,20 @@ QString LogosRlnModule::is_member_registered(const QString& config_account_id,
 
     // Reuse the same FFI derivation path as register_member so the
     // membership PDA address is computed identically.
-    QByteArray configData, programOwnerBytes;
-    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)
-        || programOwnerBytes.size() != 32) {
-        qWarning() << "is_member_registered: failed to fetch config account";
-        return {};
-    }
-
-    RlnFfiMerkleProofsPlan accountsPlan = {};
-    if (rln_ffi_merkle_proofs_plan(
-            reinterpret_cast<const uint8_t*>(configData.constData()),
-            static_cast<size_t>(configData.size()),
-            reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-            nullptr, 0,
-            &accountsPlan) != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "is_member_registered: derive tree main failed";
-        return {};
-    }
-    const QString treeMainHex = bytesToHex(accountsPlan.main_account_id, 32);
-    QByteArray treeMainData;
-    if (!fetchAccountData(walletClient, treeMainHex, treeMainData)) {
-        qWarning() << "is_member_registered: fetch tree main failed";
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, config_account_id, "is_member_registered", ctx)) {
         return {};
     }
 
     RlnFfiRlnRegisterPlan plan = {};
-    if (rln_ffi_register_plan(
-            reinterpret_cast<const uint8_t*>(configData.constData()),
-            static_cast<size_t>(configData.size()),
-            reinterpret_cast<const uint8_t*>(treeMainData.constData()),
-            static_cast<size_t>(treeMainData.size()),
-            reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
-            reinterpret_cast<const uint8_t*>(idCommitmentBytes.constData()),
-            &plan) != RLN_FFI_ERROR_SUCCESS) {
-        qWarning() << "is_member_registered: register_plan FFI failed";
+    if (!deriveRegisterPlan(ctx, idCommitmentBytes, "is_member_registered", plan)) {
         return {};
     }
 
     const QString membershipPdaHex = bytesToHex(plan.membership_account_id, 32);
     QByteArray membershipData;
     QJsonObject result;
-    if (fetchAccountDataQuiet(walletClient, membershipPdaHex, membershipData)
+    if (fetchAccountDataQuiet(ctx.walletClient, membershipPdaHex, membershipData)
         && membershipData.size() >= 64) {
         quint64 leafIndex = 0, rateLimit = 0;
         QByteArray idc;
@@ -605,17 +543,6 @@ QString LogosRlnModule::is_member_registered(const QString& config_account_id,
 
 QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
                                            const QString& leaf_indices_json) {
-    if (!logosAPI) {
-        qWarning() << "get_merkle_proofs: logosAPI not initialized";
-        return {};
-    }
-
-    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
-    if (!walletClient) {
-        qWarning() << "get_merkle_proofs: wallet module not available";
-        return {};
-    }
-
     // 1. Parse leaf indices from JSON array
     const QJsonDocument indicesDoc = QJsonDocument::fromJson(leaf_indices_json.toUtf8());
     if (!indicesDoc.isArray()) {
@@ -633,33 +560,22 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
             qWarning() << "get_merkle_proofs: leaf index is not a number";
             return {};
         }
-        leafIndices.append(static_cast<uint64_t>(val.toDouble()));
+        leafIndices.append(static_cast<uint64_t>(val.toInteger()));
     }
 
     // 2. Resolve config account ID and fetch config data
-    const QString configHex = resolveAccountId(walletClient, config_account_id);
-    if (configHex.isEmpty()) {
-        qWarning() << "get_merkle_proofs: failed to resolve config account ID";
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, config_account_id, "get_merkle_proofs", ctx)) {
         return {};
     }
-
-    QByteArray configData;
-    QByteArray programOwnerBytes;
-    if (!fetchAccountData(walletClient, configHex, configData, &programOwnerBytes)) {
-        qWarning() << "get_merkle_proofs: failed to fetch config account";
-        return {};
-    }
-    if (programOwnerBytes.size() != 32) {
-        qWarning() << "get_merkle_proofs: invalid program_owner size" << programOwnerBytes.size();
-        return {};
-    }
+    auto* walletClient = ctx.walletClient;
 
     // 3. Phase 1: ask Rust which accounts we need to fetch
     RlnFfiMerkleProofsPlan plan = {};
     RlnFfiError err = rln_ffi_merkle_proofs_plan(
-        reinterpret_cast<const uint8_t*>(configData.constData()),
-        static_cast<size_t>(configData.size()),
-        reinterpret_cast<const uint8_t*>(programOwnerBytes.constData()),
+        reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+        static_cast<size_t>(ctx.configData.size()),
+        reinterpret_cast<const uint8_t*>(ctx.programOwnerBytes.constData()),
         leafIndices.constData(),
         static_cast<size_t>(leafIndices.size()),
         &plan);
@@ -668,28 +584,13 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
         return {};
     }
 
-    // 4-7. Stable-snapshot loop.
-    //
-    //   A proof's cryptographic root is determined jointly by the main account
-    //   (top-tree nodes + cached defaults) and the subtree accounts (bottom-tree
-    //   nodes). The wallet's get_account_public reads are NOT snapshot-bound —
-    //   each observes whatever block the wallet has synced at call time. If a
-    //   registration lands between the main fetch and the subtree fetches, those
-    //   two halves come from different chain states and the resulting proof root
-    //   exists in NEITHER state's valid_roots window — surfacing downstream as
-    //   "Self-verify: Expected one of the provided roots" and a silently dropped
-    //   sphinx packet.
-    //
-    //   The previous mitigation refetched main *only* to repair the valid_roots
-    //   window; it left the path_elements half (and thus the proof root) on a
-    //   possibly-torn (main, subtree) pair. The real fix is to detect mutation
-    //   across the read window and retry. We bracket the subtree reads with two
-    //   main fetches and compare their valid_roots windows. The window is a pure
-    //   tree-state digest: it changes iff the tree mutates (a registration pushes
-    //   a fresh root) and is immune to any volatile non-tree account bytes. Equal
-    //   windows ⇒ no registration landed while we were reading subtrees ⇒ main
-    //   and subtrees are from one consistent state ⇒ the proof root equals the
-    //   current root and is in the window. On mismatch we re-read everything.
+    // 4-7. Stable-snapshot loop. A proof root spans the main account and the
+    //   subtree accounts, but the wallet's reads aren't snapshot-bound: a
+    //   registration landing mid-read yields a torn (main, subtree) pair whose
+    //   root is in no valid_roots window. We bracket the subtree reads with two
+    //   main fetches; the valid_roots window is a tree-state digest, so equal
+    //   windows prove no mutation occurred and the pair is consistent. On
+    //   mismatch we re-read everything.
     const QString mainHex = bytesToHex(plan.main_account_id, 32);
 
     // Raw concatenated 32-byte valid roots from a main-account buffer. Doubles

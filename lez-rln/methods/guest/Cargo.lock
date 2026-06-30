@@ -1080,7 +1080,6 @@ dependencies = [
  "risc0-zkvm",
  "rln-layouts",
  "rust-poseidon-bn254-pure",
- "serde",
  "spel-framework",
  "token_core",
 ]

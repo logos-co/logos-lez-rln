@@ -36,8 +36,14 @@ impl ConfigState {
     }
 }
 
-// Guard against silent drift between this `#[account_type]` and the shared
-// `rln_layouts::ConfigState` that the host uses to compute byte offsets.
+// These structs are duplicated (not a re-export of `rln_layouts`) on purpose:
+// the SPEL IDL scanner only picks up literal `#[account_type]` struct items with
+// named fields declared in this scope — a `pub use`/type alias is invisible to
+// it — and `impl ConfigState` (below) is an inherent impl that must live in the
+// crate that owns the type. The compile-time `size_of` assert catches gross
+// drift; the `#[cfg(test)] layout_equivalence` tests below catch *field-level*
+// drift (order / type changes) by proving the Borsh byte layout is identical to
+// `rln_layouts`, which is the consensus-critical property the host depends on.
 const _: () = {
     assert!(core::mem::size_of::<ConfigState>() == core::mem::size_of::<SharedConfigState>());
 };
@@ -58,6 +64,78 @@ const _: () = {
         core::mem::size_of::<MembershipState>() == core::mem::size_of::<SharedMembershipState>()
     );
 };
+
+// Field-level drift guard: prove that the local `#[account_type]` structs and the
+// shared `rln_layouts` structs serialize to byte-identical Borsh, using distinct
+// per-field values so any reorder or type change is observable. Borsh encodes in
+// field declaration order, so equal bytes for distinct values implies identical
+// field order + widths — the exact layout the host reads via offset constants.
+#[cfg(test)]
+mod layout_equivalence {
+    use super::*;
+
+    #[test]
+    fn config_state_borsh_layout_matches_shared() {
+        let local = ConfigState {
+            merkle_program_id: [1u8; 32],
+            tree_id: [2u8; 32],
+            payment_token_id: [3u8; 32],
+            receipt_token_id: [4u8; 32],
+            price_per_unit: 5,
+            treasury_account_id: [6u8; 32],
+            total_registrations: 7,
+            max_total_rate_limit: 8,
+            current_total_rate_limit: 9,
+            active_duration_for_new_memberships: 10,
+            grace_period_duration_for_new_memberships: 11,
+            token_program_id: [12u8; 32],
+        };
+        let shared = SharedConfigState {
+            merkle_program_id: [1u8; 32],
+            tree_id: [2u8; 32],
+            payment_token_id: [3u8; 32],
+            receipt_token_id: [4u8; 32],
+            price_per_unit: 5,
+            treasury_account_id: [6u8; 32],
+            total_registrations: 7,
+            max_total_rate_limit: 8,
+            current_total_rate_limit: 9,
+            active_duration_for_new_memberships: 10,
+            grace_period_duration_for_new_memberships: 11,
+            token_program_id: [12u8; 32],
+        };
+        assert_eq!(
+            borsh::to_vec(&local).unwrap(),
+            borsh::to_vec(&shared).unwrap(),
+            "ConfigState Borsh layout drifted from rln_layouts::ConfigState"
+        );
+    }
+
+    #[test]
+    fn membership_state_borsh_layout_matches_shared() {
+        let local = MembershipState {
+            leaf_index: 1,
+            rate_limit: 2,
+            id_commitment: [3u8; 32],
+            grace_period_start_timestamp: 4,
+            active_duration: 5,
+            grace_period_duration: 6,
+        };
+        let shared = SharedMembershipState {
+            leaf_index: 1,
+            rate_limit: 2,
+            id_commitment: [3u8; 32],
+            grace_period_start_timestamp: 4,
+            active_duration: 5,
+            grace_period_duration: 6,
+        };
+        assert_eq!(
+            borsh::to_vec(&local).unwrap(),
+            borsh::to_vec(&shared).unwrap(),
+            "MembershipState Borsh layout drifted from rln_layouts::MembershipState"
+        );
+    }
+}
 
 #[lez_program(instruction = "rln_layouts::Instruction")]
 pub mod rln_registration {
@@ -256,7 +334,7 @@ pub mod rln_registration {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
     ) -> SpelResult {
-        let _ = id_commitment; // declared so the macro resolves the membership PDA seed
+        let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
         Ok(handlers::extend(config, membership, clock_account, tree_id))
     }
 

@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use risc0_build::{DockerOptionsBuilder, GuestOptionsBuilder};
+use risc0_build::GuestOptionsBuilder;
 
 fn main() {
     // Local (non-docker) build: docker mode's context (lez-rln/) excludes the
     // sibling lssa/spel path deps, and needs a running daemon. Local mode builds
     // the guest directly with the host risc0 toolchain, resolving path deps.
-    let _ = DockerOptionsBuilder::default();
     let opts = GuestOptionsBuilder::default()
         .build()
         .unwrap();

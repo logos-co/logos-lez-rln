@@ -25,11 +25,9 @@ use crate::rln::{
 
 pub const PRICE_PER_UNIT: u128 = 10_000;
 /// 100 B RLNTOK minted per tree deploy. At PRICE_PER_UNIT=10_000 and the
-/// demo's rateLimit=100, each registration burns 1 M tokens — so this
-/// supply funds roughly 100K registrations across the tree's lifetime
-/// before depletion forces a fresh deploy. Previous 10 B baseline ran
-/// out after sustained testnet use and silently stranded fresh clones
-/// at `Timeout waiting for account ... to be initialized` in run_setup.
+/// demo's rateLimit=100, each registration burns 1 M tokens, so this supply
+/// funds roughly 100K registrations across the tree's lifetime before
+/// depletion forces a fresh deploy.
 pub const TOKEN_SUPPLY: u128 = 100_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
@@ -166,54 +164,67 @@ pub async fn wait_for_account_data(
     );
 }
 
-/// Get the path to the supply holding file for a given tree_id.
-pub fn get_supply_holding_path(tree_id: &[u8; 32]) -> PathBuf {
+/// Path to a per-tree account file, named `<prefix>_<tree_id>.txt`.
+fn account_file_path(tree_id: &[u8; 32], prefix: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(DATA_DIR)
-        .join(format!("supply_holding_{}.txt", hex::encode(tree_id)))
+        .join(format!("{}_{}.txt", prefix, hex::encode(tree_id)))
+}
+
+/// Persist an account ID to its per-tree file for later reuse.
+fn save_account_file(tree_id: &[u8; 32], prefix: &str, account_id: &AccountId) {
+    let path = account_file_path(tree_id, prefix);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, account_id.to_string())
+        .unwrap_or_else(|_| panic!("Failed to save {} ID", prefix));
+}
+
+/// Load a previously saved account ID from its per-tree file.
+fn load_account_file(tree_id: &[u8; 32], prefix: &str) -> Option<AccountId> {
+    std::fs::read_to_string(account_file_path(tree_id, prefix))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Get the path to the supply holding file for a given tree_id.
+pub fn get_supply_holding_path(tree_id: &[u8; 32]) -> PathBuf {
+    account_file_path(tree_id, "supply_holding")
 }
 
 /// Save the supply holding account ID for later reuse.
 pub fn save_supply_holding(tree_id: &[u8; 32], supply_holding_id: &AccountId) {
-    let path = get_supply_holding_path(tree_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&path, supply_holding_id.to_string()).expect("Failed to save supply holding ID");
+    save_account_file(tree_id, "supply_holding", supply_holding_id);
 }
 
 /// Load a previously saved supply holding account ID.
 pub fn load_supply_holding(tree_id: &[u8; 32]) -> Option<AccountId> {
-    let path = get_supply_holding_path(tree_id);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    load_account_file(tree_id, "supply_holding")
 }
 
 /// Get the path to the payment account file for a given tree_id.
 pub fn get_payment_account_path(tree_id: &[u8; 32]) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(DATA_DIR)
-        .join(format!("payment_account_{}.txt", hex::encode(tree_id)))
+    account_file_path(tree_id, "payment_account")
 }
 
 /// Save the payment account ID for later reuse.
 pub fn save_payment_account(tree_id: &[u8; 32], account_id: &AccountId) {
-    let path = get_payment_account_path(tree_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&path, account_id.to_string()).expect("Failed to save payment account ID");
+    save_account_file(tree_id, "payment_account", account_id);
 }
 
 /// Load a previously saved payment account ID.
 pub fn load_payment_account(tree_id: &[u8; 32]) -> Option<AccountId> {
-    let path = get_payment_account_path(tree_id);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    load_account_file(tree_id, "payment_account")
+}
+
+/// Compute the membership leaf: rate_commitment = poseidon(id_commitment, rate_limit).
+/// Single source of truth for the leaf value shared by identity creation and
+/// CSV-driven bulk registration.
+pub fn rate_commitment_from_fr(id_commitment_fr: &Fr, rate_limit: u64) -> [u8; 32] {
+    let rate_commitment = poseidon_hash(&[*id_commitment_fr, Fr::from(rate_limit)]);
+    fr_to_bytes_le(&rate_commitment).try_into().unwrap()
 }
 
 /// Outputs of `create_identity`: the RLN identity plus the on-chain leaf (rate commitment).
@@ -253,8 +264,7 @@ pub async fn create_identity(
     let identity_secret = IdSecret::from(&mut identity_secret_fr);
     let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
 
-    let rate_commitment = poseidon_hash(&[id_commitment_fr, Fr::from(user_message_limit)]);
-    let leaf_bytes: [u8; 32] = fr_to_bytes_le(&rate_commitment).try_into().unwrap();
+    let leaf_bytes = rate_commitment_from_fr(&id_commitment_fr, user_message_limit);
 
     RlnIdentity {
         identity_secret,
@@ -274,6 +284,41 @@ async fn is_program_deployed(
     match wallet_core.get_account_public(account_id.clone()).await {
         Ok(account) => account.program_owner == program.id(),
         Err(_) => false,
+    }
+}
+
+/// Send a program-deployment transaction, treating "already deployed" sequencer
+/// errors as success (idempotent deploy).
+async fn send_deploy_tx(
+    wallet_core: &WalletCore,
+    program: &Program,
+    program_name: &str,
+    bytecode: Vec<u8>,
+) {
+    let deploy_msg = program_deployment_transaction::Message::new(bytecode);
+    let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
+
+    match wallet_core
+        .sequencer_client
+        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
+        .await
+    {
+        Ok(_) => println!("  {} deployed (program ID: {:?})", program_name, program.id()),
+        Err(e) => {
+            let err_str = format!("{:?}", e);
+            if err_str.contains("already")
+                || err_str.contains("exists")
+                || err_str.contains("duplicate")
+            {
+                println!(
+                    "  {} already deployed (program ID: {:?})",
+                    program_name,
+                    program.id()
+                );
+            } else {
+                panic!("Failed to deploy {}: {:?}", program_name, e);
+            }
+        }
     }
 }
 
@@ -315,37 +360,7 @@ pub async fn ensure_program_deployed(
         );
     }
 
-    let deploy_msg = program_deployment_transaction::Message::new(bytecode);
-    let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
-
-    match wallet_core
-        .sequencer_client
-        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
-        .await
-    {
-        Ok(_) => {
-            println!(
-                "  {} deployed (program ID: {:?})",
-                program_name,
-                program.id()
-            );
-        }
-        Err(e) => {
-            let err_str = format!("{:?}", e);
-            if err_str.contains("already")
-                || err_str.contains("exists")
-                || err_str.contains("duplicate")
-            {
-                println!(
-                    "  {} already deployed (program ID: {:?})",
-                    program_name,
-                    program.id()
-                );
-            } else {
-                panic!("Failed to deploy {}: {:?}", program_name, e);
-            }
-        }
-    }
+    send_deploy_tx(wallet_core, program, program_name, bytecode).await;
 }
 
 /// Deploy a built-in program (bytecode already embedded in the binary).
@@ -354,35 +369,7 @@ pub async fn deploy_builtin_program(
     program: &Program,
     program_name: &str,
 ) {
-    let deploy_msg = program_deployment_transaction::Message::new(program.elf().to_vec());
-    let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
-
-    match wallet_core
-        .sequencer_client
-        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
-        .await
-    {
-        Ok(_) => println!(
-            "  {} deployed (program ID: {:?})",
-            program_name,
-            program.id()
-        ),
-        Err(e) => {
-            let err_str = format!("{:?}", e);
-            if err_str.contains("already")
-                || err_str.contains("exists")
-                || err_str.contains("duplicate")
-            {
-                println!(
-                    "  {} already deployed (program ID: {:?})",
-                    program_name,
-                    program.id()
-                );
-            } else {
-                panic!("Failed to deploy {}: {:?}", program_name, e);
-            }
-        }
-    }
+    send_deploy_tx(wallet_core, program, program_name, program.elf().to_vec()).await;
 }
 
 /// Run full setup: deploy programs, create token, initialize registration.

@@ -6,4 +6,4 @@
 	url = git@github.com:adklempner/logos-delivery-module.git
 [submodule "logos-execution-zone-module"]
 	path = logos-execution-zone-module
-	url = git@github.com:adklempner/logos-execution-zone-module.git
+	url = git@github.com:logos-blockchain/logos-execution-zone-module.git

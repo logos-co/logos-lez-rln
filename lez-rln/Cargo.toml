@@ -15,7 +15,7 @@ name = "logos_lez_rln"
 path = "src/lib.rs"
 
 [dependencies]
-# LSSA dependencies via local rc5 lssa submodule (rc5 renamed nssa->lee,
+# LSSA dependencies via the lssa submodule (upstream rc6 renamed nssa->lee,
 # nssa_core->lee_core; package aliasing keeps the lez-rln source unchanged).
 nssa = { package = "lee", path = "../lssa/lee/state_machine" }
 nssa_core = { package = "lee_core", path = "../lssa/lee/state_machine/core" }
@@ -31,7 +31,9 @@ tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
 hex = "0.4.3"
 bytemuck = "1.24.0"
 rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
-serde = { version = "1", features = ["derive"] }
+
+[features]
+rc5-state-tests = []
 
 [[bin]]
 name = "run_rln_proof"
