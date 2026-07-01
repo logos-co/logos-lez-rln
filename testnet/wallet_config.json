@@ -1,8 +1,0 @@
-{
-  "sequencer_addr": "https://testnet.lez.logos.co/",
-  "seq_poll_timeout": "120s",
-  "seq_request_timeout": "120s",
-  "seq_tx_poll_max_blocks": 60,
-  "seq_poll_max_retries": 10,
-  "seq_block_poll_max_amount": 100
-}

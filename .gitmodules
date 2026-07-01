@@ -1,6 +1,3 @@
-[submodule "lssa"]
-	path = lssa
-	url = git@github.com:adklempner/lssa.git
 [submodule "logos-delivery-module"]
 	path = logos-delivery-module
 	url = git@github.com:adklempner/logos-delivery-module.git

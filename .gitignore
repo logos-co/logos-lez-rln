@@ -9,11 +9,9 @@ storage.json
 wallet_config.json
 dev/storage.json
 dev/wallet_config.json
-!testnet/wallet_config.json
-!testnet/storage.json.seed
-!testnet/supply_holding.txt
-!testnet/payment_account.txt
-!testnet/config_account.txt
+# testnet/ flat fixtures are staged from deployments/<name>/ by
+# tools/deployments/stage.sh. Descriptors are tracked; staged output is not.
+/testnet/
 dev/logs/
 .DS_Store
 result

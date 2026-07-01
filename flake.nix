@@ -21,6 +21,8 @@
     };
 
     logos-module-viewer.url = "github:logos-co/logos-module-viewer";
+
+    nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
   };
 
   outputs =
@@ -32,6 +34,7 @@
       logos-core,
       logos-wallet-module,
       logos-module-viewer,
+      nix-bundle-lgx,
       ...
     }:
     let
@@ -78,17 +81,15 @@
               || pkgs.lib.hasSuffix ".h" path
               || pkgs.lib.hasSuffix ".lock" path;
           };
-          lssaTree = builtins.path {
-            # Submodule path: not tracked by parent git, so use a pure absolute
-            # string (no path literal) to bypass nix's git-visibility check.
-            # Path is absolute on the host since lez-rln only ever builds here.
-            path = "/Users/arseniy/Waku/Logos/logos-chat/vendor/logos-lez-rln/lssa";
+          # lssa (upstream execution-zone) source pinned by rev. Same rev as the
+          # logos-execution-zone flake input above. Bump both together.
+          lssaRev = "e37876a64028a335eb693198a1ed6a0e875ec5b4";
+          lssaTree = pkgs.fetchFromGitHub {
+            owner = "logos-blockchain";
+            repo = "logos-execution-zone";
+            rev = lssaRev;
+            hash = "sha256-ltLcysXUdVUXAe25Tl8x7e7ZsTzj1sHlyS3glp97TAo=";
             name = "lssa";
-            filter = path: type:
-              type == "directory"
-              || pkgs.lib.hasSuffix ".rs" path
-              || pkgs.lib.hasSuffix ".toml" path
-              || pkgs.lib.hasSuffix ".lock" path;
           };
           ffiSrc = pkgs.runCommand "lez-rln-with-lssa" {} ''
             mkdir -p $out
@@ -164,10 +165,20 @@
 
           walletModulePackage = logos-wallet-module.packages.${system}.lgx;
 
+          # Content-addressed .lgx bundle for the rln module. Building this via
+          # `nix build .#logos-rln-module-lgx` always produces the .lgx that
+          # matches the current source — no /nix/store find + head -1 lottery.
+          logosRlnModuleLgx =
+            nix-bundle-lgx.bundlers.${system}.default logosRlnModulePackage;
+          logosRlnModuleLgxPortable =
+            nix-bundle-lgx.bundlers.${system}.portable logosRlnModulePackage;
+
         in
         {
           lez-rln-ffi = lezRlnFfiPackage;
           logos-rln-module = logosRlnModulePackage;
+          logos-rln-module-lgx = logosRlnModuleLgx;
+          logos-rln-module-lgx-portable = logosRlnModuleLgxPortable;
           wallet-module = walletModulePackage;
           default = lezRlnFfiPackage;
         }
