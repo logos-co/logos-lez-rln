@@ -202,6 +202,31 @@ static bool fetchAccountDataQuiet(LogosAPIClient* walletClient,
     return hexToBytes(dataHex, outData);
 }
 
+// Tri-state fetch: distinguishes a legitimately-empty account from a real
+// fetch error. Callers that treat both as "no data" silently substitute an
+// empty proof leaf when a transient RPC/parse error hits an account that
+// actually exists on-chain — producing a proof against the wrong root that
+// the verifier rejects ("Expected one of the provided roots"). See
+// get_merkle_proofs's subtree loop for the only consumer.
+enum class FetchOutcome { Present, Absent, Error };
+
+static FetchOutcome fetchAccountDataTriState(LogosAPIClient* walletClient,
+                                              const QString& accountIdHex,
+                                              QByteArray& outData) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    const QVariant result = walletClient->invokeRemoteMethod(
+        QStringLiteral("logos_execution_zone"), QStringLiteral("get_account_public"),
+        QVariant(accountIdHex), Timeout(60000));
+    const QString json = result.toString();
+    if (json.isEmpty()) return FetchOutcome::Error;
+    const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+    if (!doc.isObject()) return FetchOutcome::Error;
+    const QString dataHex = doc.object().value("data").toString();
+    if (dataHex.isEmpty()) return FetchOutcome::Absent;
+    if (!hexToBytes(dataHex, outData)) return FetchOutcome::Error;
+    return FetchOutcome::Present;
+}
+
 // Decode a fetched membership PDA's data into its scalar fields. Returns
 // true on success. Caller guarantees data.size() >= 64.
 static bool decodeMembership(const QByteArray& data,
@@ -625,19 +650,33 @@ QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
             return {};
         }
 
-        // 5. Fetch subtree accounts.
+        // 5. Fetch subtree accounts via the tri-state helper. Absent (empty
+        //    data — subtree not yet initialized) is legitimate; Error (RPC
+        //    failure, malformed JSON) routes into the snapshot retry below
+        //    instead of silently substituting "empty" for an existing subtree,
+        //    which would produce a proof with the wrong merkle root that the
+        //    verifier rejects as "Expected one of the provided roots". [R5]
         QVector<QByteArray> subtreeDataBufs(static_cast<int>(plan.subtree_count));
         QVector<RlnFfiSubtreeEntry> subtreeEntries(static_cast<int>(plan.subtree_count));
+        bool subtreeFetchErrored = false;
         for (uint32_t i = 0; i < plan.subtree_count; ++i) {
             const QString subtreeHex = bytesToHex(plan.subtree_account_ids[i], 32);
-            fetchAccountData(walletClient, subtreeHex, subtreeDataBufs[i]);
-            // Empty data is OK — subtree may not exist yet.
+            const FetchOutcome outcome =
+                fetchAccountDataTriState(walletClient, subtreeHex, subtreeDataBufs[i]);
+            if (outcome == FetchOutcome::Error) {
+                qWarning() << "get_merkle_proofs: subtree fetch errored"
+                           << subtreeHex << "(attempt" << attempt << ") — retrying snapshot";
+                subtreeFetchErrored = true;
+                break;
+            }
+            // Present → use data; Absent → nullptr/0 (legitimate "not yet on-chain").
             subtreeEntries[i].subtree_id = plan.subtree_ids[i];
             subtreeEntries[i].data_ptr = subtreeDataBufs[i].isEmpty()
                 ? nullptr
                 : reinterpret_cast<const uint8_t*>(subtreeDataBufs[i].constData());
             subtreeEntries[i].data_len = static_cast<size_t>(subtreeDataBufs[i].size());
         }
+        if (subtreeFetchErrored) continue;
 
         // 6. Refetch main account (snapshot B — closes the read window) and
         //    compare windows. Mismatch ⇒ the tree mutated while we read
