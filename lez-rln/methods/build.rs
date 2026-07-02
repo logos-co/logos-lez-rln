@@ -30,7 +30,7 @@ fn main() {
         .join("logos_lez_rln_methods")
         .join("logos_lez_rln_guest")
         .join("riscv32im-risc0-zkvm-elf")
-        .join("docker");
+        .join("release");
 
     for name in ["rln_registration.bin", "incremental_merkle_tree.bin"] {
         let path = bin_dir.join(name);
