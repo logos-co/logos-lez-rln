@@ -9,6 +9,9 @@ storage.json
 wallet_config.json
 dev/storage.json
 dev/wallet_config.json
+# Deployment descriptors include a wallet for the shared team instance.
+# Track those explicitly; per-run ephemeral wallets stay ignored.
+!deployments/*/storage.json
 # testnet/ flat fixtures are staged from deployments/<name>/ by
 # tools/deployments/stage.sh. Descriptors are tracked; staged output is not.
 /testnet/

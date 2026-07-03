@@ -1,0 +1,10 @@
+{
+  "name": "shared-5ade-v2",
+  "tree_id": "9ff4501d717e48e27efbf969342bfb708fcfd47c7b2c687c21b5ee8648559eec",
+  "sequencer": "https://testnet.lez.logos.co/",
+  "registration_program_id": "53f7e0f8ee146fa11df5c9c4aa9fa80240a9c93fb79322cbc9b84e755a5bfd2a",
+  "merkle_program_id": "30621bc4ba39cfc752aa3f9a031aa805ca8e2699f0609d584a2610e540882e6e",
+  "config_account": "7ZianRPMCLtjZzSGJH29SPTm7zkcC1khJJZMdX3MxsgP",
+  "payment_account": "CRBS9dNHRBkbFsueHDKD2MyK2BT3cFQAi5EQPwFVGgwU",
+  "supply_holding": "GgBzFbTSmqcnEM5QVYjZaJXCn4iuSju1uifpUx8Uu4Gc"
+}
