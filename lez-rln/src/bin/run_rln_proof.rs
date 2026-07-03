@@ -1,11 +1,9 @@
 //! End-to-end RLN proof demo. Requires `run_setup` to have been run first.
 
-use logos_lez_rln::merkle_tree::{
-    TREE_DEPTH, get_merkle_proof, proof_to_fr, wait_for_leaf,
-};
+use logos_lez_rln::merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf};
 use logos_lez_rln::rln::client::{
-    RlnIdentity, TREE_ID, create_funded_user, create_identity, init_wallet, load_programs,
-    register_identity,
+    RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
+    register_identity, tree_id_from_env,
 };
 use rln::hashers::poseidon_hash;
 use rln::prelude::{hash_to_field_le, Fr, RLNWitnessInput, RLN};
@@ -24,7 +22,7 @@ const RLN_IDENTIFIER: &str = "rln/logos-rln-relay/v2.0.0";
 #[tokio::main]
 async fn main() {
     let mut wallet_core = init_wallet();
-    let tree_id = TREE_ID;
+    let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
 
     println!("=== RLN Proof Demo ===\n");
@@ -93,7 +91,7 @@ async fn main() {
     )
     .expect("Failed to create RLN witness");
 
-    let rln = RLN::new(TREE_DEPTH, "").expect("Failed to initialize RLN");
+    let rln = RLN::new().expect("Failed to initialize RLN");
 
     let (rln_proof, proof_values) = rln
         .generate_rln_proof(&witness)
