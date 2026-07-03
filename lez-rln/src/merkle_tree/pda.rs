@@ -1,22 +1,49 @@
-//! PDA (Program Derived Account) derivation for the Merkle tree.
+//! PDA derivation for the merkle tree's main and subtree accounts.
 //!
-//! Seed construction is defined in `rln-layouts` (shared with guest).
+//! These PDAs live under the **registration program's** ID — the merkle tree
+//! program never owns its own data accounts; it operates on accounts that the
+//! registration program claims via `pda_seeds` chained-call authorization.
+//!
+//! Seed scheme matches what the SPEL `rln_registration` declares for its
+//! `init` constraints: `compute_pda(SHA-256(label || tree_id [|| subtree_id]))`.
 
 use nssa::AccountId;
 use nssa_core::program::{PdaSeed, ProgramId};
 
-/// Derives the main tree account ID.
-pub fn derive_main_account(program_id: &ProgramId, tree_id: &[u8; 24]) -> AccountId {
-    AccountId::from((program_id, &PdaSeed::new(rln_layouts::main_seed(tree_id))))
+use crate::spel_seeds::{combine_seeds, label_seed, u32_seed};
+
+/// Tree main account: `seeds = [literal("main"), arg("tree_id")]`.
+pub fn derive_main_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    AccountId::for_public_pda(
+        program_id,
+        &PdaSeed::new(combine_seeds(&[&label_seed("main"), tree_id])),
+    )
 }
 
-/// Derives a bottom subtree account ID.
+/// Bottom subtree: `seeds = [literal("subtree"), arg("tree_id"), arg("subtree_id")]`.
 pub fn derive_subtree_account(
     program_id: &ProgramId,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     subtree_id: u32,
 ) -> AccountId {
-    AccountId::from((program_id, &PdaSeed::new(rln_layouts::subtree_seed(tree_id, subtree_id))))
+    AccountId::for_public_pda(
+        program_id,
+        &PdaSeed::new(combine_seeds(&[
+            &label_seed("subtree"),
+            tree_id,
+            &u32_seed(subtree_id),
+        ])),
+    )
+}
+
+/// Raw seed bytes for a subtree PDA (used in `pda_seeds` of chained calls).
+pub fn subtree_pda_seed(tree_id: &[u8; 32], subtree_id: u32) -> [u8; 32] {
+    combine_seeds(&[&label_seed("subtree"), tree_id, &u32_seed(subtree_id)])
+}
+
+/// Raw seed bytes for the tree main PDA.
+pub fn main_pda_seed(tree_id: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("main"), tree_id])
 }
 
 #[cfg(test)]
@@ -24,40 +51,34 @@ mod tests {
     use super::*;
 
     fn mock_program_id() -> ProgramId {
-        let bytes: [u8; 32] = [1u8; 32];
-        bytemuck::cast(bytes)
+        bytemuck::cast([1u8; 32])
     }
 
     #[test]
-    fn test_seed_layout() {
-        let tree_id = [0u8; 24];
-        let main = rln_layouts::main_seed(&tree_id);
-        assert_eq!(&main[24..32], b"__main__");
-
-        let subtree = rln_layouts::subtree_seed(&tree_id, 10);
-        assert_eq!(subtree[24], 0xFF);
-        assert_eq!(&subtree[25..29], &10u32.to_le_bytes());
+    fn subtree_pdas_vary_by_id() {
+        let p = mock_program_id();
+        let t = [1u8; 32];
+        assert_ne!(derive_subtree_account(&p, &t, 0), derive_subtree_account(&p, &t, 1));
     }
 
     #[test]
-    fn test_subtree_pdas_vary_by_id() {
-        let program_id = mock_program_id();
-        let tree_id = [1u8; 24];
-
-        let subtree_0 = derive_subtree_account(&program_id, &tree_id, 0);
-        let subtree_1 = derive_subtree_account(&program_id, &tree_id, 1);
-
-        assert_ne!(subtree_0, subtree_1, "Different subtree IDs should have different PDAs");
+    fn main_and_subtree_are_distinct() {
+        let p = mock_program_id();
+        let t = [1u8; 32];
+        assert_ne!(derive_main_account(&p, &t), derive_subtree_account(&p, &t, 0));
     }
 
     #[test]
-    fn test_main_and_subtree_are_distinct() {
-        let program_id = mock_program_id();
-        let tree_id = [1u8; 24];
-
-        let main = derive_main_account(&program_id, &tree_id);
-        let subtree = derive_subtree_account(&program_id, &tree_id, 0);
-
-        assert_ne!(main, subtree, "Main and subtree should have different PDAs");
+    fn raw_seeds_match_derived_accounts() {
+        let p = mock_program_id();
+        let t = [2u8; 32];
+        assert_eq!(
+            AccountId::for_public_pda(&p, &PdaSeed::new(main_pda_seed(&t))),
+            derive_main_account(&p, &t),
+        );
+        assert_eq!(
+            AccountId::for_public_pda(&p, &PdaSeed::new(subtree_pda_seed(&t, 7))),
+            derive_subtree_account(&p, &t, 7),
+        );
     }
 }

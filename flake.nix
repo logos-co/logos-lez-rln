@@ -11,14 +11,18 @@
 
     crane.url = "github:ipetkov/crane";
 
-    logos-core.url = "github:logos-co/logos-cpp-sdk/a4bd66c";
+    logos-core.url = "github:logos-co/logos-cpp-sdk/25c88f4d48fa95ea4437194bcf60bd8d0cf84a74";
+
+    logos-execution-zone.url = "github:logos-blockchain/logos-execution-zone?rev=e37876a64028a335eb693198a1ed6a0e875ec5b4";
 
     logos-wallet-module = {
-      url = "github:logos-blockchain/logos-execution-zone-module";
-      inputs.logos-core.follows = "logos-core";
+      url = "github:logos-blockchain/logos-execution-zone-module?rev=d70225ced646934d2294fd9e8f8b03615c104b80";
+      inputs.logos-execution-zone.follows = "logos-execution-zone";
     };
 
     logos-module-viewer.url = "github:logos-co/logos-module-viewer";
+
+    nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
   };
 
   outputs =
@@ -30,6 +34,7 @@
       logos-core,
       logos-wallet-module,
       logos-module-viewer,
+      nix-bundle-lgx,
       ...
     }:
     let
@@ -60,18 +65,45 @@
           # --- Rust: lez-rln-ffi ---
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          ffiSrc = pkgs.lib.cleanSourceWith {
+          # lez-rln's workspace root (logos-lez-rln) has path = ../lssa/... deps,
+          # so cargo's workspace metadata loader needs lssa in the build sandbox
+          # even when we're only compiling the lez-rln-ffi sub-crate. Include both
+          # lez-rln/ and lssa/ in ffiSrc, then sourceRoot into lez-rln/ at build.
+          # Flake's git-aware filter excludes submodule contents; pull lssa
+          # straight from the filesystem and assemble a build root where lez-rln
+          # and lssa sit as siblings (so lez-rln/Cargo.toml's `path = ../lssa/...`
+          # deps resolve in the sandbox).
+          lezRlnTree = pkgs.lib.cleanSourceWith {
             src = ./lez-rln;
             filter = path: type:
               craneLib.filterCargoSources path type
               || pkgs.lib.hasSuffix ".toml" path
-              || pkgs.lib.hasSuffix ".h" path;
+              || pkgs.lib.hasSuffix ".h" path
+              || pkgs.lib.hasSuffix ".lock" path;
           };
+          # lssa (upstream execution-zone) source pinned by rev. Same rev as the
+          # logos-execution-zone flake input above. Bump both together.
+          lssaRev = "e37876a64028a335eb693198a1ed6a0e875ec5b4";
+          lssaTree = pkgs.fetchFromGitHub {
+            owner = "logos-blockchain";
+            repo = "logos-execution-zone";
+            rev = lssaRev;
+            hash = "sha256-ltLcysXUdVUXAe25Tl8x7e7ZsTzj1sHlyS3glp97TAo=";
+            name = "lssa";
+          };
+          ffiSrc = pkgs.runCommand "lez-rln-with-lssa" {} ''
+            mkdir -p $out
+            cp -r ${lezRlnTree} $out/lez-rln
+            cp -r ${lssaTree} $out/lssa
+          '';
 
           lezRlnFfiPackage = craneLib.buildPackage {
             src = ffiSrc;
+            cargoToml = ./lez-rln/Cargo.toml;
+            cargoLock = ./lez-rln/Cargo.lock;
             pname = "lez-rln-ffi";
             version = "0.1.0";
+            sourceRoot = "lez-rln-with-lssa/lez-rln";
             cargoExtraArgs = "-p lez-rln-ffi";
             nativeBuildInputs = [
               pkgs.pkg-config
@@ -87,7 +119,13 @@
 
           # --- C++: logos-rln-module ---
           llvmPkgs = pkgs.llvmPackages;
-          logosCore = logos-core.packages.${system}.default;
+          logosCore = pkgs.symlinkJoin {
+            name = "logos-cpp-sdk";
+            paths = [
+              logos-core.packages.${system}.logos-cpp-lib
+              logos-core.packages.${system}.logos-cpp-include
+            ];
+          };
 
           logosRlnModulePackage = pkgs.stdenv.mkDerivation {
             pname = "logos-rln-module";
@@ -125,12 +163,22 @@
             ];
           };
 
-          walletModulePackage = logos-wallet-module.packages.${system}.default;
+          walletModulePackage = logos-wallet-module.packages.${system}.lgx;
+
+          # Content-addressed .lgx bundle for the rln module. Building this via
+          # `nix build .#logos-rln-module-lgx` always produces the .lgx that
+          # matches the current source — no /nix/store find + head -1 lottery.
+          logosRlnModuleLgx =
+            nix-bundle-lgx.bundlers.${system}.default logosRlnModulePackage;
+          logosRlnModuleLgxPortable =
+            nix-bundle-lgx.bundlers.${system}.portable logosRlnModulePackage;
 
         in
         {
           lez-rln-ffi = lezRlnFfiPackage;
           logos-rln-module = logosRlnModulePackage;
+          logos-rln-module-lgx = logosRlnModuleLgx;
+          logos-rln-module-lgx-portable = logosRlnModuleLgxPortable;
           wallet-module = walletModulePackage;
           default = lezRlnFfiPackage;
         }
@@ -166,7 +214,13 @@
           pkgs = mkPkgs system;
           lezRlnFfiPackage = self.packages.${system}.lez-rln-ffi;
           logosRlnModulePackage = self.packages.${system}.logos-rln-module;
-          logosCorePackage = logos-core.packages.${system}.default;
+          logosCorePackage = pkgs.symlinkJoin {
+            name = "logos-cpp-sdk";
+            paths = [
+              logos-core.packages.${system}.logos-cpp-lib
+              logos-core.packages.${system}.logos-cpp-include
+            ];
+          };
         in
         {
           default = pkgs.mkShell {

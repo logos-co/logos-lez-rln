@@ -6,7 +6,7 @@
   "type": "core",
   "category": "blockchain",
   "main": "liblogos_rln_module",
-  "dependencies": ["liblogos_execution_zone_wallet_module"],
+  "dependencies": ["logos_execution_zone"],
   "capabilities": [],
   "include": ["liblez_rln_ffi.dylib"]
 }

@@ -56,6 +56,11 @@ typedef struct RlnFfiRlnRegisterPlan {
   uint8_t treasury_account_id[32];
   uint8_t subtree_account_id[32];
   uint8_t clock_account_id[32];
+  /**
+   * Membership PDA from (program_owner, tree_id, id_commitment).
+   * Required by the `Register` instruction's `init`-marked membership account.
+   */
+  uint8_t membership_account_id[32];
   uint32_t subtree_id;
   uint64_t next_leaf_index;
 } RlnFfiRlnRegisterPlan;
@@ -158,6 +163,7 @@ enum RlnFfiError rln_ffi_compute_rate_commitment(const uint8_t *id_commitment_pt
  * `config_data_ptr`/`config_data_len`: raw bytes of config account (tree_id is read from here)
  * `tree_main_data_ptr`/`tree_main_data_len`: raw bytes of tree main account (for next_leaf_index)
  * `program_owner_ptr`: 32-byte registration program ID
+ * `id_commitment_ptr`: 32-byte id_commitment (used to derive the membership PDA)
  * `out_plan`: pointer to caller-allocated RlnRegisterPlan
  */
 enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
@@ -165,22 +171,49 @@ enum RlnFfiError rln_ffi_register_plan(const uint8_t *config_data_ptr,
                                        const uint8_t *tree_main_data_ptr,
                                        uintptr_t tree_main_data_len,
                                        const uint8_t *program_owner_ptr,
+                                       const uint8_t *id_commitment_ptr,
                                        struct RlnFfiRlnRegisterPlan *out_plan);
 
 /**
  * Build the serialized instruction data for a Register transaction.
  *
- * Returns a borsh-serialized instruction payload that can be used
- * to construct the transaction message.
+ * Returns a serialized SPEL `Instruction::Register` payload (risc0-serde),
+ * suitable for the registration program's #[lez_program] handler.
  *
+ * `tree_id_ptr`: 32-byte tree_id (same as in ConfigState)
  * `id_commitment_ptr`: 32-byte id_commitment
  * `rate_limit`: the user's rate limit
+ * `subtree_id`: which bottom subtree the leaf will land in (= next_leaf_index / SUBTREE_LEAVES)
  * `out_data_ptr` and `out_data_len`: receive heap-allocated serialized data
  * Caller must free with `rln_ffi_free_string`.
  */
-enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *id_commitment_ptr,
+enum RlnFfiError rln_ffi_register_build_instruction(const uint8_t *tree_id_ptr,
+                                                    const uint8_t *id_commitment_ptr,
                                                     uint64_t rate_limit,
+                                                    uint32_t subtree_id,
                                                     uint8_t **out_data_ptr,
                                                     uintptr_t *out_data_len);
+
+/**
+ * Decode a fetched membership PDA's account data into its scalar fields.
+ *
+ * Used by callers (e.g. logos_rln_module) to check whether a given
+ * id_commitment already has an on-chain membership before submitting a
+ * Register tx (idempotency / restart recovery / retry-after-tx-loss).
+ *
+ * `account_data_ptr` / `account_data_len`: raw account.data bytes from the
+ * wallet. Must be at least 64 bytes (MembershipState borsh size).
+ * `out_leaf_index` / `out_rate_limit`: receive the corresponding fields.
+ * `out_id_commitment_ptr`: caller-allocated 32-byte buffer for id_commitment.
+ *
+ * Returns `DataTooShort` if the buffer is too small; `SerializationError`
+ * if borsh decode fails (account exists but isn't a valid MembershipState —
+ * caller should treat as "not a membership PDA").
+ */
+enum RlnFfiError rln_ffi_decode_membership(const uint8_t *account_data_ptr,
+                                           uintptr_t account_data_len,
+                                           uint64_t *out_leaf_index,
+                                           uint64_t *out_rate_limit,
+                                           uint8_t *out_id_commitment_ptr);
 
 #endif  /* LEZ_RLN_FFI_H */

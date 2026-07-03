@@ -75,7 +75,7 @@ pub use rln_layouts::{read_sparse_node, subtree_node_offset};
 pub async fn fetch_next_index(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
 ) -> u64 {
     let main_account_id = derive_main_account(&program.id(), tree_id);
 
@@ -91,7 +91,7 @@ pub async fn fetch_next_index(
 pub async fn fetch_root(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
 ) -> [u8; 32] {
     let main_account_id = derive_main_account(&program.id(), tree_id);
 
@@ -110,7 +110,7 @@ pub async fn fetch_root(
 pub async fn fetch_root_history(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
 ) -> Vec<[u8; 32]> {
     let main_account_id = derive_main_account(&program.id(), tree_id);
 
@@ -135,7 +135,7 @@ pub async fn fetch_root_history(
 pub async fn fetch_cached_defaults(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
 ) -> Vec<[u8; 32]> {
     let main_account_id = derive_main_account(&program.id(), tree_id);
 
@@ -165,7 +165,7 @@ pub async fn fetch_cached_defaults(
 pub async fn fetch_node_hash(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     level: u8,
     node_index: u64,
     cached_defaults: &[[u8; 32]],
@@ -211,7 +211,7 @@ pub async fn fetch_node_hash(
 pub async fn wait_for_leaf(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     leaf_index: u64,
     expected_leaf: &[u8; 32],
     max_attempts: u32,
@@ -262,7 +262,7 @@ pub struct MerkleProof {
 pub async fn get_merkle_proof(
     wallet_core: &WalletCore,
     program: &Program,
-    tree_id: &[u8; 24],
+    tree_id: &[u8; 32],
     leaf_index: u64,
 ) -> MerkleProof {
     let main_account_id = derive_main_account(&program.id(), tree_id);

@@ -7,8 +7,8 @@
 
 use logos_lez_rln::merkle_tree::wait_for_leaf;
 use logos_lez_rln::rln::client::{
-    RlnIdentity, TREE_ID, create_funded_user, create_identity, init_wallet, load_programs,
-    register_identity,
+    RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
+    register_identity, tree_id_from_env,
 };
 use logos_lez_rln::rln::derive_config_account;
 use std::time::Duration;
@@ -21,7 +21,7 @@ async fn main() {
     let count = parse_count();
 
     let mut wallet_core = init_wallet();
-    let tree_id = TREE_ID;
+    let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 

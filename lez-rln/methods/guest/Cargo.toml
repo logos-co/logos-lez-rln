@@ -2,6 +2,18 @@
 resolver = "3"
 members = ["."]
 
+# Do NOT add a custom [profile.release] for the guest until precompile-
+# patched crates (substrate-bn / sha2 / crypto-bigint, see
+# https://dev.risczero.com/api/zkvm/precompiles) are in place. With
+# only software field-mul via rust-poseidon-bn254-pure, the Initialize
+# instruction sits very close to the sequencer's 2^25-cycle session
+# limit, and *any* opt-level / lto / codegen-units / strip change has
+# been observed to push it over the limit (sequencer logs
+# "ProgramExecutionFailed: Session limit exceeded"). Default profile is
+# the only currently-working configuration; the resulting 648 KiB ELF
+# does not fit the public testnet's 511 KiB per-tx cap, but it works
+# locally and against any sequencer that raises that cap.
+
 [package]
 name = "logos_lez_rln_guest"
 version = "0.1.0"
@@ -11,19 +23,21 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
-token_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
-clock_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "98e98c62" }
+# rc5 lssa via local submodule (nssa_core->lee_core; package alias keeps guest source unchanged).
+nssa_core = { package = "lee_core", path = "../../../lssa/lee/state_machine/core" }
+token_core = { path = "../../../lssa/lez/programs/token/core" }
+clock_core = { path = "../../../lssa/lez/programs/clock/core" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
 rln-layouts = { path = "../../rln-layouts", default-features = false }
 rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
-
-[[bin]]
-name = "rln_registration"
-path = "src/bin/rln_registration.rs"
+spel-framework = { path = "../../../spel/spel-framework" }
 
 [[bin]]
 name = "incremental_merkle_tree"
 path = "src/bin/incremental_merkle_tree.rs"
+
+[[bin]]
+name = "rln_registration"
+path = "src/bin/rln_registration.rs"
