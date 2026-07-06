@@ -26,9 +26,15 @@ checkouts to place by hand.
 
 ```bash
 cd lez-rln
-cargo build
-cargo risczero build --manifest-path methods/guest/Cargo.toml
+cargo risczero build --manifest-path methods/guest/Cargo.toml   # reproducible deploy guest bins
+cargo build                                                     # host + strips the deploy bins under the per-tx cap
 ```
+
+Order matters: `cargo risczero build` produces the deploy artifacts under
+`methods/guest/target/.../docker/`, and the subsequent `cargo build` runs
+`methods/build.rs`, which strips them (and the local build) so the deploy tx
+fits the sequencer's per-tx size cap. Re-run `cargo build` after any
+`cargo risczero build`.
 
 ### Test
 

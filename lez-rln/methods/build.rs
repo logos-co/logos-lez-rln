@@ -24,18 +24,27 @@ fn main() {
     let strip = locate_llvm_strip()
         .expect("llvm-strip not found under ~/.risc0/toolchains/*/lib/rustlib/*/bin/");
 
-    let bin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("riscv-guest")
-        .join("logos_lez_rln_methods")
-        .join("logos_lez_rln_guest")
-        .join("riscv32im-risc0-zkvm-elf")
-        .join("release");
+    // Strip both guest build trees when present (idempotent — a stripped R0BF
+    // re-strips to the same bytes):
+    //   - the methods-crate local build (`cargo build`), and
+    //   - the reproducible docker build (`cargo risczero build`), which is the
+    //     DEPLOY artifact the host reads via `REGISTRATION_BINARY`. This one is
+    //     produced by a separate invocation, so a `cargo build` after
+    //     `cargo risczero build` is what strips it under the per-tx cap.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let bin_dirs = [
+        manifest
+            .join("target/riscv-guest/logos_lez_rln_methods/logos_lez_rln_guest")
+            .join("riscv32im-risc0-zkvm-elf/release"),
+        manifest.join("guest/target/riscv32im-risc0-zkvm-elf/docker"),
+    ];
 
-    for name in ["rln_registration.bin", "incremental_merkle_tree.bin"] {
-        let path = bin_dir.join(name);
-        if path.exists() {
-            strip_program_binary_user_elf(&path, &strip);
+    for bin_dir in &bin_dirs {
+        for name in ["rln_registration.bin", "incremental_merkle_tree.bin"] {
+            let path = bin_dir.join(name);
+            if path.exists() {
+                strip_program_binary_user_elf(&path, &strip);
+            }
         }
     }
 }
