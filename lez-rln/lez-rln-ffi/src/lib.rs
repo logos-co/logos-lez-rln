@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "C ABI boundary: extern \"C\" entry points and raw-pointer interop"
+)]
+
 use borsh::BorshDeserialize;
 use rln_layouts::{
     combine_seeds, label_seed,
@@ -731,7 +736,8 @@ pub unsafe extern "C" fn rln_ffi_token_holding_info(
             definition_id,
             balance,
         } => (definition_id, balance),
-        _ => return Error::InvalidConfig,
+        token_core::TokenHolding::NftMaster { .. }
+        | token_core::TokenHolding::NftPrintedCopy { .. } => return Error::InvalidConfig,
     };
     let s = balance.to_string();
     if s.len() > balance_cap {

@@ -65,14 +65,11 @@
           # --- Rust: lez-rln-ffi ---
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          # lez-rln's workspace root (logos-lez-rln) has path = ../lssa/... deps,
-          # so cargo's workspace metadata loader needs lssa in the build sandbox
-          # even when we're only compiling the lez-rln-ffi sub-crate. Include both
-          # lez-rln/ and lssa/ in ffiSrc, then sourceRoot into lez-rln/ at build.
-          # Flake's git-aware filter excludes submodule contents; pull lssa
-          # straight from the filesystem and assemble a build root where lez-rln
-          # and lssa sit as siblings (so lez-rln/Cargo.toml's `path = ../lssa/...`
-          # deps resolve in the sandbox).
+          # lez-rln consumes lssa/spel as git deps (see lez-rln/Cargo.toml), so the
+          # FFI crate builds straight from ./lez-rln — no sibling lssa assembly.
+          # crane vendors the git deps from Cargo.lock; each git source needs an
+          # entry in gitOutputHashes below. Keep in sync with the git sources in
+          # lez-rln/Cargo.lock (grep '^source = "git'); bump when the pins move.
           lezRlnTree = pkgs.lib.cleanSourceWith {
             src = ./lez-rln;
             filter = path: type:
@@ -81,29 +78,28 @@
               || pkgs.lib.hasSuffix ".h" path
               || pkgs.lib.hasSuffix ".lock" path;
           };
-          # lssa (upstream execution-zone) source pinned by rev. Same rev as the
-          # logos-execution-zone flake input above. Bump both together.
-          lssaRev = "e37876a64028a335eb693198a1ed6a0e875ec5b4";
-          lssaTree = pkgs.fetchFromGitHub {
-            owner = "logos-blockchain";
-            repo = "logos-execution-zone";
-            rev = lssaRev;
-            hash = "sha256-ltLcysXUdVUXAe25Tl8x7e7ZsTzj1sHlyS3glp97TAo=";
-            name = "lssa";
+          gitOutputHashes = {
+            "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4" = "sha256-ltLcysXUdVUXAe25Tl8x7e7ZsTzj1sHlyS3glp97TAo=";
+            "git+https://github.com/logos-blockchain/logos-blockchain.git?rev=d8711bbc3d43d3ef9755ef9b73af32fd0f703160#d8711bbc3d43d3ef9755ef9b73af32fd0f703160" = "sha256-iRrGJzsghtSYSoXoa3W+P4RznLzZQrUGDkj0w1sZBiQ=";
+            "git+https://github.com/logos-blockchain/logos-blockchain-circuits.git?tag=v0.5.3#127626881faa975aa8e9868422cf6bbb08fcb512" = "sha256-kzf4l4UywcxMqQwQcACBQl1QZYT9Nl6gbpb5FaphFqo=";
+            "git+https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark.git?rev=e91187f8ccb5bbfc7bb00dac88169112428da78f#e91187f8ccb5bbfc7bb00dac88169112428da78f" = "sha256-A1wVkHRw3/xpV30JUgWxvfW5PgcyrxQxk7b4So5vXNs=";
+            "git+https://github.com/logos-co/Overwatch?rev=448c192#448c192895b8311c742b1726a1bb12ee314ad95c" = "sha256-L7R1GdhRNNsymYe3RVyYLAmd6x1YY08TBJp4hG4/YwE=";
+            "git+https://github.com/EspressoSystems/jellyfish.git?rev=8d80230358e900f8d63765a937f63f4978ca1daa#8d80230358e900f8d63765a937f63f4978ca1daa" = "sha256-XeOEusSl7YkdE05emaDjH1SccutWZt/6ty5l/9ylxNM=";
+            "git+https://github.com/EspressoSystems/jellyfish?tag=jf-crhf-v0.2.0#f1538793f7f0e391495cb17bbb0c8703ec5f689d" = "sha256-fF5gqFm7xYLubl2QzNilcZl3O0NZMFckChrr7kVudok=";
+            "git+https://github.com/arkworks-rs/spongefish.git?rev=3ded547f7f56d7f8a1fc4c9a5c0ce965310bba5f#3ded547f7f56d7f8a1fc4c9a5c0ce965310bba5f" = "sha256-prLkGrIavkaiVYKqSy+cLwl2Y1TkTp8vGl0HCeQdILc=";
           };
-          ffiSrc = pkgs.runCommand "lez-rln-with-lssa" {} ''
-            mkdir -p $out
-            cp -r ${lezRlnTree} $out/lez-rln
-            cp -r ${lssaTree} $out/lssa
-          '';
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            src = lezRlnTree;
+            outputHashes = gitOutputHashes;
+          };
 
           lezRlnFfiPackage = craneLib.buildPackage {
-            src = ffiSrc;
+            src = lezRlnTree;
+            inherit cargoVendorDir;
             cargoToml = ./lez-rln/Cargo.toml;
             cargoLock = ./lez-rln/Cargo.lock;
             pname = "lez-rln-ffi";
             version = "0.1.0";
-            sourceRoot = "lez-rln-with-lssa/lez-rln";
             cargoExtraArgs = "-p lez-rln-ffi";
             nativeBuildInputs = [
               pkgs.pkg-config

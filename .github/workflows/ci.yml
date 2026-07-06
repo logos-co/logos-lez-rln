@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt-rs:
+    name: Rust Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install nightly toolchain for rustfmt
+        run: rustup install nightly --profile minimal --component rustfmt
+
+      - name: Check host workspace is formatted
+        run: cargo +nightly fmt --manifest-path lez-rln/Cargo.toml --all -- --check
+
+      - name: Check guest workspace is formatted
+        run: cargo +nightly fmt --manifest-path lez-rln/methods/guest/Cargo.toml --all -- --check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+          components: clippy
+
+      - name: Install nightly clippy (guest deps use #![feature])
+        run: rustup install nightly --profile minimal --component clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            lez-rln/target
+            lez-rln/methods/guest/target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Guard against non-actionable lint suppressions
+        run: |
+          if rg -n -P -U --multiline '#\[(allow|expect)\([\s\S]*?reason\s*=\s*"(TODO|FIXME|fix later|temporary|hack)' \
+              lez-rln -g '*.rs' -g '!*/target/*'; then
+            echo "Found non-actionable lint suppression reason"
+            exit 1
+          fi
+
+      # No `-- -D warnings`: the graduated [workspace.lints] levels are the gate
+      # (deny-level lints fail the build; style stays `warn` and is informational
+      # during the Phase A rollout). Promote to `-D warnings` once the style
+      # backlog + Phase B lints are cleared.
+      - name: Clippy (host workspace)
+        run: cargo clippy --manifest-path lez-rln/Cargo.toml --workspace --all-targets
+
+      # Guest deps (rust-poseidon-bn254-pure) use #![feature], so guest lint/test
+      # run on nightly — same reason the guest unit tests below use +nightly.
+      - name: Clippy (guest workspace)
+        run: cargo +nightly clippy --manifest-path lez-rln/methods/guest/Cargo.toml --all-targets
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+
+      - name: Install nightly (for guest unit tests)
+        run: rustup install nightly --profile minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            lez-rln/target
+            lez-rln/methods/guest/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Host unit tests (fast, no zkVM)
+        run: cargo test --manifest-path lez-rln/Cargo.toml --lib -- --skip state_tests
+        env:
+          RISC0_DEV_MODE: 1
+
+      - name: Guest unit tests
+        run: cargo +nightly test --manifest-path lez-rln/methods/guest/Cargo.toml
+        env:
+          RISC0_DEV_MODE: 1
+
+  guest-build-and-state-tests:
+    name: Guest Build + State Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/install-risc0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            lez-rln/target
+            lez-rln/methods/guest/target
+          key: ${{ runner.os }}-cargo-guest-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-guest-
+
+      - name: Build guest programs
+        run: cargo risczero build --manifest-path lez-rln/methods/guest/Cargo.toml
+
+      - name: Check guest binaries exist and are non-empty
+        run: |
+          set -eu
+          base="lez-rln/methods/guest/target/riscv32im-risc0-zkvm-elf/docker"
+          for b in rln_registration incremental_merkle_tree; do
+            test -s "${base}/${b}.bin"
+          done
+
+      - name: State tests (through the zkVM, dev mode)
+        run: cargo test --manifest-path lez-rln/Cargo.toml --lib state_tests --features rc5-state-tests
+        env:
+          RISC0_DEV_MODE: 1

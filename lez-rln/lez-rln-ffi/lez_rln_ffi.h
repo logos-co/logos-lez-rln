@@ -216,4 +216,54 @@ enum RlnFfiError rln_ffi_decode_membership(const uint8_t *account_data_ptr,
                                            uint64_t *out_rate_limit,
                                            uint8_t *out_id_commitment_ptr);
 
+/**
+ * Parse a Token-program holding account (borsh `TokenHolding`).
+ *
+ * Used by the mint-on-demand funding path: any fungible holding's data
+ * yields its token-definition account id and balance.
+ *
+ * `data_ptr`/`data_len`: raw token-holding account bytes.
+ * `out_definition_id`: caller-allocated 32-byte buffer.
+ * `out_balance_str`/`balance_cap`/`out_balance_len`: caller buffer receiving
+ * the balance as a decimal string (u128 needs up to 39 chars; pass >= 40 —
+ * a string keeps the full u128 range across the C ABI).
+ *
+ * Returns `InvalidConfig` for NFT holdings, `SerializationError` if the
+ * data is not a valid `TokenHolding`.
+ */
+enum RlnFfiError rln_ffi_token_holding_info(const uint8_t *data_ptr,
+                                            uintptr_t data_len,
+                                            uint8_t *out_definition_id,
+                                            uint8_t *out_balance_str,
+                                            uintptr_t balance_cap,
+                                            uintptr_t *out_balance_len);
+
+/**
+ * Plan a Token-program `Mint` transaction from the RLN config account.
+ *
+ * The RLN `ConfigState` already records the payment token's definition
+ * account (`payment_token_id` — the mint authority, whose signing key lives
+ * in the deployment wallet) and the Token program id, so the caller only
+ * needs the config account it already holds.
+ *
+ * `config_data_ptr`/`config_data_len`: raw config account bytes.
+ * `amount_str_ptr`/`amount_str_len`: mint amount as a decimal u128 string.
+ * `out_definition_id` / `out_token_program_id`: 32-byte buffers — the two
+ * tx accounts are `[definition (signer), destination holder]` per the Token
+ * program's `Mint` contract (holder may be a fresh, uninitialized account —
+ * the program zero-initializes the holding from the definition).
+ * `out_data_ptr`/`out_data_len`: heap-allocated instruction words
+ * (risc0-serde u32 words serialized LE — the deployed built-in Token
+ * program's wire format, same convention as
+ * `rln_ffi_register_build_instruction`). Free with `rln_ffi_free_string`.
+ */
+enum RlnFfiError rln_ffi_token_mint_plan(const uint8_t *config_data_ptr,
+                                         uintptr_t config_data_len,
+                                         const uint8_t *amount_str_ptr,
+                                         uintptr_t amount_str_len,
+                                         uint8_t *out_definition_id,
+                                         uint8_t *out_token_program_id,
+                                         uint8_t **out_data_ptr,
+                                         uintptr_t *out_data_len);
+
 #endif  /* LEZ_RLN_FFI_H */

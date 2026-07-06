@@ -15,6 +15,12 @@ rustup toolchain install nightly
 - [RISC Zero toolchain](https://dev.risczero.com/api/zkvm/install)
 - Docker (for guest program compilation)
 
+The Rust toolchain is pinned via `rust-toolchain.toml`. The LEZ framework
+(`lssa` / `logos-execution-zone`) and the SPEL macro framework (`spel`) are
+consumed as **git dependencies pinned by tag/rev** in `lez-rln/Cargo.toml` and
+`lez-rln/methods/guest/Cargo.toml` — a fresh clone builds with no sibling
+checkouts to place by hand.
+
 ## Usage
 ### Build
 
@@ -38,7 +44,7 @@ RISC0_DEV_MODE=1 cargo test --lib state_tests
 Terminal 1:
 
 ```bash
-./dev.sh
+./dev.sh   # fetches the pinned sequencer source into a cache on first run, then starts it
 ```
 
 Terminal 2:

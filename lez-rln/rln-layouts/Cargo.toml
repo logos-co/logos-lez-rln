@@ -12,3 +12,6 @@ bytemuck = { version = "1.24.0", features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 sha2 = { version = "0.10", default-features = false }
 borsh = { version = "1", default-features = false, features = ["derive"] }
+
+[lints]
+workspace = true
