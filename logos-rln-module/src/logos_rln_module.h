@@ -41,6 +41,10 @@ public:
                                          int rate_limit) override;
     Q_INVOKABLE QString is_member_registered(const QString& config_account_id,
                                               const QString& id_commitment_hex) override;
+    Q_INVOKABLE QString mint_tokens(const QString& config_account_id,
+                                    const QString& dest_account_id,
+                                    const QString& amount) override;
+    Q_INVOKABLE QString get_token_balance(const QString& account_id) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& data);

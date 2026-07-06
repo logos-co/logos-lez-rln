@@ -17,6 +17,12 @@ PDAs of `(registration_program_id, tree_id)`; `payment`/`supply` are **pointers 
 wallet**. Nothing to keep in sync by hand — and a stale `config` can't silently disagree
 with the tree. All scripts are bash+jq (no Python) so they run in-sim and in image builds.
 
+Profiles are **self-replenishing**: the wallet also carries the payment token's
+definition keypair (the mint authority), and the rln module exposes
+`mint_tokens(config, dest, amount)` / `get_token_balance(account)` — so a consumer can
+create a fresh account and mint what a run needs instead of draining the pre-funded
+`payment` account (which is now just a legacy pointer). Test tokens, no real value.
+
 ## Consumer contract
 
 ```bash

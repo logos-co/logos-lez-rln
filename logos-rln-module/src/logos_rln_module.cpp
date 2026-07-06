@@ -566,6 +566,135 @@ QString LogosRlnModule::is_member_registered(const QString& config_account_id,
     return QJsonDocument(result).toJson(QJsonDocument::Compact);
 }
 
+QString LogosRlnModule::mint_tokens(const QString& config_account_id,
+                                    const QString& dest_account_id,
+                                    const QString& amount) {
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, config_account_id, "mint_tokens", ctx)) {
+        return {};
+    }
+    auto* walletClient = ctx.walletClient;
+
+    const QString destHex = resolveAccountId(walletClient, dest_account_id);
+    if (destHex.isEmpty()) {
+        qWarning() << "mint_tokens: failed to resolve destination account";
+        return {};
+    }
+
+    // The config's payment_token_id is the mint authority (definition
+    // account); its signing key must be in the open wallet. Instruction words
+    // + both ids come from one FFI call so the Token-program ABI stays in Rust.
+    const QByteArray amountUtf8 = amount.trimmed().toUtf8();
+    uint8_t definitionId[32] = {};
+    uint8_t tokenProgramId[32] = {};
+    uint8_t* instrPtr = nullptr;
+    size_t instrLen = 0;
+    RlnFfiError err = rln_ffi_token_mint_plan(
+        reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+        static_cast<size_t>(ctx.configData.size()),
+        reinterpret_cast<const uint8_t*>(amountUtf8.constData()),
+        static_cast<size_t>(amountUtf8.size()),
+        definitionId, tokenProgramId,
+        &instrPtr, &instrLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "mint_tokens: mint_plan FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    if ((instrLen % 4) != 0) {
+        qWarning() << "mint_tokens: instruction not word-aligned" << instrLen;
+        rln_ffi_free_string(instrPtr, instrLen);
+        return {};
+    }
+    QVariantList instructionWords;
+    instructionWords.reserve(static_cast<int>(instrLen / 4));
+    for (size_t k = 0; k < instrLen / 4; ++k) {
+        const uint8_t* p = instrPtr + k * 4;
+        const uint32_t w = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+                         | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+        instructionWords.append(QVariant(static_cast<uint>(w)));
+    }
+    rln_ffi_free_string(instrPtr, instrLen);
+
+    const QString definitionHex = bytesToHex(definitionId, 32);
+
+    // Token-program Mint account order: definition (authority), then the
+    // destination holding — which may be a brand-new, uninitialized account
+    // (the program zero-initializes the holding from the definition). BOTH
+    // sign: a default destination is claimed with Claim::Authorized (token
+    // program mint.rs), so its signature is required for the claim to
+    // validate; the wallet silently skips signer flags for accounts whose
+    // key it doesn't hold, which keeps already-initialized external
+    // destinations working (no claim needed there).
+    QVariantList accountIds;
+    accountIds << definitionHex << destHex;
+    QVariantList signingReqs;
+    signingReqs << true << true;
+
+    const QVariant sendResult = walletClient->invokeRemoteMethod(
+        QStringLiteral("logos_execution_zone"),
+        QStringLiteral("send_generic_public_transaction"),
+        QVariant(accountIds), QVariant(signingReqs), QVariant(instructionWords),
+        QVariant(bytesToHex(tokenProgramId, 32)), Timeout(180000));
+    const QString sendResultStr = sendResult.toString();
+    if (sendResultStr.isEmpty()) {
+        qWarning() << "mint_tokens: transaction failed";
+        return {};
+    }
+
+    // Sequencer accept only — callers poll get_token_balance for the credit
+    // (same non-blocking contract as register_member).
+    QJsonObject result;
+    result["tx_result"] = sendResultStr;
+    result["definition"] = definitionHex;
+    result["pending"] = true;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
+QString LogosRlnModule::get_token_balance(const QString& account_id) {
+    if (!logosAPI) {
+        qWarning() << "get_token_balance: logosAPI not initialized";
+        return {};
+    }
+    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
+    if (!walletClient) {
+        qWarning() << "get_token_balance: wallet module not available";
+        return {};
+    }
+    const QString accountHex = resolveAccountId(walletClient, account_id);
+    if (accountHex.isEmpty()) {
+        qWarning() << "get_token_balance: failed to resolve account";
+        return {};
+    }
+
+    QJsonObject result;
+    QByteArray data;
+    // Quiet fetch: an absent/empty account is the normal pre-mint state.
+    if (!fetchAccountDataQuiet(walletClient, accountHex, data) || data.isEmpty()) {
+        result["exists"] = false;
+        result["balance"] = QStringLiteral("0");
+        return QJsonDocument(result).toJson(QJsonDocument::Compact);
+    }
+
+    uint8_t definitionId[32] = {};
+    char balanceBuf[48] = {};
+    size_t balanceLen = 0;
+    const RlnFfiError err = rln_ffi_token_holding_info(
+        reinterpret_cast<const uint8_t*>(data.constData()),
+        static_cast<size_t>(data.size()),
+        definitionId,
+        reinterpret_cast<uint8_t*>(balanceBuf), sizeof(balanceBuf), &balanceLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "get_token_balance: holding parse FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    result["exists"] = true;
+    result["balance"] = QString::fromLatin1(balanceBuf, static_cast<int>(balanceLen));
+    result["definition"] = bytesToHex(definitionId, 32);
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
 QString LogosRlnModule::get_merkle_proofs(const QString& config_account_id,
                                            const QString& leaf_indices_json) {
     // 1. Parse leaf indices from JSON array

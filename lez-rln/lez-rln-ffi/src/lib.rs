@@ -690,6 +690,146 @@ pub unsafe extern "C" fn rln_ffi_decode_membership(
     Error::Success
 }
 
+/// Parse a Token-program holding account (borsh `TokenHolding`).
+///
+/// Used by the mint-on-demand funding path: any fungible holding's data
+/// yields its token-definition account id and balance.
+///
+/// `data_ptr`/`data_len`: raw token-holding account bytes.
+/// `out_definition_id`: caller-allocated 32-byte buffer.
+/// `out_balance_str`/`balance_cap`/`out_balance_len`: caller buffer receiving
+/// the balance as a decimal string (u128 needs up to 39 chars; pass >= 40 —
+/// a string keeps the full u128 range across the C ABI).
+///
+/// Returns `InvalidConfig` for NFT holdings, `SerializationError` if the
+/// data is not a valid `TokenHolding`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_token_holding_info(
+    data_ptr: *const u8,
+    data_len: usize,
+    out_definition_id: *mut u8,
+    out_balance_str: *mut u8,
+    balance_cap: usize,
+    out_balance_len: *mut usize,
+) -> Error {
+    if data_ptr.is_null()
+        || out_definition_id.is_null()
+        || out_balance_str.is_null()
+        || out_balance_len.is_null()
+    {
+        return Error::NullPointer;
+    }
+    let mut bytes = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
+    // `deserialize` (not try_from_slice) tolerates trailing bytes in the
+    // account data.
+    let holding = match token_core::TokenHolding::deserialize(&mut bytes) {
+        Ok(h) => h,
+        Err(_) => return Error::SerializationError,
+    };
+    let (definition_id, balance) = match holding {
+        token_core::TokenHolding::Fungible {
+            definition_id,
+            balance,
+        } => (definition_id, balance),
+        _ => return Error::InvalidConfig,
+    };
+    let s = balance.to_string();
+    if s.len() > balance_cap {
+        return Error::DataTooShort;
+    }
+    unsafe {
+        core::slice::from_raw_parts_mut(out_definition_id, 32)
+            .copy_from_slice(definition_id.value());
+        core::slice::from_raw_parts_mut(out_balance_str, s.len()).copy_from_slice(s.as_bytes());
+        *out_balance_len = s.len();
+    }
+    Error::Success
+}
+
+/// Plan a Token-program `Mint` transaction from the RLN config account.
+///
+/// The RLN `ConfigState` already records the payment token's definition
+/// account (`payment_token_id` — the mint authority, whose signing key lives
+/// in the deployment wallet) and the Token program id, so the caller only
+/// needs the config account it already holds.
+///
+/// `config_data_ptr`/`config_data_len`: raw config account bytes.
+/// `amount_str_ptr`/`amount_str_len`: mint amount as a decimal u128 string.
+/// `out_definition_id` / `out_token_program_id`: 32-byte buffers — the two
+/// tx accounts are `[definition (signer), destination holder]` per the Token
+/// program's `Mint` contract (holder may be a fresh, uninitialized account —
+/// the program zero-initializes the holding from the definition).
+/// `out_data_ptr`/`out_data_len`: heap-allocated instruction words
+/// (risc0-serde u32 words serialized LE — the deployed built-in Token
+/// program's wire format, same convention as
+/// `rln_ffi_register_build_instruction`). Free with `rln_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_token_mint_plan(
+    config_data_ptr: *const u8,
+    config_data_len: usize,
+    amount_str_ptr: *const u8,
+    amount_str_len: usize,
+    out_definition_id: *mut u8,
+    out_token_program_id: *mut u8,
+    out_data_ptr: *mut *mut u8,
+    out_data_len: *mut usize,
+) -> Error {
+    if config_data_ptr.is_null()
+        || amount_str_ptr.is_null()
+        || out_definition_id.is_null()
+        || out_token_program_id.is_null()
+        || out_data_ptr.is_null()
+        || out_data_len.is_null()
+    {
+        return Error::NullPointer;
+    }
+    if config_data_len < CONFIG_STATE_SIZE {
+        return Error::InvalidConfig;
+    }
+
+    let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
+    let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
+        Ok(c) => c,
+        Err(_) => return Error::InvalidConfig,
+    };
+
+    let amount_bytes = unsafe { core::slice::from_raw_parts(amount_str_ptr, amount_str_len) };
+    let amount: u128 = match core::str::from_utf8(amount_bytes)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+    {
+        Some(a) => a,
+        None => return Error::SerializationError,
+    };
+
+    let instruction = token_core::Instruction::Mint {
+        amount_to_mint: amount,
+    };
+    let u32_vec = match risc0_zkvm::serde::to_vec(&instruction) {
+        Ok(v) => v,
+        Err(_) => return Error::SerializationError,
+    };
+    let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
+    for word in &u32_vec {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes.shrink_to_fit();
+    let ptr = bytes.as_mut_ptr();
+    let len = bytes.len();
+    core::mem::forget(bytes);
+
+    unsafe {
+        core::slice::from_raw_parts_mut(out_definition_id, 32)
+            .copy_from_slice(&config.payment_token_id);
+        core::slice::from_raw_parts_mut(out_token_program_id, 32)
+            .copy_from_slice(&config.token_program_id);
+        *out_data_ptr = ptr;
+        *out_data_len = len;
+    }
+
+    Error::Success
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

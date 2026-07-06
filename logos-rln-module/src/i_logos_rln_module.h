@@ -51,6 +51,29 @@ public:
     /// blocking the RPC thread.
     virtual QString is_member_registered(const QString& config_account_id,
                                           const QString& id_commitment_hex) = 0;
+
+    /// Mint `amount` payment tokens (decimal u128 string) into
+    /// `dest_account_id` via the Token program's Mint instruction. The mint
+    /// authority (the payment token's definition account, recorded in the RLN
+    /// config as payment_token_id) signs; its key must be in the open wallet
+    /// — true for the shared deployment wallets, whose committed test-token
+    /// keys make funding mint-on-demand instead of draining a fixed supply.
+    /// The destination may be a brand-new, never-credited account (the Token
+    /// program zero-initializes the holding and claims it Claim::Authorized —
+    /// so a fresh destination must be an account of the open wallet, whose
+    /// co-signature authorizes the claim). Returns fast (sequencer accept,
+    /// not confirmation); poll get_token_balance for the credited amount.
+    /// Returns JSON: {"tx_result": <wallet response>, "definition": hex,
+    ///                "pending": true} or empty on failure.
+    virtual QString mint_tokens(const QString& config_account_id,
+                                const QString& dest_account_id,
+                                const QString& amount) = 0;
+
+    /// Live sequencer read of a Token holding account's fungible balance.
+    /// Returns JSON: {"exists": true, "balance": "<decimal>", "definition": hex}
+    ///         or:   {"exists": false, "balance": "0"} for absent/empty
+    /// accounts, or empty on failure (wallet unavailable / not a holding).
+    virtual QString get_token_balance(const QString& account_id) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

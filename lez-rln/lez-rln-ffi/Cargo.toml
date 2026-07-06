@@ -8,6 +8,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 rln-layouts = { path = "../rln-layouts" }
+token_core = { path = "../../lssa/lez/programs/token/core" }
 rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
 sha2 = "0.10"
 borsh = { version = "1", default-features = false, features = ["derive"] }
