@@ -19,7 +19,8 @@ use wallet::program_facades::token::Token;
 
 use crate::merkle_tree::SUBTREE_LEAVES;
 use crate::rln::{
-    CONFIG_OFFSET_TREASURY_ACCOUNT_ID, derive_config_account, derive_subtree_account,
+    CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, derive_config_account,
+    derive_payment_supply_account, derive_payment_token_account, derive_subtree_account,
     derive_tree_main_account, Instruction,
 };
 
@@ -30,6 +31,77 @@ pub const PRICE_PER_UNIT: u128 = 10_000;
 /// depletion forces a fresh deploy.
 pub const TOKEN_SUPPLY: u128 = 100_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
+
+/// Default per-call faucet claim cap for faucet-funded deployments: 10 M
+/// tokens = 10 registrations at the demo rate. Per-call only (repeat claims
+/// are unbounded by design — test tokens).
+pub const DEFAULT_FAUCET_CLAIM_CAP: u128 = 10_000_000;
+
+/// How a deployment's payment token gets funded. The claim cap only exists
+/// in faucet mode; on-chain, wallet-key deployments carry cap 0 (faucet
+/// disabled) — derived at the `Initialize` build site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FundingPolicy {
+    /// Payment token definition is a registration-program PDA; anyone claims
+    /// up to `claim_cap` per `ClaimTokens` call — no human mint authority
+    /// exists (default).
+    Faucet { claim_cap: u128 },
+    /// Legacy model: wallet-keypair definition, fixed pre-minted supply,
+    /// funding via transfers (and the definition key can mint).
+    WalletKey,
+}
+
+/// Deployment-time policy knobs (resolved once from env by `policy_from_env`).
+pub struct DeployPolicy {
+    pub funding: FundingPolicy,
+    /// `None` = no free-quota registrar (zeros on the wire).
+    pub authorized_registrar: Option<[u8; 32]>,
+    pub free_quota: u64,
+}
+
+/// Env knobs: `LEZ_RLN_FUNDING` = `faucet` (default) | `wallet-key`,
+/// `LEZ_RLN_FAUCET_CLAIM_CAP`, `LEZ_RLN_REGISTRAR` (64-hex account id),
+/// `LEZ_RLN_FREE_QUOTA`.
+pub fn policy_from_env() -> DeployPolicy {
+    let funding = match std::env::var("LEZ_RLN_FUNDING").as_deref() {
+        Err(_) | Ok("faucet") => {
+            let claim_cap = match std::env::var("LEZ_RLN_FAUCET_CLAIM_CAP") {
+                Err(_) => DEFAULT_FAUCET_CLAIM_CAP,
+                Ok(s) => s.trim().parse().unwrap_or_else(|e| {
+                    eprintln!("LEZ_RLN_FAUCET_CLAIM_CAP is not a valid u128: {e}");
+                    std::process::exit(2);
+                }),
+            };
+            FundingPolicy::Faucet { claim_cap }
+        }
+        Ok("wallet-key") => FundingPolicy::WalletKey,
+        Ok(other) => {
+            eprintln!("LEZ_RLN_FUNDING must be 'faucet' or 'wallet-key', got '{other}'");
+            std::process::exit(2);
+        }
+    };
+    let authorized_registrar = match std::env::var("LEZ_RLN_REGISTRAR") {
+        Err(_) => None,
+        Ok(s) => {
+            let bytes = hex::decode(s.trim()).unwrap_or_else(|e| {
+                eprintln!("LEZ_RLN_REGISTRAR is not valid hex: {e}");
+                std::process::exit(2);
+            });
+            Some(bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+                eprintln!("LEZ_RLN_REGISTRAR must decode to 32 bytes, got {}", v.len());
+                std::process::exit(2);
+            }))
+        }
+    };
+    let free_quota = match std::env::var("LEZ_RLN_FREE_QUOTA") {
+        Err(_) => 0,
+        Ok(s) => s.trim().parse().unwrap_or_else(|e| {
+            eprintln!("LEZ_RLN_FREE_QUOTA is not a valid u64: {e}");
+            std::process::exit(2);
+        }),
+    };
+    DeployPolicy { funding, authorized_registrar, free_quota }
+}
 
 /// 30 days, in seconds.
 pub const DEFAULT_ACTIVE_DURATION_SECS: u32 = 30 * 24 * 60 * 60;
@@ -372,6 +444,30 @@ pub async fn deploy_builtin_program(
     send_deploy_tx(wallet_core, program, program_name, program.elf().to_vec()).await;
 }
 
+/// Build, submit, and await one registration-program init transaction.
+/// All init txs share this shape: PDA-only accounts, empty nonces, no
+/// signing keys. Blocks until `wait_on` has on-chain data.
+async fn send_init_tx(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    accounts: Vec<AccountId>,
+    instruction: Instruction,
+    label: &str,
+    wait_on: &AccountId,
+) {
+    let msg = Message::try_new(registration_program.id(), accounts, vec![], instruction)
+        .unwrap_or_else(|e| panic!("Failed to create {label} message: {e:?}"));
+    let witness = WitnessSet::for_message(&msg, &[]);
+    let tx = PublicTransaction::new(msg, witness);
+    let hash = wallet_core
+        .sequencer_client
+        .send_transaction(NSSATransaction::Public(tx))
+        .await
+        .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"));
+    println!("  {label} tx hash: {hash}");
+    wait_for_account_data(wallet_core, wait_on, wait_account_attempts()).await;
+}
+
 /// Run full setup: deploy programs, create token, initialize registration.
 /// Returns the user payment holding account ID.
 pub async fn run_setup(
@@ -380,6 +476,7 @@ pub async fn run_setup(
     merkle_program: &Program,
     tree_id: &[u8; 32],
     user_funding: u128,
+    policy: &DeployPolicy,
 ) -> AccountId {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_id = derive_tree_main_account(&registration_program.id(), tree_id);
@@ -415,140 +512,225 @@ pub async fn run_setup(
     wait_for_block_seal().await;
 
     println!("Setup Step 2: Creating accounts...");
-    let (token_definition_id, _) = wallet_core.create_new_account_public(None);
-    let (supply_holding_id, _) = wallet_core.create_new_account_public(None);
     let (treasury_id, _) = wallet_core.create_new_account_public(None);
-    wallet_core
-        .store_persistent_data()
-        .expect("Failed to store wallet");
 
-    println!("Setup Step 3: Deploying payment token...");
-    Token(wallet_core)
-        .send_new_definition(
-            wallet::AccountIdentity::Public(token_definition_id.clone()),
-            wallet::AccountIdentity::Public(supply_holding_id.clone()),
-            "RLNTOK".to_string(),
-            TOKEN_SUPPLY,
-        )
-        .await
-        .expect("Failed to deploy token");
-    wait_for_account_data(wallet_core, &supply_holding_id, wait_account_attempts()).await;
-    println!("  Token deployed: {}", token_definition_id);
+    // Funding-mode split: wallet-key mints a fixed supply into a
+    // wallet-owned definition (the legacy model); faucet defers token
+    // creation to the program's own `payment` PDA (Step 5b) so no human
+    // ever holds the mint key.
+    let payment_token_id: [u8; 32] = match policy.funding {
+        FundingPolicy::WalletKey => {
+            let (token_definition_id, _) = wallet_core.create_new_account_public(None);
+            let (supply_holding_id, _) = wallet_core.create_new_account_public(None);
+            wallet_core
+                .store_persistent_data()
+                .expect("Failed to store wallet");
 
-    println!("Setup Step 4: Initializing treasury...");
-    Token(wallet_core)
-        .send_transfer_transaction(
-            wallet::AccountIdentity::Public(supply_holding_id.clone()),
-            wallet::AccountIdentity::Public(treasury_id.clone()),
-            1,
-        )
-        .await
-        .expect("Failed to initialize treasury");
-    wait_for_account_data(wallet_core, &treasury_id, wait_account_attempts()).await;
+            println!("Setup Step 3: Deploying payment token (wallet-key funding)...");
+            Token(wallet_core)
+                .send_new_definition(
+                    wallet::AccountIdentity::Public(token_definition_id.clone()),
+                    wallet::AccountIdentity::Public(supply_holding_id.clone()),
+                    "RLNTOK".to_string(),
+                    TOKEN_SUPPLY,
+                )
+                .await
+                .expect("Failed to deploy token");
+            wait_for_account_data(wallet_core, &supply_holding_id, wait_account_attempts()).await;
+            println!("  Token deployed: {}", token_definition_id);
+
+            println!("Setup Step 4: Initializing treasury...");
+            Token(wallet_core)
+                .send_transfer_transaction(
+                    wallet::AccountIdentity::Public(supply_holding_id.clone()),
+                    wallet::AccountIdentity::Public(treasury_id.clone()),
+                    1,
+                )
+                .await
+                .expect("Failed to initialize treasury");
+            wait_for_account_data(wallet_core, &treasury_id, wait_account_attempts()).await;
+
+            // Saved before Step 7: `create_funded_user`'s wallet-key path
+            // funds the user from this sidecar file (`load_supply_holding`).
+            save_supply_holding(tree_id, &supply_holding_id);
+            *token_definition_id.value()
+        }
+        FundingPolicy::Faucet { .. } => {
+            wallet_core
+                .store_persistent_data()
+                .expect("Failed to store wallet");
+            let payment_def =
+                derive_payment_token_account(&registration_program.id(), tree_id);
+            println!("Setup Step 3-4: Faucet funding — payment token will be the program PDA {payment_def} (created in Step 5b; treasury seeded by claim)");
+            *payment_def.value()
+        }
+    };
 
     println!("Setup Step 5: Initializing registration program...");
     // Split across 3 txs: a fused Initialize+token+merkle blows the 32M
     // per-session cycle cap when all chained calls execute inline.
-    let init_config_msg = Message::try_new(
-        registration_program.id(),
+    send_init_tx(
+        wallet_core,
+        registration_program,
         vec![config_id.clone(), credit_token_id.clone()],
-        vec![],
         Instruction::Initialize {
             merkle_program_id: bytemuck::cast(merkle_program.id()),
             tree_id: *tree_id,
-            payment_token_id: *token_definition_id.value(),
+            payment_token_id,
             price_per_unit: PRICE_PER_UNIT,
             treasury_account_id: *treasury_id.value(),
             token_program_id: bytemuck::cast(programs::token().id()),
             max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
             active_duration_for_new_memberships: DEFAULT_ACTIVE_DURATION_SECS,
             grace_period_duration_for_new_memberships: DEFAULT_GRACE_PERIOD_DURATION_SECS,
+            authorized_registrar: policy.authorized_registrar.unwrap_or([0u8; 32]),
+            free_quota: policy.free_quota,
+            faucet_claim_cap: match policy.funding {
+                FundingPolicy::Faucet { claim_cap } => claim_cap,
+                FundingPolicy::WalletKey => 0,
+            },
         },
+        "InitializeConfig",
+        &config_id,
     )
-    .expect("Failed to create InitializeConfig message");
-    let init_config_witness = WitnessSet::for_message(&init_config_msg, &[]);
-    let init_config_tx = PublicTransaction::new(init_config_msg, init_config_witness);
-    let init_config_hash = wallet_core
-        .sequencer_client
-        .send_transaction(NSSATransaction::Public(init_config_tx))
-        .await
-        .expect("Failed to send InitializeConfig");
-    println!("  InitializeConfig tx hash: {init_config_hash}");
-    wait_for_account_data(wallet_core, &config_id, wait_account_attempts()).await;
+    .await;
 
-    let init_credit_token_msg = Message::try_new(
-        registration_program.id(),
+    send_init_tx(
+        wallet_core,
+        registration_program,
         vec![credit_token_id.clone(), credit_supply_id.clone()],
-        vec![],
         Instruction::InitializeCreditToken {
             token_program_id: bytemuck::cast(programs::token().id()),
             tree_id: *tree_id,
         },
+        "InitializeCreditToken",
+        &credit_supply_id,
     )
-    .expect("Failed to create InitializeCreditToken message");
-    let init_credit_token_witness = WitnessSet::for_message(&init_credit_token_msg, &[]);
-    let init_credit_token_tx =
-        PublicTransaction::new(init_credit_token_msg, init_credit_token_witness);
-    let init_credit_token_hash = wallet_core
-        .sequencer_client
-        .send_transaction(NSSATransaction::Public(init_credit_token_tx))
-        .await
-        .expect("Failed to send InitializeCreditToken");
-    println!("  InitializeCreditToken tx hash: {init_credit_token_hash}");
-    wait_for_account_data(wallet_core, &credit_supply_id, wait_account_attempts()).await;
+    .await;
 
-    let init_merkle_msg = Message::try_new(
-        registration_program.id(),
+    send_init_tx(
+        wallet_core,
+        registration_program,
         vec![tree_main_id.clone()],
-        vec![],
         Instruction::InitializeMerkleTree {
             merkle_program_id: bytemuck::cast(merkle_program.id()),
             tree_id: *tree_id,
         },
+        "InitializeMerkleTree",
+        &tree_main_id,
     )
-    .expect("Failed to create InitializeMerkleTree message");
-    let init_merkle_witness = WitnessSet::for_message(&init_merkle_msg, &[]);
-    let init_merkle_tx = PublicTransaction::new(init_merkle_msg, init_merkle_witness);
-    let init_merkle_hash = wallet_core
-        .sequencer_client
-        .send_transaction(NSSATransaction::Public(init_merkle_tx))
-        .await
-        .expect("Failed to send InitializeMerkleTree");
-    println!("  InitializeMerkleTree tx hash: {init_merkle_hash}");
-    wait_for_account_data(wallet_core, &tree_main_id, wait_account_attempts()).await;
+    .await;
     println!("  Registration initialized");
 
-    save_supply_holding(tree_id, &supply_holding_id);
+    if matches!(policy.funding, FundingPolicy::Faucet { .. }) {
+        // 4th init tx (32M-cycle split discipline): create RLNTOK as the
+        // program's own PDA definition — mirror of InitializeCreditToken.
+        println!("Setup Step 5b: Creating payment token (program-owned PDA)...");
+        let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
+        let payment_supply_id =
+            derive_payment_supply_account(&registration_program.id(), tree_id);
+        send_init_tx(
+            wallet_core,
+            registration_program,
+            vec![payment_def_id.clone(), payment_supply_id.clone()],
+            Instruction::InitializePaymentToken {
+                token_program_id: bytemuck::cast(programs::token().id()),
+                tree_id: *tree_id,
+            },
+            "InitializePaymentToken",
+            &payment_def_id,
+        )
+        .await;
+
+        // Treasury must be an initialized holding of the payment token so
+        // the paid register path's chained Transfer can credit it.
+        println!("Setup Step 5c: Seeding treasury via faucet claim...");
+        claim_payment_tokens(wallet_core, registration_program, tree_id, &treasury_id, 1).await;
+        wait_for_account_data(wallet_core, &treasury_id, wait_account_attempts()).await;
+
+        // The faucet token's supply holder is the (empty) program PDA; saved
+        // so downstream tooling records a supply pointer for this tree.
+        save_supply_holding(tree_id, &payment_supply_id);
+    }
     println!("Setup Step 6: Saved supply holding for future runs");
 
+    // Single funding path: the config just initialized above is what
+    // `create_funded_user` reads its mode from (on-chain faucet_claim_cap ==
+    // the policy's claim cap here), and both arms saved the supply pointer
+    // its wallet-key fallback loads.
     println!("Setup Step 7: Creating and funding user account...");
-    let (user_payment_holding_id, _) = wallet_core.create_new_account_public(None);
-    wallet_core
-        .store_persistent_data()
-        .expect("Failed to store wallet");
-
-    Token(wallet_core)
-        .send_transfer_transaction(
-            wallet::AccountIdentity::Public(supply_holding_id),
-            wallet::AccountIdentity::Public(user_payment_holding_id.clone()),
-            user_funding,
-        )
-        .await
-        .expect("Failed to fund user");
-    wait_for_account_data(wallet_core, &user_payment_holding_id, wait_account_attempts()).await;
-    println!("  User payment holding: {}", user_payment_holding_id);
-    println!("  User funded with {} tokens", user_funding);
+    let user_payment_holding_id =
+        create_funded_user(wallet_core, registration_program, tree_id, user_funding).await;
 
     println!("Setup complete!\n");
     user_payment_holding_id
 }
 
-/// Create a new user account and fund it from the saved supply holding.
+/// Submit a faucet `ClaimTokens` minting `amount` payment tokens into `dest`.
+/// `dest` signs (its key must be in the wallet — fresh holdings are claimed
+/// `Claim::Authorized` by the token program). Faucet deployments only: the
+/// guest rejects claims when `faucet_claim_cap` is 0 or `amount` exceeds it.
+pub async fn claim_payment_tokens(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 32],
+    dest: &AccountId,
+    amount: u128,
+) {
+    let config_id = derive_config_account(&registration_program.id(), tree_id);
+    let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
+    let instruction_data =
+        Program::serialize_instruction(Instruction::ClaimTokens { tree_id: *tree_id, amount })
+            .expect("serialize ClaimTokens");
+    let hash = wallet_core
+        .send_pub_tx(
+            vec![
+                wallet::AccountIdentity::PublicNoSign(config_id),
+                wallet::AccountIdentity::PublicNoSign(payment_def_id),
+                wallet::AccountIdentity::Public(dest.clone()),
+            ],
+            instruction_data,
+            registration_program.id(),
+        )
+        .await
+        .expect("Failed to send ClaimTokens");
+    println!("  ClaimTokens tx hash: {hash}");
+}
+
+/// Create a new user account and fund it, mode-aware: on faucet deployments
+/// (config `faucet_claim_cap > 0`) the funding is claimed from the faucet
+/// (clamped to the cap); otherwise it is transferred from the saved supply
+/// holding (wallet-key deployments).
 pub async fn create_funded_user(
     wallet_core: &mut WalletCore,
+    registration_program: &Program,
     tree_id: &[u8; 32],
     user_funding: u128,
 ) -> AccountId {
+    let (user_payment_holding_id, _) = wallet_core.create_new_account_public(None);
+    wallet_core
+        .store_persistent_data()
+        .expect("Failed to store wallet");
+
+    let faucet_cap = fetch_faucet_claim_cap(wallet_core, registration_program, tree_id).await;
+    if faucet_cap > 0 {
+        let amount = user_funding.min(faucet_cap);
+        println!("  Claiming {} tokens from the faucet...", amount);
+        claim_payment_tokens(
+            wallet_core,
+            registration_program,
+            tree_id,
+            &user_payment_holding_id,
+            amount,
+        )
+        .await;
+        wait_for_account_data(wallet_core, &user_payment_holding_id, wait_account_attempts())
+            .await;
+        println!("  User payment holding: {}", user_payment_holding_id);
+        println!("  User funded with {} tokens\n", amount);
+        return user_payment_holding_id;
+    }
+
     let supply_holding_id = load_supply_holding(tree_id).unwrap_or_else(|| {
         eprintln!("Error: No saved supply holding found for this tree_id.");
         eprintln!("Run setup first or check that the supply holding file exists.");
@@ -556,11 +738,6 @@ pub async fn create_funded_user(
     });
 
     println!("  Using saved supply holding: {}", supply_holding_id);
-
-    let (user_payment_holding_id, _) = wallet_core.create_new_account_public(None);
-    wallet_core
-        .store_persistent_data()
-        .expect("Failed to store wallet");
 
     println!("  Funding new user account...");
     Token(wallet_core)
@@ -577,6 +754,33 @@ pub async fn create_funded_user(
     println!("  User funded with {} tokens\n", user_funding);
 
     user_payment_holding_id
+}
+
+/// Read the deployment's `faucet_claim_cap` from the on-chain config
+/// (offset-based; 0 for wallet-key deployments and for pre-policy configs
+/// whose ConfigState predates the field).
+async fn fetch_faucet_claim_cap(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 32],
+) -> u128 {
+    let config_id = derive_config_account(&registration_program.id(), tree_id);
+    // The sequencer returns absent accounts as Ok with empty data, so Err
+    // here is a transport failure — defaulting to 0 would misroute a faucet
+    // deployment onto the wallet-key supply-transfer path.
+    let account = wallet_core
+        .get_account_public(config_id)
+        .await
+        .expect("Failed to fetch config account (sequencer unreachable?)");
+    let data = account.data.as_ref();
+    if data.len() < CONFIG_OFFSET_FAUCET_CLAIM_CAP + 16 {
+        return 0;
+    }
+    u128::from_le_bytes(
+        data[CONFIG_OFFSET_FAUCET_CLAIM_CAP..CONFIG_OFFSET_FAUCET_CLAIM_CAP + 16]
+            .try_into()
+            .expect("16-byte slice"),
+    )
 }
 
 /// Register an identity via the registration program.

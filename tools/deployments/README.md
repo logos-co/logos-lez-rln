@@ -17,11 +17,26 @@ PDAs of `(registration_program_id, tree_id)`; `payment`/`supply` are **pointers 
 wallet**. Nothing to keep in sync by hand — and a stale `config` can't silently disagree
 with the tree. All scripts are bash+jq (no Python) so they run in-sim and in image builds.
 
-Profiles are **self-replenishing**: the wallet also carries the payment token's
-definition keypair (the mint authority), and the rln module exposes
-`mint_tokens(config, dest, amount)` / `get_token_balance(account)` — so a consumer can
-create a fresh account and mint what a run needs instead of draining the pre-funded
-`payment` account (which is now just a legacy pointer). Test tokens, no real value.
+## Deployment policy (immutable per tree — a policy change = a new tree)
+
+Policy is set at `Initialize` and recorded in `deployment.json`:
+
+- **`"funding": "faucet"`** (default for new deployments) — the payment token's
+  definition is the registration program's own `payment` PDA: **no human mint
+  key exists**. Anyone funds an account with the rln module's
+  `claim_tokens(config, dest, amount)` (or host-side `claim_payment_tokens`),
+  capped per call by the deployment's `--claim-cap` (default 10M). The cap is
+  per-call only — repeat claims are unbounded by design (test tokens).
+- **`"funding": "wallet-key"`** (and every pre-policy descriptor) — the legacy
+  model: fixed pre-minted supply, definition keypair in the wallet, funding via
+  transfers or the rln module's `mint_tokens(config, dest, amount)`. These
+  profiles stay self-replenishing because the wallet carries the mint key.
+- **`"membership": {"mode": "free-quota", "registrar": <hex>, "quota": N}`**
+  (optional, additive) — the registrar account may create up to N memberships
+  without paying via the `RegisterFree` instruction; the normal paid path keeps
+  working alongside.
+
+`get_token_balance(account)` works in both funding modes.
 
 ## Consumer contract
 
@@ -30,10 +45,11 @@ bash tools/deployments/stage.sh <deployment_dir> <out_dir>
 ```
 
 Emits the flat files `run_setup`/`register_member`/node daemons already expect
-(`storage.json.seed`, `wallet_config.json`, `{config,payment,supply}_account.txt` /
-`supply_holding.txt`, `env.sh`). Asserts the wallet is rc6 (`key_chain.accounts`) and
-that it actually contains the descriptor's payment/supply accounts — a mismatched wallet
-fails at stage time, not at runtime.
+(`storage.json.seed`, `wallet_config.json`, `config_account.txt`,
+`payment_account.txt`, `supply_holding.txt`, `funding.txt`, `env.sh`). Asserts the wallet is rc6
+(`key_chain.accounts`) and that it actually contains the descriptor's payment account
+(+ the supply account on wallet-key deployments; a faucet deployment's supply holder is
+a program PDA no wallet holds) — a mismatched wallet fails at stage time, not at runtime.
 
 ## Workflows
 
@@ -43,8 +59,12 @@ fails at stage time, not at runtime.
 ```bash
 (cd lez-rln && PYO3_PYTHON=$(command -v python3) cargo build --release --bin run_setup --bin derive_accounts)
 
-# fresh tree + fresh wallet:
+# fresh tree + fresh wallet (faucet funding by default):
 bash tools/deployments/provision.sh --name my-run
+
+# legacy wallet-key funding, or a free-membership quota for one account:
+bash tools/deployments/provision.sh --name legacy --funding wallet-key
+bash tools/deployments/provision.sh --name gifted --registrar <64hex> --quota 100
 
 # reuse another sim's wallet (shared accounts), specific tree, write into a consumer repo:
 bash tools/deployments/provision.sh --name shared --tree <64hex> \

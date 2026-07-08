@@ -26,6 +26,9 @@ pub struct ConfigState {
     pub active_duration_for_new_memberships: u32,
     pub grace_period_duration_for_new_memberships: u32,
     pub token_program_id: [u8; 32],
+    pub authorized_registrar: [u8; 32],
+    pub free_quota_remaining: u64,
+    pub faucet_claim_cap: u128,
 }
 
 impl ConfigState {
@@ -89,6 +92,9 @@ mod layout_equivalence {
             active_duration_for_new_memberships: 10,
             grace_period_duration_for_new_memberships: 11,
             token_program_id: [12u8; 32],
+            authorized_registrar: [13u8; 32],
+            free_quota_remaining: 14,
+            faucet_claim_cap: 15,
         };
         let shared = SharedConfigState {
             merkle_program_id: [1u8; 32],
@@ -103,6 +109,9 @@ mod layout_equivalence {
             active_duration_for_new_memberships: 10,
             grace_period_duration_for_new_memberships: 11,
             token_program_id: [12u8; 32],
+            authorized_registrar: [13u8; 32],
+            free_quota_remaining: 14,
+            faucet_claim_cap: 15,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -157,6 +166,9 @@ pub mod rln_registration {
         max_total_rate_limit: u64,
         active_duration_for_new_memberships: u32,
         grace_period_duration_for_new_memberships: u32,
+        authorized_registrar: [u8; 32],
+        free_quota: u64,
+        faucet_claim_cap: u128,
     ) -> SpelResult {
         Ok(handlers::initialize(
             config,
@@ -170,6 +182,9 @@ pub mod rln_registration {
             max_total_rate_limit,
             active_duration_for_new_memberships,
             grace_period_duration_for_new_memberships,
+            authorized_registrar,
+            free_quota,
+            faucet_claim_cap,
         ))
     }
 
@@ -336,6 +351,75 @@ pub mod rln_registration {
     ) -> SpelResult {
         let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
         Ok(handlers::extend(config, membership, clock_account, tree_id))
+    }
+
+    #[instruction]
+    pub fn initialize_payment_token(
+        #[account(pda = [literal("payment"), arg("tree_id")])]
+        payment_token: AccountWithMetadata,
+        #[account(pda = [literal("payment_supply"), arg("tree_id")])]
+        payment_supply: AccountWithMetadata,
+        token_program_id: [u8; 32],
+        tree_id: [u8; 32],
+    ) -> SpelResult {
+        Ok(handlers::initialize_payment_token(
+            payment_token,
+            payment_supply,
+            token_program_id,
+            tree_id,
+        ))
+    }
+
+    #[instruction]
+    pub fn claim_tokens(
+        #[account(pda = [literal("config"), arg("tree_id")])]
+        config: AccountWithMetadata,
+        #[account(pda = [literal("payment"), arg("tree_id")])]
+        payment_token_def: AccountWithMetadata,
+        #[account(signer)]
+        dest_holding: AccountWithMetadata,
+        tree_id: [u8; 32],
+        amount: u128,
+    ) -> SpelResult {
+        Ok(handlers::claim_tokens(
+            config,
+            payment_token_def,
+            dest_holding,
+            tree_id,
+            amount,
+        ))
+    }
+
+    #[instruction]
+    pub fn register_free(
+        #[account(pda = [literal("config"), arg("tree_id")])]
+        config: AccountWithMetadata,
+        #[account(pda = [literal("main"), arg("tree_id")])]
+        tree_main: AccountWithMetadata,
+        #[account(signer)]
+        registrar: AccountWithMetadata,
+        #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
+        bottom_subtree: AccountWithMetadata,
+        clock_account: AccountWithMetadata,
+        #[account(init, pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
+        membership: AccountWithMetadata,
+        tree_id: [u8; 32],
+        id_commitment: [u8; 32],
+        rate_limit: u64,
+        subtree_id: u32,
+    ) -> SpelResult {
+        Ok(handlers::register_free(
+            config,
+            tree_main,
+            registrar,
+            bottom_subtree,
+            clock_account,
+            membership,
+            tree_id,
+            id_commitment,
+            rate_limit,
+            subtree_id,
+        ))
     }
 
     #[instruction]

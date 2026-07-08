@@ -34,6 +34,16 @@ pub fn derive_credit_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) 
     derive_pda(program_id, &[&label_seed("supply"), tree_id])
 }
 
+/// Payment token definition (faucet deployments): `seeds = [literal("payment"), arg("tree_id")]`.
+pub fn derive_payment_token_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("payment"), tree_id])
+}
+
+/// Payment token supply holder (faucet deployments): `seeds = [literal("payment_supply"), arg("tree_id")]`.
+pub fn derive_payment_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("payment_supply"), tree_id])
+}
+
 /// Membership account: `seeds = [literal("membership"), arg("tree_id"), arg("id_commitment")]`.
 pub fn derive_membership_account(
     program_id: &ProgramId,
@@ -93,16 +103,17 @@ mod tests {
         let main = derive_tree_main_account(&p, &t);
         let credit = derive_credit_token_account(&p, &t);
         let supply = derive_credit_supply_account(&p, &t);
+        let payment = derive_payment_token_account(&p, &t);
+        let payment_supply = derive_payment_supply_account(&p, &t);
         let subtree = derive_subtree_account(&p, &t, 0);
         let mem = derive_membership_account(&p, &t, &[3u8; 32]);
-        for (a, b) in [
-            (&config, &main), (&config, &credit), (&config, &supply),
-            (&config, &subtree), (&config, &mem), (&main, &credit),
-            (&main, &supply), (&main, &subtree), (&main, &mem),
-            (&credit, &supply), (&credit, &subtree), (&credit, &mem),
-            (&supply, &subtree), (&supply, &mem), (&subtree, &mem),
-        ] {
-            assert_ne!(a, b, "PDA types must be distinct");
+        let all = [
+            &config, &main, &credit, &supply, &payment, &payment_supply, &subtree, &mem,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "PDA types must be distinct");
+            }
         }
     }
 

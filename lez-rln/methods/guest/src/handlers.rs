@@ -41,6 +41,14 @@ fn supply_seed(tree_id: &[u8; 32]) -> [u8; 32] {
     combine_seeds(&[&label_seed("supply"), tree_id])
 }
 
+fn payment_seed(tree_id: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("payment"), tree_id])
+}
+
+fn payment_supply_seed(tree_id: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("payment_supply"), tree_id])
+}
+
 fn main_seed(tree_id: &[u8; 32]) -> [u8; 32] {
     combine_seeds(&[&label_seed("main"), tree_id])
 }
@@ -133,11 +141,18 @@ pub fn initialize(
     max_total_rate_limit: u64,
     active_duration_for_new_memberships: u32,
     grace_period_duration_for_new_memberships: u32,
+    authorized_registrar: [u8; 32],
+    free_quota: u64,
+    faucet_claim_cap: u128,
 ) -> Output {
     assert!(max_total_rate_limit > 0, "Max total rate limit must be positive");
     assert!(
         active_duration_for_new_memberships > 0,
         "Active duration must be positive"
+    );
+    assert!(
+        free_quota == 0 || authorized_registrar != [0u8; 32],
+        "Free quota requires an authorized registrar"
     );
 
     let config_state = ConfigState {
@@ -153,6 +168,9 @@ pub fn initialize(
         active_duration_for_new_memberships,
         grace_period_duration_for_new_memberships,
         token_program_id,
+        authorized_registrar,
+        free_quota_remaining: free_quota,
+        faucet_claim_cap,
     };
     write_borsh(&mut config, &config_state, "ConfigState");
 
@@ -187,6 +205,78 @@ pub fn initialize_credit_token(
         AccountPostState::new(credit_supply.account),
     ];
     SpelOutput::execute(states, vec![token_create])
+}
+
+pub fn initialize_payment_token(
+    payment_token: AccountWithMetadata,
+    payment_supply: AccountWithMetadata,
+    token_program_id: [u8; 32],
+    tree_id: [u8; 32],
+) -> Output {
+    let token_create = ChainedCall::new(
+        bytemuck::cast(token_program_id),
+        vec![authorized(&payment_token), authorized(&payment_supply)],
+        &token_core::Instruction::NewFungibleDefinition {
+            name: "RLNTOK".to_string(),
+            total_supply: 0,
+        },
+    )
+    .with_pda_seeds(vec![
+        PdaSeed::new(payment_seed(&tree_id)),
+        PdaSeed::new(payment_supply_seed(&tree_id)),
+    ]);
+
+    let states = vec![
+        AccountPostState::new(payment_token.account),
+        AccountPostState::new(payment_supply.account),
+    ];
+    SpelOutput::execute(states, vec![token_create])
+}
+
+pub fn claim_tokens(
+    config: AccountWithMetadata,
+    payment_token_def: AccountWithMetadata,
+    dest_holding: AccountWithMetadata,
+    tree_id: [u8; 32],
+    amount: u128,
+) -> Output {
+    assert!(amount > 0, "Amount must be positive");
+
+    let config_state = ConfigState::try_from_slice(config.account.data.as_ref())
+        .expect("decode ConfigState");
+    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    assert!(
+        config_state.faucet_claim_cap > 0,
+        "Faucet disabled for this deployment"
+    );
+    assert!(
+        amount <= config_state.faucet_claim_cap,
+        "Amount exceeds faucet claim cap"
+    );
+
+    let def_id: [u8; 32] = *payment_token_def.account_id.value();
+    assert_eq!(
+        def_id, config_state.payment_token_id,
+        "Wrong payment token definition"
+    );
+
+    // Program-authority mint: the definition is this program's `payment` PDA,
+    // so the seed alone authorizes it — no human mint key exists in faucet
+    // deployments. The destination arrives tx-signed (fresh holdings are
+    // claimed Claim::Authorized by the token program).
+    let mint = ChainedCall::new(
+        bytemuck::cast(config_state.token_program_id),
+        vec![authorized(&payment_token_def), dest_holding.clone()],
+        &token_core::Instruction::Mint { amount_to_mint: amount },
+    )
+    .with_pda_seeds(vec![PdaSeed::new(payment_seed(&tree_id))]);
+
+    let states = vec![
+        AccountPostState::new(config.account),
+        AccountPostState::new(payment_token_def.account),
+        AccountPostState::new(dest_holding.account),
+    ];
+    SpelOutput::execute(states, vec![mint])
 }
 
 pub fn initialize_merkle_tree(
@@ -293,6 +383,93 @@ pub fn register(
         ),
     ];
     SpelOutput::execute(states, vec![token_transfer, merkle_insert])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn register_free(
+    mut config: AccountWithMetadata,
+    tree_main: AccountWithMetadata,
+    registrar: AccountWithMetadata,
+    bottom_subtree: AccountWithMetadata,
+    clock_account: AccountWithMetadata,
+    mut membership: AccountWithMetadata,
+    tree_id: [u8; 32],
+    id_commitment: [u8; 32],
+    rate_limit: u64,
+    subtree_id: u32,
+) -> Output {
+    validate_field_element(&id_commitment);
+    validate_rate_limit(rate_limit);
+
+    let mut config_state = ConfigState::try_from_slice(config.account.data.as_ref())
+        .expect("decode ConfigState");
+    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    assert!(config_state.can_register(rate_limit), "Would exceed max total rate limit");
+
+    assert_ne!(
+        config_state.authorized_registrar, [0u8; 32],
+        "No authorized registrar configured"
+    );
+    assert!(registrar.is_authorized, "Registrar must sign");
+    assert_eq!(
+        *registrar.account_id.value(),
+        config_state.authorized_registrar,
+        "Not the authorized registrar"
+    );
+    assert!(
+        config_state.free_quota_remaining > 0,
+        "Free-registration quota exhausted"
+    );
+
+    let now = require_clock(&clock_account);
+    let grace_period_start_timestamp =
+        now.saturating_add(config_state.active_duration_for_new_memberships as u64);
+
+    let next_index = read_tree_next_index(tree_main.account.data.as_ref());
+    let expected_subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
+    assert_eq!(
+        subtree_id, expected_subtree_id,
+        "subtree_id arg must match next_index/SUBTREE_LEAVES"
+    );
+
+    let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
+
+    config_state.total_registrations = config_state.total_registrations.saturating_add(1);
+    config_state.current_total_rate_limit =
+        config_state.current_total_rate_limit.saturating_add(rate_limit);
+    config_state.free_quota_remaining -= 1;
+    write_borsh(&mut config, &config_state, "ConfigState");
+
+    let membership_state = new_membership_state(
+        next_index,
+        rate_limit,
+        id_commitment,
+        grace_period_start_timestamp,
+        &config_state,
+    );
+    write_borsh(&mut membership, &membership_state, "MembershipState");
+
+    let merkle_insert = merkle_chained_call(
+        config_state.merkle_program_id,
+        &tree_main,
+        &bottom_subtree,
+        &tree_id,
+        subtree_id,
+        merkle_payload_insert(next_index, &leaf_value),
+    );
+
+    let states = vec![
+        AccountPostState::new(config.account),
+        AccountPostState::new(tree_main.account),
+        AccountPostState::new(registrar.account),
+        AccountPostState::new(bottom_subtree.account),
+        AccountPostState::new(clock_account.account),
+        AccountPostState::new_claimed_if_default(
+            membership.account,
+            Claim::Pda(PdaSeed::new(membership_seed(&tree_id, &id_commitment))),
+        ),
+    ];
+    SpelOutput::execute(states, vec![merkle_insert])
 }
 
 pub fn buy_credits(

@@ -95,7 +95,10 @@ fn strip_program_binary_user_elf(path: &Path, strip: &Path) {
 
     assert_eq!(&blob[cur..cur + 4], b"R0BF", "expected R0BF magic in {path:?}");
     cur += 4;
-    let _ver = read_u32(&blob, cur);
+    // The parse below assumes the v1 container layout; refuse anything else
+    // rather than silently repacking (and version-clobbering) a future format.
+    let ver = read_u32(&blob, cur);
+    assert_eq!(ver, 1, "unsupported R0BF version {ver} in {path:?}");
     cur += 4;
     let header_len = read_u32(&blob, cur) as usize;
     cur += 4;
@@ -120,7 +123,7 @@ fn strip_program_binary_user_elf(path: &Path, strip: &Path) {
 
     let mut out: Vec<u8> = Vec::with_capacity(blob.len());
     out.extend_from_slice(b"R0BF");
-    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&ver.to_le_bytes());
     out.extend_from_slice(&(header_len as u32).to_le_bytes());
     out.extend_from_slice(header);
     out.extend_from_slice(&(stripped.len() as u32).to_le_bytes());

@@ -6,15 +6,31 @@
 use borsh::BorshDeserialize;
 use rln_layouts::{
     combine_seeds, label_seed,
-    ConfigState, MembershipState, TreeMainLayout, ROOT_HISTORY_SIZE,
+    MembershipState, TreeMainLayout, ROOT_HISTORY_SIZE,
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA,
     TOP_DEPTH, TREE_DEPTH, SUBTREE_LEAVES,
     read_sparse_node,
 };
 
-/// Borsh size of the on-chain SPEL-aligned `ConfigState` (used by both the
-/// merkle-proofs-plan and register-plan precheck + decode).
-const CONFIG_STATE_SIZE: usize = 240;
+/// `rln_layouts::ConfigState` field offsets (borsh: fixed-width fields in
+/// declaration order, no prefixes). The layout is APPEND-ONLY, so these are
+/// stable across config versions; reading by offset keeps this FFI working
+/// against both pre-policy (240-byte) and policy (296-byte) deployments,
+/// where an exact-size borsh decode would reject the other version.
+const CONFIG_OFFSET_TREE_ID: usize = 32;
+const CONFIG_OFFSET_PAYMENT_TOKEN_ID: usize = 64;
+const CONFIG_OFFSET_TREASURY_ACCOUNT_ID: usize = 144;
+const CONFIG_OFFSET_TOKEN_PROGRAM_ID: usize = 208;
+/// Minimum (pre-policy) ConfigState size — the precheck floor. NOT the full
+/// policy-era size (296, the host's `CONFIG_SIZE`); accepting 240 is what
+/// keeps this FFI working against pre-policy deployments.
+const CONFIG_STATE_MIN_SIZE: usize = 240;
+
+fn config_field_32(config_data: &[u8], offset: usize) -> [u8; 32] {
+    config_data[offset..offset + 32]
+        .try_into()
+        .expect("32-byte config field")
+}
 use serde::Serialize;
 use sha2::{Sha256, Digest};
 
@@ -59,6 +75,48 @@ pub struct SubtreeEntry {
     pub subtree_id: u32,
     pub data_ptr: *const u8,
     pub data_len: usize,
+}
+
+/// Serialize an instruction with risc0-serde (the deployed programs' wire
+/// format: u32 words, LE bytes) into a heap buffer whose ownership passes to
+/// the caller side of the C ABI. Free with `rln_ffi_free_string`.
+///
+/// SAFETY: `out_data_ptr` and `out_data_len` must be valid, writable,
+/// non-null pointers. On any non-`Success` return they are left untouched.
+unsafe fn leak_instruction_bytes<T: Serialize>(
+    instruction: &T,
+    out_data_ptr: *mut *mut u8,
+    out_data_len: *mut usize,
+) -> Error {
+    let u32_vec = match risc0_zkvm::serde::to_vec(instruction) {
+        Ok(v) => v,
+        Err(_) => return Error::SerializationError,
+    };
+    let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
+    for word in &u32_vec {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes.shrink_to_fit();
+    let ptr = bytes.as_mut_ptr();
+    let len = bytes.len();
+    core::mem::forget(bytes);
+
+    unsafe {
+        *out_data_ptr = ptr;
+        *out_data_len = len;
+    }
+    Error::Success
+}
+
+/// Parse a C-side decimal string (e.g. a token amount) into a `u128`.
+///
+/// SAFETY: `ptr` must point to `len` readable bytes.
+unsafe fn parse_amount_u128(ptr: *const u8, len: usize) -> Result<u128, Error> {
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    core::str::from_utf8(bytes)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or(Error::SerializationError)
 }
 
 const PDA_PREFIX: &[u8; 32] = b"/LEE/v0.2/AccountId/PDA/\x00\x00\x00\x00\x00\x00\x00\x00";
@@ -246,15 +304,11 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     if leaf_indices_count > 0 && leaf_indices_ptr.is_null() {
         return Error::NullPointer;
     }
-    if config_data_len < CONFIG_STATE_SIZE {
+    if config_data_len < CONFIG_STATE_MIN_SIZE {
         return Error::InvalidConfig;
     }
 
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
-    let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
-        Ok(c) => c,
-        Err(_) => return Error::InvalidConfig,
-    };
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
     let leaf_indices: &[u64] = if leaf_indices_count == 0 {
         &[]
@@ -263,7 +317,7 @@ pub unsafe extern "C" fn rln_ffi_merkle_proofs_plan(
     };
 
     // Tree PDAs derive from the registration program, not the merkle program.
-    let tree_id: &[u8; 32] = &config.tree_id;
+    let tree_id: &[u8; 32] = &config_field_32(config_data, CONFIG_OFFSET_TREE_ID);
     let main_account_id =
         derive_pda(program_owner, &combine_seeds(&[&label_seed("main"), tree_id]));
 
@@ -529,7 +583,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     {
         return Error::NullPointer;
     }
-    if config_data_len < CONFIG_STATE_SIZE {
+    if config_data_len < CONFIG_STATE_MIN_SIZE {
         return Error::InvalidConfig;
     }
     if tree_main_data_len < TreeMainLayout::SIZE {
@@ -541,13 +595,9 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
     let id_commitment = unsafe { &*(id_commitment_ptr as *const [u8; 32]) };
 
-    // Decode via ConfigState (SPEL-aligned, 240 bytes borsh).
-    let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
-        Ok(c) => c,
-        Err(_) => return Error::InvalidConfig,
-    };
+    // Offset reads (version-agnostic; see the CONFIG_OFFSET_* comment).
     let tree_main = TreeMainLayout::parse(tree_main_data);
-    let tree_id: &[u8; 32] = &config.tree_id;
+    let tree_id: &[u8; 32] = &config_field_32(config_data, CONFIG_OFFSET_TREE_ID);
 
     let config_account_id =
         derive_pda(program_owner, &combine_seeds(&[&label_seed("config"), tree_id]));
@@ -574,7 +624,7 @@ pub unsafe extern "C" fn rln_ffi_register_plan(
     let plan = unsafe { &mut *out_plan };
     plan.config_account_id = config_account_id;
     plan.tree_main_account_id = tree_main_account_id;
-    plan.treasury_account_id = config.treasury_account_id;
+    plan.treasury_account_id = config_field_32(config_data, CONFIG_OFFSET_TREASURY_ACCOUNT_ID);
     plan.subtree_account_id = subtree_account_id;
     plan.clock_account_id = rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
     plan.membership_account_id = membership_account_id;
@@ -623,26 +673,7 @@ pub unsafe extern "C" fn rln_ffi_register_build_instruction(
     };
 
     // risc0 serde — matches the on-chain program's wire format.
-    let u32_vec = match risc0_zkvm::serde::to_vec(&instruction) {
-        Ok(v) => v,
-        Err(_) => return Error::SerializationError,
-    };
-
-    let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
-    for word in &u32_vec {
-        bytes.extend_from_slice(&word.to_le_bytes());
-    }
-    bytes.shrink_to_fit();
-    let ptr = bytes.as_mut_ptr();
-    let len = bytes.len();
-    core::mem::forget(bytes);
-
-    unsafe {
-        *out_data_ptr = ptr;
-        *out_data_len = len;
-    }
-
-    Error::Success
+    unsafe { leak_instruction_bytes(&instruction, out_data_ptr, out_data_len) }
 }
 
 /// Decode a fetched membership PDA's account data into its scalar fields.
@@ -789,48 +820,95 @@ pub unsafe extern "C" fn rln_ffi_token_mint_plan(
     {
         return Error::NullPointer;
     }
-    if config_data_len < CONFIG_STATE_SIZE {
+    if config_data_len < CONFIG_STATE_MIN_SIZE {
         return Error::InvalidConfig;
     }
 
     let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
-    let config = match ConfigState::try_from_slice(&config_data[..CONFIG_STATE_SIZE]) {
-        Ok(c) => c,
-        Err(_) => return Error::InvalidConfig,
-    };
 
-    let amount_bytes = unsafe { core::slice::from_raw_parts(amount_str_ptr, amount_str_len) };
-    let amount: u128 = match core::str::from_utf8(amount_bytes)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-    {
-        Some(a) => a,
-        None => return Error::SerializationError,
+    let amount = match unsafe { parse_amount_u128(amount_str_ptr, amount_str_len) } {
+        Ok(a) => a,
+        Err(e) => return e,
     };
 
     let instruction = token_core::Instruction::Mint {
         amount_to_mint: amount,
     };
-    let u32_vec = match risc0_zkvm::serde::to_vec(&instruction) {
-        Ok(v) => v,
-        Err(_) => return Error::SerializationError,
-    };
-    let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
-    for word in &u32_vec {
-        bytes.extend_from_slice(&word.to_le_bytes());
+    let err = unsafe { leak_instruction_bytes(&instruction, out_data_ptr, out_data_len) };
+    if !matches!(err, Error::Success) {
+        return err;
     }
-    bytes.shrink_to_fit();
-    let ptr = bytes.as_mut_ptr();
-    let len = bytes.len();
-    core::mem::forget(bytes);
 
     unsafe {
         core::slice::from_raw_parts_mut(out_definition_id, 32)
-            .copy_from_slice(&config.payment_token_id);
+            .copy_from_slice(&config_field_32(config_data, CONFIG_OFFSET_PAYMENT_TOKEN_ID));
         core::slice::from_raw_parts_mut(out_token_program_id, 32)
-            .copy_from_slice(&config.token_program_id);
-        *out_data_ptr = ptr;
-        *out_data_len = len;
+            .copy_from_slice(&config_field_32(config_data, CONFIG_OFFSET_TOKEN_PROGRAM_ID));
+    }
+
+    Error::Success
+}
+
+/// Plan a faucet `ClaimTokens` transaction (faucet-funded deployments: the
+/// payment token definition is the registration program's `payment` PDA and
+/// the mint is program-authorized — no human key).
+///
+/// `config_data_ptr`/`config_data_len`: raw config account bytes (tree_id is
+/// read by offset).
+/// `program_owner_ptr`: 32-byte REGISTRATION program id (the config account's
+/// `program_owner` — the claim tx targets this program, not the token program).
+/// `amount_str_ptr`/`amount_str_len`: claim amount as a decimal u128 string.
+/// `out_payment_def_id`: 32-byte buffer — tx account order is
+/// `[config, payment_def, dest (signer)]`; dest co-signs (fresh holdings are
+/// claimed `Claim::Authorized` by the token program).
+/// `out_data_ptr`/`out_data_len`: heap-allocated risc0-serde instruction
+/// words, LE bytes. Free with `rln_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rln_ffi_claim_plan(
+    config_data_ptr: *const u8,
+    config_data_len: usize,
+    program_owner_ptr: *const u8,
+    amount_str_ptr: *const u8,
+    amount_str_len: usize,
+    out_payment_def_id: *mut u8,
+    out_data_ptr: *mut *mut u8,
+    out_data_len: *mut usize,
+) -> Error {
+    if config_data_ptr.is_null()
+        || program_owner_ptr.is_null()
+        || amount_str_ptr.is_null()
+        || out_payment_def_id.is_null()
+        || out_data_ptr.is_null()
+        || out_data_len.is_null()
+    {
+        return Error::NullPointer;
+    }
+    if config_data_len < CONFIG_STATE_MIN_SIZE {
+        return Error::InvalidConfig;
+    }
+
+    let config_data = unsafe { core::slice::from_raw_parts(config_data_ptr, config_data_len) };
+    let program_owner = unsafe { &*(program_owner_ptr as *const [u8; 32]) };
+
+    let amount = match unsafe { parse_amount_u128(amount_str_ptr, amount_str_len) } {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+
+    let tree_id = config_field_32(config_data, CONFIG_OFFSET_TREE_ID);
+    let payment_def_id = derive_pda(
+        program_owner,
+        &combine_seeds(&[&label_seed("payment"), &tree_id]),
+    );
+
+    let instruction = rln_layouts::Instruction::ClaimTokens { tree_id, amount };
+    let err = unsafe { leak_instruction_bytes(&instruction, out_data_ptr, out_data_len) };
+    if !matches!(err, Error::Success) {
+        return err;
+    }
+
+    unsafe {
+        core::slice::from_raw_parts_mut(out_payment_def_id, 32).copy_from_slice(&payment_def_id);
     }
 
     Error::Success
@@ -839,6 +917,7 @@ pub unsafe extern "C" fn rln_ffi_token_mint_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rln_layouts::ConfigState;
 
     fn make_config_state() -> Vec<u8> {
         let cfg = ConfigState {
@@ -854,6 +933,9 @@ mod tests {
             active_duration_for_new_memberships: 100,
             grace_period_duration_for_new_memberships: 10,
             token_program_id: [0x44; 32],
+            authorized_registrar: [0x55; 32],
+            free_quota_remaining: 3,
+            faucet_claim_cap: 1_000_000,
         };
         borsh::to_vec(&cfg).unwrap()
     }
@@ -900,5 +982,31 @@ mod tests {
             assert_eq!(expected, plan.subtree_account_ids[i],
                 "subtree {} account ID mismatch!", plan.subtree_ids[i]);
         }
+    }
+
+    // Pins the local CONFIG_OFFSET_* consts to rln_layouts::ConfigState's
+    // Borsh layout: each offset read must recover exactly its field's bytes
+    // (make_config_state uses distinct per-field values, so any offset drift
+    // or field reorder fails). Also states the compat contract: the offsets
+    // this FFI relies on all end at or before the 240-byte pre-policy floor,
+    // which every config version (240 legacy, 296 policy) satisfies.
+    #[test]
+    fn config_offsets_match_shared_layout() {
+        let bytes = make_config_state();
+
+        assert_eq!(config_field_32(&bytes, CONFIG_OFFSET_TREE_ID), [0x42; 32]);
+        assert_eq!(config_field_32(&bytes, CONFIG_OFFSET_PAYMENT_TOKEN_ID), [0x22; 32]);
+        assert_eq!(config_field_32(&bytes, CONFIG_OFFSET_TREASURY_ACCOUNT_ID), [0x33; 32]);
+        assert_eq!(config_field_32(&bytes, CONFIG_OFFSET_TOKEN_PROGRAM_ID), [0x44; 32]);
+
+        assert_eq!(
+            CONFIG_OFFSET_TOKEN_PROGRAM_ID + 32,
+            CONFIG_STATE_MIN_SIZE,
+            "last offset-read field must fit within the pre-policy floor"
+        );
+        assert!(
+            bytes.len() >= CONFIG_STATE_MIN_SIZE,
+            "policy-era ConfigState must still satisfy the precheck floor"
+        );
     }
 }

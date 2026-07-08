@@ -266,4 +266,29 @@ enum RlnFfiError rln_ffi_token_mint_plan(const uint8_t *config_data_ptr,
                                          uint8_t **out_data_ptr,
                                          uintptr_t *out_data_len);
 
+/**
+ * Plan a faucet `ClaimTokens` transaction (faucet-funded deployments: the
+ * payment token definition is the registration program's `payment` PDA and
+ * the mint is program-authorized — no human key).
+ *
+ * `config_data_ptr`/`config_data_len`: raw config account bytes (tree_id is
+ * read by offset).
+ * `program_owner_ptr`: 32-byte REGISTRATION program id (the config account's
+ * `program_owner` — the claim tx targets this program, not the token program).
+ * `amount_str_ptr`/`amount_str_len`: claim amount as a decimal u128 string.
+ * `out_payment_def_id`: 32-byte buffer — tx account order is
+ * `[config, payment_def, dest (signer)]`; dest co-signs (fresh holdings are
+ * claimed `Claim::Authorized` by the token program).
+ * `out_data_ptr`/`out_data_len`: heap-allocated risc0-serde instruction
+ * words, LE bytes. Free with `rln_ffi_free_string`.
+ */
+enum RlnFfiError rln_ffi_claim_plan(const uint8_t *config_data_ptr,
+                                    uintptr_t config_data_len,
+                                    const uint8_t *program_owner_ptr,
+                                    const uint8_t *amount_str_ptr,
+                                    uintptr_t amount_str_len,
+                                    uint8_t *out_payment_def_id,
+                                    uint8_t **out_data_ptr,
+                                    uintptr_t *out_data_len);
+
 #endif  /* LEZ_RLN_FFI_H */

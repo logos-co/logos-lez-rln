@@ -71,9 +71,23 @@ public:
 
     /// Live sequencer read of a Token holding account's fungible balance.
     /// Returns JSON: {"exists": true, "balance": "<decimal>", "definition": hex}
-    ///         or:   {"exists": false, "balance": "0"} for absent/empty
-    /// accounts, or empty on failure (wallet unavailable / not a holding).
+    ///         or:   {"exists": false, "balance": "0"} for absent accounts,
+    /// or empty on failure (wallet unavailable / account fetch failed / not
+    /// a holding) — pollers must treat empty as an error, not a zero balance.
     virtual QString get_token_balance(const QString& account_id) = 0;
+
+    /// Faucet claim (faucet-funded deployments): submit the registration
+    /// program's ClaimTokens instruction, minting `amount` (decimal u128
+    /// string, capped on-chain by the deployment's faucet_claim_cap) into
+    /// `dest_account_id`. The mint authority is the program's own payment
+    /// PDA — no key is involved beyond the destination's co-signature (its
+    /// key must be in the open wallet; fresh holdings are claimed
+    /// Claim::Authorized). Non-blocking; poll get_token_balance.
+    /// Returns JSON: {"tx_result": <wallet response>, "payment_definition":
+    ///                hex, "pending": true} or empty on failure.
+    virtual QString claim_tokens(const QString& config_account_id,
+                                 const QString& dest_account_id,
+                                 const QString& amount) = 0;
 };
 
 #define ILogosRlnModule_iid "org.logos.ilogosrlnmodule"

@@ -11,9 +11,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Borsh layout for the registration program's config account.
 ///
-/// Fixed size: 240 bytes. Field declaration order matches the byte layout
+/// Fixed size: 296 bytes. Field declaration order matches the byte layout
 /// (Borsh encodes fixed-width primitives + fixed arrays in declaration order
-/// with no length prefixes).
+/// with no length prefixes). New fields are only ever APPENDED so existing
+/// offsets stay stable for offset-based readers.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct ConfigState {
     pub merkle_program_id: [u8; 32],
@@ -28,6 +29,16 @@ pub struct ConfigState {
     pub active_duration_for_new_memberships: u32,
     pub grace_period_duration_for_new_memberships: u32,
     pub token_program_id: [u8; 32],
+    /// Account allowed to create memberships via `RegisterFree` (all-zero =
+    /// no free-quota registrar configured for this deployment).
+    pub authorized_registrar: [u8; 32],
+    /// Free memberships left for the authorized registrar; decremented per
+    /// `RegisterFree`.
+    pub free_quota_remaining: u64,
+    /// Max payment tokens minted per `ClaimTokens` call. 0 = faucet disabled
+    /// (wallet-key deployments); >0 also implies the payment token definition
+    /// is this program's `payment` PDA.
+    pub faucet_claim_cap: u128,
 }
 
 /// Borsh layout for a per-member account in the SPEL registration program.

@@ -25,7 +25,12 @@ pub const CONFIG_OFFSET_PRICE_PER_UNIT: usize = 128;
 pub const CONFIG_OFFSET_TREASURY_ACCOUNT_ID: usize = 144;
 pub const CONFIG_OFFSET_TOTAL_REGISTRATIONS: usize = 176;
 pub const CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT: usize = 192;
-pub const CONFIG_SIZE: usize = 240;
+// Deployment-policy fields (appended; earlier offsets unchanged):
+// token_program_id [u8;32] @208 (no host reader by offset today).
+pub const CONFIG_OFFSET_AUTHORIZED_REGISTRAR: usize = 240;
+pub const CONFIG_OFFSET_FREE_QUOTA_REMAINING: usize = 272;
+pub const CONFIG_OFFSET_FAUCET_CLAIM_CAP: usize = 280;
+pub const CONFIG_SIZE: usize = 296;
 
 // Layout source of truth: `rln_layouts::MembershipState`.
 pub const MEMBERSHIP_OFFSET_LEAF_INDEX: usize = 0;
