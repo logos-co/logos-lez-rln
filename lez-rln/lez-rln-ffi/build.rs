@@ -1,4 +1,12 @@
 fn main() {
+    // Consumers that use this crate as an rlib (e.g. the Rust module port,
+    // which stages a copy of this crate inside its nix sandbox) never need
+    // the C header, and cbindgen would try to write into a read-only staged
+    // source tree there. Env-gated skip; default behavior is unchanged.
+    if std::env::var("LEZ_RLN_FFI_SKIP_CBINDGEN").is_ok() {
+        return;
+    }
+
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
     let config =
