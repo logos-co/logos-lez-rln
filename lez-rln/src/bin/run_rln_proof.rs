@@ -27,7 +27,7 @@ async fn main() {
 
     println!("=== RLN Proof Demo ===\n");
 
-    let user_holding_id = create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await;
+    let user_holding_id = create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await;
 
     // Step 1: Create identity using zerokit
     println!("Step 1: Creating identity...");

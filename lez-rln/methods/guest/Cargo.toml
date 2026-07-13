@@ -22,17 +22,33 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
-# rc5 lssa via local submodule (nssa_core->lee_core; package alias keeps guest source unchanged).
-nssa_core = { package = "lee_core", path = "../../../lssa/lee/state_machine/core" }
-token_core = { path = "../../../lssa/lez/programs/token/core" }
-clock_core = { path = "../../../lssa/lez/programs/clock/core" }
+# rc6 lssa fetched as git deps (nssa_core->lee_core; package alias keeps guest
+# source unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
+nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6", default-features = false }
+token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
 rln-layouts = { path = "../../rln-layouts", default-features = false }
 rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
-spel-framework = { path = "../../../spel/spel-framework" }
+# spel-framework must target the SAME lee_core as the guest (v0.2.0-rc6). This
+# rev (the one lez-programs uses on rc6) depends on lee_core@v0.2.0-rc6; the
+# older logos-co/spel@73fc462 targets the pre-rename nssa_core@v0.1.2 and does
+# NOT compile against rc6 lee_core. Keep this and nssa_core above on the same
+# LEZ release.
+spel-framework = { git = "https://github.com/0x-r4bbit/spel.git", rev = "91023c9115bf88173b0d25d2e905f2a55ef0313b" }
+
+# NOTE: the risc0 guest toolchain is rustc 1.88; some transitive deps have newer
+# MSRVs and must be held back in Cargo.lock (cargo update --precise), or
+# `cargo risczero build` fails resolving 1.88-incompatible versions:
+#   enum-ordinalize / enum-ordinalize-derive pinned to 4.3.2 (4.4.x needs 1.89)
+#   ruint pinned to 1.17.0 (1.18+ needs 1.90)
+# Re-pin after any `cargo update` that bumps them.
 
 [[bin]]
 name = "incremental_merkle_tree"
@@ -41,3 +57,24 @@ path = "src/bin/incremental_merkle_tree.rs"
 [[bin]]
 name = "rln_registration"
 path = "src/bin/rln_registration.rs"
+
+# Phase A lint policy — mirrored from the host workspace (lez-rln/Cargo.toml)
+# since guest is a separate workspace and can't inherit [workspace.lints].
+# Phase B lints (unwrap_used, allow_attributes*, arithmetic_side_effects,
+# indexing_slicing, cast discipline) are a tracked follow-up.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+large_enum_variant = "deny"
+wildcard_enum_match_arm = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"

@@ -14,15 +14,19 @@ edition = "2024"
 name = "logos_lez_rln"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
-# LSSA dependencies via the lssa submodule (upstream rc6 renamed nssa->lee,
-# nssa_core->lee_core; package aliasing keeps the lez-rln source unchanged).
-nssa = { package = "lee", path = "../lssa/lee/state_machine" }
-nssa_core = { package = "lee_core", path = "../lssa/lee/state_machine/core" }
-wallet = { path = "../lssa/lez/wallet" }
-common = { path = "../lssa/lez/common" }
-sequencer_service_rpc = { path = "../lssa/lez/sequencer/service/rpc", features = ["client"] }
-programs = { path = "../lssa/lez/programs" }
+# LSSA dependencies fetched as git deps pinned to upstream rc6 (renamed
+# nssa->lee, nssa_core->lee_core; package aliasing keeps the lez-rln source
+# unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
+nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6", features = ["client"] }
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
 
 rln-layouts = { path = "rln-layouts" }
 
@@ -51,9 +55,33 @@ name = "register_member"
 path = "src/bin/register_member.rs"
 
 [dev-dependencies]
-nssa = { package = "lee", path = "../lssa/lee/state_machine", features = ["test-utils"] }
-token_core = { path = "../lssa/lez/programs/token/core" }
-clock_core = { path = "../lssa/lez/programs/clock/core" }
+nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6", features = ["test-utils"] }
+token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
 
 [workspace.dependencies]
 rln-layouts = { path = "rln-layouts", default-features = false }
+
+# Phase A lint policy: low-churn structural hygiene + correctness. Mirrored into
+# the guest workspace (methods/guest/Cargo.toml) since it can't inherit these.
+# Deferred to a tracked Phase B follow-up (higher churn on the current tree):
+#   unwrap_used, allow_attributes / allow_attributes_without_reason,
+#   arithmetic_side_effects, indexing_slicing, and the cast-discipline set.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+# deny (not forbid) so a targeted per-item #[allow] remains possible where needed
+# (e.g. the C FFI boundary in lez-rln-ffi).
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+large_enum_variant = "deny"
+wildcard_enum_match_arm = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"

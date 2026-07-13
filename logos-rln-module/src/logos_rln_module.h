@@ -3,14 +3,6 @@
 
 #include "i_logos_rln_module.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-#include <lez_rln_ffi.h>
-#ifdef __cplusplus
-}
-#endif
-
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -41,6 +33,13 @@ public:
                                          int rate_limit) override;
     Q_INVOKABLE QString is_member_registered(const QString& config_account_id,
                                               const QString& id_commitment_hex) override;
+    Q_INVOKABLE QString mint_tokens(const QString& config_account_id,
+                                    const QString& dest_account_id,
+                                    const QString& amount) override;
+    Q_INVOKABLE QString get_token_balance(const QString& account_id) override;
+    Q_INVOKABLE QString claim_tokens(const QString& config_account_id,
+                                     const QString& dest_account_id,
+                                     const QString& amount) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& data);

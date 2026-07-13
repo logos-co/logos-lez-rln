@@ -1,5 +1,9 @@
 #include "logos_rln_module.h"
 
+extern "C" {
+#include <lez_rln_ffi.h>
+}
+
 #include <cpp/logos_api_client.h>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDebug>
@@ -139,6 +143,28 @@ static bool deriveRegisterPlan(const RlnConfigContext& ctx,
                                const char* who,
                                RlnFfiRlnRegisterPlan& outPlan);
 
+// Instruction bytes from the FFI are a borsh Vec<u32> serialized LE;
+// upstream's send_generic_public_transaction takes the u32 words directly.
+// Consumes (frees) the FFI buffer on both success and failure.
+static bool instructionWordsFromFfi(const char* who,
+                                    uint8_t* instrPtr, size_t instrLen,
+                                    QVariantList& outWords) {
+    if ((instrLen % 4) != 0) {
+        qWarning().nospace() << who << ": instruction not word-aligned " << instrLen;
+        rln_ffi_free_string(instrPtr, instrLen);
+        return false;
+    }
+    outWords.reserve(static_cast<int>(instrLen / 4));
+    for (size_t k = 0; k < instrLen / 4; ++k) {
+        const uint8_t* p = instrPtr + k * 4;
+        const uint32_t w = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+                         | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+        outWords.append(QVariant(static_cast<uint>(w)));
+    }
+    rln_ffi_free_string(instrPtr, instrLen);
+    return true;
+}
+
 QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
     RlnConfigContext ctx;
     if (!resolveConfigContext(logosAPI, rln_account_id_hex, "get_valid_roots", ctx)) {
@@ -184,8 +210,8 @@ QString LogosRlnModule::get_valid_roots(const QString& rln_account_id_hex) {
 }
 
 // Quiet variant: returns false on absent / empty-data accounts without
-// logging a warning. Used by the register_member pre-check + poll loops
-// where "not yet present" is the expected initial state.
+// logging a warning. Used by the register_member / is_member_registered
+// membership pre-checks where "not yet present" is the expected state.
 static bool fetchAccountDataQuiet(LogosAPIClient* walletClient,
                                    const QString& accountIdHex,
                                    QByteArray& outData) {
@@ -206,8 +232,9 @@ static bool fetchAccountDataQuiet(LogosAPIClient* walletClient,
 // fetch error. Callers that treat both as "no data" silently substitute an
 // empty proof leaf when a transient RPC/parse error hits an account that
 // actually exists on-chain — producing a proof against the wrong root that
-// the verifier rejects ("Expected one of the provided roots"). See
-// get_merkle_proofs's subtree loop for the only consumer.
+// the verifier rejects ("Expected one of the provided roots") — and
+// get_token_balance would report an outage as a legitimate zero balance.
+// Consumers: get_merkle_proofs's subtree loop, get_token_balance.
 enum class FetchOutcome { Present, Absent, Error };
 
 static FetchOutcome fetchAccountDataTriState(LogosAPIClient* walletClient,
@@ -468,22 +495,10 @@ QString LogosRlnModule::register_member(const QString& config_account_id,
         return {};
     }
 
-    // Instruction bytes are a borsh Vec<u32> serialized LE; upstream's
-    // send_generic_public_transaction takes the u32 words directly.
-    if ((instrLen % 4) != 0) {
-        qWarning() << "register_member: instruction not word-aligned" << instrLen;
-        rln_ffi_free_string(instrPtr, instrLen);
+    QVariantList instructionWords;
+    if (!instructionWordsFromFfi("register_member", instrPtr, instrLen, instructionWords)) {
         return {};
     }
-    QVariantList instructionWords;
-    instructionWords.reserve(static_cast<int>(instrLen / 4));
-    for (size_t k = 0; k < instrLen / 4; ++k) {
-        const uint8_t* p = instrPtr + k * 4;
-        const uint32_t w = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
-                         | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
-        instructionWords.append(QVariant(static_cast<uint>(w)));
-    }
-    rln_ffi_free_string(instrPtr, instrLen);
 
     // Account order must match methods/guest/src/program.rs::register:
     //   config, tree_main, user_holding (signer), treasury, bottom_subtree,
@@ -563,6 +578,204 @@ QString LogosRlnModule::is_member_registered(const QString& config_account_id,
         }
     }
     result["registered"] = false;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
+QString LogosRlnModule::mint_tokens(const QString& config_account_id,
+                                    const QString& dest_account_id,
+                                    const QString& amount) {
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, config_account_id, "mint_tokens", ctx)) {
+        return {};
+    }
+    auto* walletClient = ctx.walletClient;
+
+    const QString destHex = resolveAccountId(walletClient, dest_account_id);
+    if (destHex.isEmpty()) {
+        qWarning() << "mint_tokens: failed to resolve destination account";
+        return {};
+    }
+
+    // The config's payment_token_id is the mint authority (definition
+    // account); its signing key must be in the open wallet. Instruction words
+    // + both ids come from one FFI call so the Token-program ABI stays in Rust.
+    const QByteArray amountUtf8 = amount.trimmed().toUtf8();
+    uint8_t definitionId[32] = {};
+    uint8_t tokenProgramId[32] = {};
+    uint8_t* instrPtr = nullptr;
+    size_t instrLen = 0;
+    RlnFfiError err = rln_ffi_token_mint_plan(
+        reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+        static_cast<size_t>(ctx.configData.size()),
+        reinterpret_cast<const uint8_t*>(amountUtf8.constData()),
+        static_cast<size_t>(amountUtf8.size()),
+        definitionId, tokenProgramId,
+        &instrPtr, &instrLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "mint_tokens: mint_plan FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    QVariantList instructionWords;
+    if (!instructionWordsFromFfi("mint_tokens", instrPtr, instrLen, instructionWords)) {
+        return {};
+    }
+
+    const QString definitionHex = bytesToHex(definitionId, 32);
+
+    // Token-program Mint account order: definition (authority), then the
+    // destination holding — which may be a brand-new, uninitialized account
+    // (the program zero-initializes the holding from the definition). BOTH
+    // sign: a default destination is claimed with Claim::Authorized (token
+    // program mint.rs), so its signature is required for the claim to
+    // validate; the wallet silently skips signer flags for accounts whose
+    // key it doesn't hold, which keeps already-initialized external
+    // destinations working (no claim needed there).
+    QVariantList accountIds;
+    accountIds << definitionHex << destHex;
+    QVariantList signingReqs;
+    signingReqs << true << true;
+
+    const QVariant sendResult = walletClient->invokeRemoteMethod(
+        QStringLiteral("logos_execution_zone"),
+        QStringLiteral("send_generic_public_transaction"),
+        QVariant(accountIds), QVariant(signingReqs), QVariant(instructionWords),
+        QVariant(bytesToHex(tokenProgramId, 32)), Timeout(180000));
+    const QString sendResultStr = sendResult.toString();
+    if (sendResultStr.isEmpty()) {
+        qWarning() << "mint_tokens: transaction failed";
+        return {};
+    }
+
+    // Sequencer accept only — callers poll get_token_balance for the credit
+    // (same non-blocking contract as register_member).
+    QJsonObject result;
+    result["tx_result"] = sendResultStr;
+    result["definition"] = definitionHex;
+    result["pending"] = true;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
+QString LogosRlnModule::claim_tokens(const QString& config_account_id,
+                                     const QString& dest_account_id,
+                                     const QString& amount) {
+    RlnConfigContext ctx;
+    if (!resolveConfigContext(logosAPI, config_account_id, "claim_tokens", ctx)) {
+        return {};
+    }
+    auto* walletClient = ctx.walletClient;
+
+    const QString destHex = resolveAccountId(walletClient, dest_account_id);
+    if (destHex.isEmpty()) {
+        qWarning() << "claim_tokens: failed to resolve destination account";
+        return {};
+    }
+
+    // The claim tx targets the REGISTRATION program (the config's owner);
+    // the FFI derives the payment PDA + builds the ClaimTokens words so the
+    // program ABI stays in Rust. The on-chain guest enforces the deployment's
+    // faucet_claim_cap (0 = wallet-key deployment, claim rejected).
+    const QByteArray amountUtf8 = amount.trimmed().toUtf8();
+    uint8_t paymentDefId[32] = {};
+    uint8_t* instrPtr = nullptr;
+    size_t instrLen = 0;
+    RlnFfiError err = rln_ffi_claim_plan(
+        reinterpret_cast<const uint8_t*>(ctx.configData.constData()),
+        static_cast<size_t>(ctx.configData.size()),
+        reinterpret_cast<const uint8_t*>(ctx.programOwnerBytes.constData()),
+        reinterpret_cast<const uint8_t*>(amountUtf8.constData()),
+        static_cast<size_t>(amountUtf8.size()),
+        paymentDefId,
+        &instrPtr, &instrLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "claim_tokens: claim_plan FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    QVariantList instructionWords;
+    if (!instructionWordsFromFfi("claim_tokens", instrPtr, instrLen, instructionWords)) {
+        return {};
+    }
+
+    // Account order per the guest's claim_tokens: config (pda), payment
+    // definition (pda), destination holding. Only the destination signs —
+    // its co-signature authorizes the token program's Claim::Authorized on a
+    // fresh holding; the PDAs are program-authorized.
+    QVariantList accountIds;
+    accountIds << ctx.configHex << bytesToHex(paymentDefId, 32) << destHex;
+    QVariantList signingReqs;
+    signingReqs << false << false << true;
+
+    const QString programIdHex = bytesToHex(
+        reinterpret_cast<const uint8_t*>(ctx.programOwnerBytes.constData()), 32);
+    const QVariant sendResult = walletClient->invokeRemoteMethod(
+        QStringLiteral("logos_execution_zone"),
+        QStringLiteral("send_generic_public_transaction"),
+        QVariant(accountIds), QVariant(signingReqs), QVariant(instructionWords),
+        QVariant(programIdHex), Timeout(180000));
+    const QString sendResultStr = sendResult.toString();
+    if (sendResultStr.isEmpty()) {
+        qWarning() << "claim_tokens: transaction failed";
+        return {};
+    }
+
+    QJsonObject result;
+    result["tx_result"] = sendResultStr;
+    result["payment_definition"] = bytesToHex(paymentDefId, 32);
+    result["pending"] = true;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+}
+
+QString LogosRlnModule::get_token_balance(const QString& account_id) {
+    if (!logosAPI) {
+        qWarning() << "get_token_balance: logosAPI not initialized";
+        return {};
+    }
+    auto* walletClient = logosAPI->getClient(WALLET_MODULE);
+    if (!walletClient) {
+        qWarning() << "get_token_balance: wallet module not available";
+        return {};
+    }
+    const QString accountHex = resolveAccountId(walletClient, account_id);
+    if (accountHex.isEmpty()) {
+        qWarning() << "get_token_balance: failed to resolve account";
+        return {};
+    }
+
+    QJsonObject result;
+    QByteArray data;
+    // Tri-state fetch: an absent account is the normal pre-mint state, but a
+    // fetch error must surface as the {} failure return — reporting it as
+    // balance 0 would make "sequencer unreachable" indistinguishable from
+    // "claim not credited yet" to mint/claim pollers.
+    switch (fetchAccountDataTriState(walletClient, accountHex, data)) {
+    case FetchOutcome::Error:
+        qWarning() << "get_token_balance: account fetch failed";
+        return {};
+    case FetchOutcome::Absent:
+        result["exists"] = false;
+        result["balance"] = QStringLiteral("0");
+        return QJsonDocument(result).toJson(QJsonDocument::Compact);
+    case FetchOutcome::Present:
+        break;
+    }
+
+    uint8_t definitionId[32] = {};
+    char balanceBuf[48] = {};
+    size_t balanceLen = 0;
+    const RlnFfiError err = rln_ffi_token_holding_info(
+        reinterpret_cast<const uint8_t*>(data.constData()),
+        static_cast<size_t>(data.size()),
+        definitionId,
+        reinterpret_cast<uint8_t*>(balanceBuf), sizeof(balanceBuf), &balanceLen);
+    if (err != RLN_FFI_ERROR_SUCCESS) {
+        qWarning() << "get_token_balance: holding parse FFI error" << static_cast<int>(err);
+        return {};
+    }
+
+    result["exists"] = true;
+    result["balance"] = QString::fromLatin1(balanceBuf, static_cast<int>(balanceLen));
+    result["definition"] = bytesToHex(definitionId, 32);
     return QJsonDocument(result).toJson(QJsonDocument::Compact);
 }
 

@@ -5,6 +5,14 @@
 # .cpp with the legacy send_public_transaction(json) call — port-hazard if a
 # future submodule init re-references it. Ignored to prevent re-creation.
 /vendor/
+# lssa and spel are consumed as pinned git deps (see lez-rln/Cargo.toml and
+# methods/guest/Cargo.toml); a local working copy is no longer needed to build.
+# Ignored so a stray sibling checkout can't be accidentally committed.
+/lssa/
+/spel/
+# dev.sh provisions the pinned sequencer source into a cache. Default lives under
+# $XDG_CACHE_HOME; only the repo-local override path needs ignoring here.
+dev/.sequencer-src/
 storage.json
 wallet_config.json
 dev/storage.json

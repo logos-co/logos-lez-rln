@@ -24,18 +24,27 @@ fn main() {
     let strip = locate_llvm_strip()
         .expect("llvm-strip not found under ~/.risc0/toolchains/*/lib/rustlib/*/bin/");
 
-    let bin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("riscv-guest")
-        .join("logos_lez_rln_methods")
-        .join("logos_lez_rln_guest")
-        .join("riscv32im-risc0-zkvm-elf")
-        .join("release");
+    // Strip both guest build trees when present (idempotent — a stripped R0BF
+    // re-strips to the same bytes):
+    //   - the methods-crate local build (`cargo build`), and
+    //   - the reproducible docker build (`cargo risczero build`), which is the
+    //     DEPLOY artifact the host reads via `REGISTRATION_BINARY`. This one is
+    //     produced by a separate invocation, so a `cargo build` after
+    //     `cargo risczero build` is what strips it under the per-tx cap.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let bin_dirs = [
+        manifest
+            .join("target/riscv-guest/logos_lez_rln_methods/logos_lez_rln_guest")
+            .join("riscv32im-risc0-zkvm-elf/release"),
+        manifest.join("guest/target/riscv32im-risc0-zkvm-elf/docker"),
+    ];
 
-    for name in ["rln_registration.bin", "incremental_merkle_tree.bin"] {
-        let path = bin_dir.join(name);
-        if path.exists() {
-            strip_program_binary_user_elf(&path, &strip);
+    for bin_dir in &bin_dirs {
+        for name in ["rln_registration.bin", "incremental_merkle_tree.bin"] {
+            let path = bin_dir.join(name);
+            if path.exists() {
+                strip_program_binary_user_elf(&path, &strip);
+            }
         }
     }
 }
@@ -86,7 +95,10 @@ fn strip_program_binary_user_elf(path: &Path, strip: &Path) {
 
     assert_eq!(&blob[cur..cur + 4], b"R0BF", "expected R0BF magic in {path:?}");
     cur += 4;
-    let _ver = read_u32(&blob, cur);
+    // The parse below assumes the v1 container layout; refuse anything else
+    // rather than silently repacking (and version-clobbering) a future format.
+    let ver = read_u32(&blob, cur);
+    assert_eq!(ver, 1, "unsupported R0BF version {ver} in {path:?}");
     cur += 4;
     let header_len = read_u32(&blob, cur) as usize;
     cur += 4;
@@ -111,7 +123,7 @@ fn strip_program_binary_user_elf(path: &Path, strip: &Path) {
 
     let mut out: Vec<u8> = Vec::with_capacity(blob.len());
     out.extend_from_slice(b"R0BF");
-    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&ver.to_le_bytes());
     out.extend_from_slice(&(header_len as u32).to_le_bytes());
     out.extend_from_slice(header);
     out.extend_from_slice(&(stripped.len() as u32).to_le_bytes());
