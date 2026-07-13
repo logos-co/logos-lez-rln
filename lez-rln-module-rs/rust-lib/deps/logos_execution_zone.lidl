@@ -1,0 +1,30 @@
+; logos_execution_zone contract — the subset the RLN module uses. Supplied as
+; a dependency_override (chat-module deps/delivery_module.lidl flavor): the
+; consumer generates a typed LogosExecutionZoneClient from just these three
+; methods instead of the full 42-method wallet surface. Signatures are copied
+; verbatim from ../logos_execution_zone.lidl — keep the two files in sync.
+;
+; Call-site evidence (vendor/logos-lez-rln/logos-rln-module/src/
+; logos_rln_module.cpp): resolveAccountId -> account_id_from_base58 (:111);
+; fetchAccountData/-Quiet/-TriState -> get_account_public (:193, :217, :256);
+; register_member submit -> send_generic_public_transaction (:508). The
+; caller passes account_ids/signing_requirements/instruction as
+; QVariant-wrapped QVariantLists and treats an EMPTY string return as failure.
+module logos_execution_zone {
+  version "1.0.0"
+
+  ; Decode a base58 account id to 64 hex chars; empty string on failure.
+  method account_id_from_base58(base58_str: tstr) -> tstr description "Decode a base58 account id to 64 hex chars; empty string on failure."
+
+  ; JSON {program_owner, balance, nonce, data} (all hex); empty string on
+  ; failure. The RLN module derives PDAs from program_owner and parses the
+  ; membership/config state out of data.
+  method get_account_public(account_id_hex: tstr) -> tstr description "Fetch public account state as JSON {program_owner, balance, nonce, data} (all hex); empty string on failure."
+
+  ; instruction is a list of u32 words (borsh Vec<u32> LE re-packed by the
+  ; caller); typed `any` because today's C++ codegen maps
+  ; std::vector<uint32_t> to the opaque QVariant. Success returns JSON
+  ; {success, tx_hash, secrets, error}; failure returns {success, tx_hash,
+  ; error} (no secrets key) or the empty string if the QtRO call itself dies.
+  method send_generic_public_transaction(account_ids: [tstr], signing_requirements: [bool], instruction: any, program_id_hex: tstr) -> tstr description "Submit a generic public transaction: parallel account_ids/signing_requirements arrays, u32-word instruction stream, 32-byte program id hex. Returns JSON {success, tx_hash, secrets, error} (no secrets key on failure)."
+}

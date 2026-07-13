@@ -1,0 +1,46 @@
+{
+  description = "Logos RLN Module (Rust port of logos-rln-module)";
+
+  inputs = {
+    logos-module-builder.url = "github:logos-co/logos-module-builder";
+  };
+
+  outputs = inputs@{ self, logos-module-builder, ... }:
+    let
+      nixpkgs = logos-module-builder.inputs.nixpkgs;
+      systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
+      forAllSystems = fn: nixpkgs.lib.genAttrs systems fn;
+
+      # The builder runs logos-lidl-gen to emit the module-impl C ABI scaffold
+      # (+ the typed logos_execution_zone dependency client) at
+      # rust-lib/generated/, compiles the staticlib, and wraps it in the Qt
+      # cdylib glue — all driven by metadata.json (codegen.rust +
+      # dependency_overrides; concurrency stays at the single default until
+      # the delivery module's logos-cpp-sdk pin learns the deferred-result
+      # sentinel — see README "Design constraints").
+      #
+      # rust-lib path-deps lez-rln-ffi from rust-lib/lez-rln-src (a staged
+      # copy of ../lez-rln/{lez-rln-ffi,rln-layouts}): mkLogosModule's
+      # rustCrateSrc stages ONLY the crate dir (plus logos-rust-sdk-src) into
+      # the sandbox, so the deps must live inside rust-lib/ to survive the
+      # builder's vendoring.
+      #
+      # Unlike the wallet spike, no lssa crates are in the tree (lez-rln-ffi
+      # only path-deps rln-layouts), so no circuits/rapidsnark rustEnv pins
+      # and no pyo3 are needed. RISC0_SKIP_BUILD_KERNELS comes from metadata
+      # nix.rust.env (risc0-zkvm is serde-only here; no proving).
+      module = system:
+        logos-module-builder.lib.mkLogosModule {
+          src = ./.;
+          configFile = ./metadata.json;
+          flakeInputs = inputs;
+        };
+    in
+    {
+      packages = forAllSystems (system:
+        let m = (module system).packages.${system};
+        in m // {
+          liblogos_rln_module = m.default;
+        });
+    };
+}
