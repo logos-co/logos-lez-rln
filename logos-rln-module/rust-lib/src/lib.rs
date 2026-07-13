@@ -17,15 +17,15 @@
 //! - The QCoreApplication::processEvents keep-alive before each blocking
 //!   wallet RPC: single-mode dispatch blocks inside lp_invoke, whose QtRO
 //!   wait loop pumps the same events processEvents did.
+//! - QTimer phase-reset on re-target: the broadcast threads keep their 10s
+//!   cadence; a re-target still fires one broadcast synchronously (matching
+//!   the C++ immediate onBroadcastTimer() call).
 //!
 //! Concurrency is SINGLE (like the C++ module), not "multi": a multi provider
 //! answers callers with a deferred-result sentinel that only protocol builds
 //! with resolveDeferred (remote_transport.cpp) can consume — the delivery
 //! module's pinned logos-cpp-sdk predates that and reads the sentinel as an
 //! instant failure. Revisit multi once delivery's sdk pin is bumped.
-//! - QTimer phase-reset on re-target: the broadcast threads keep their 10s
-//!   cadence; a re-target still fires one broadcast synchronously (matching
-//!   the C++ immediate onBroadcastTimer() call).
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{Mutex, Once};
@@ -33,7 +33,7 @@ use std::time::Duration;
 
 mod rln_core;
 use rln_core as native;
-use rln_core::RlnRegisterPlan;
+use rln_core::{bytes_to_hex, RlnRegisterPlan};
 
 mod generated {
     #![allow(warnings)]
@@ -157,6 +157,12 @@ unsafe impl Send for WalletHandle {}
 static WALLET_CLIENT: Mutex<Option<WalletHandle>> = Mutex::new(None);
 static WALLET_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
 
+/// Lock a mutex, recovering the guard from a poisoned lock (a panicked
+/// broadcast tick must not wedge every later handler).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// One entry per (config_account_id, id_commitment_hex) registration this
 /// session: the reply returned to every caller after the first. Delivery
 /// fires register_member on two paths within seconds (the sync
@@ -169,9 +175,7 @@ static REG_IN_FLIGHT: Mutex<Option<std::collections::HashMap<(String, String), S
     Mutex::new(None);
 
 fn reg_in_flight<R>(f: impl FnOnce(&mut std::collections::HashMap<(String, String), String>) -> R) -> R {
-    let mut guard = REG_IN_FLIGHT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = lock(&REG_IN_FLIGHT);
     f(guard.get_or_insert_with(std::collections::HashMap::new))
 }
 
@@ -184,12 +188,11 @@ fn reg_in_flight<R>(f: impl FnOnce(&mut std::collections::HashMap<(String, Strin
 /// (Creating the client lazily inside a handler pins it to an ephemeral
 /// concurrency:"multi" dispatch worker, and every reply is lost.)
 fn init_wallet_client() {
-    let mut slot = WALLET_CLIENT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut slot = lock(&WALLET_CLIENT);
     if slot.is_some() {
         return;
     }
+    // Infallible in practice: both inputs are compile-time constants with no NULs.
     let (Ok(target), Ok(origin)) = (CString::new(WALLET_MODULE), CString::new("core")) else {
         return;
     };
@@ -206,9 +209,7 @@ fn init_wallet_client() {
         return;
     }
     *slot = Some(WalletHandle(raw));
-    *WALLET_OWNER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::thread::current().id());
+    *lock(&WALLET_OWNER) = Some(std::thread::current().id());
 }
 
 /// Reply slot for one in-flight wallet invoke: the trampoline reclaims the
@@ -257,9 +258,7 @@ fn lp_result_to_string(raw: &str) -> String {
 ///   the owner thread whenever it pumps.
 fn wallet_call(method: &str, args: &serde_json::Value, timeout_ms: c_int) -> String {
     let client = {
-        let slot = WALLET_CLIENT
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = lock(&WALLET_CLIENT);
         match slot.as_ref() {
             Some(h) => h.0,
             None => {
@@ -272,12 +271,11 @@ fn wallet_call(method: &str, args: &serde_json::Value, timeout_ms: c_int) -> Str
         CString::new(method),
         CString::new(args.to_string()),
     ) else {
+        eprintln!("wallet_call: {method} args not CString-safe");
         return String::new();
     };
 
-    let on_owner_thread = WALLET_OWNER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    let on_owner_thread = lock(&WALLET_OWNER)
         .map(|id| id == std::thread::current().id())
         .unwrap_or(false);
     if on_owner_thread {
@@ -355,28 +353,22 @@ fn wallet_call(method: &str, args: &serde_json::Value, timeout_ms: c_int) -> Str
 
 // ------------------------------------------------------------------- helpers
 
-fn bytes_to_hex(data: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(data.len() * 2);
-    for b in data {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
+/// Trim whitespace and strip an optional 0x/0X prefix — the C++ modules'
+/// shared prefix handling (hexToBytes and resolveAccountId).
+fn strip_hex_prefix(s: &str) -> &str {
+    let trimmed = s.trim();
+    if trimmed.len() >= 2 && (trimmed.starts_with("0x") || trimmed.starts_with("0X")) {
+        &trimmed[2..]
+    } else {
+        trimmed
     }
-    out
 }
 
 /// Mirrors the C++ hexToBytes(hex, out, expectedLength): trims whitespace,
 /// strips an optional 0x/0X prefix, requires an even number of hex digits,
 /// and (when expected_len is given) an exact decoded length.
 fn hex_to_bytes(hex: &str, expected_len: Option<usize>) -> Option<Vec<u8>> {
-    let trimmed = hex.trim();
-    let digits = if trimmed.len() >= 2
-        && (trimmed.starts_with("0x") || trimmed.starts_with("0X"))
-    {
-        &trimmed[2..]
-    } else {
-        trimmed
-    };
+    let digits = strip_hex_prefix(hex);
     if digits.len() % 2 != 0 {
         return None;
     }
@@ -407,14 +399,7 @@ fn hex_to_bytes32(hex: &str) -> Option<[u8; 32]> {
 /// else goes to the wallet's account_id_from_base58 (the ORIGINAL untrimmed
 /// id, as in C++). Empty string on failure.
 fn resolve_account_id(id: &str) -> String {
-    let trimmed = id.trim();
-    let stripped = if trimmed.len() >= 2
-        && (trimmed.starts_with("0x") || trimmed.starts_with("0X"))
-    {
-        &trimmed[2..]
-    } else {
-        trimmed
-    };
+    let stripped = strip_hex_prefix(id);
     if stripped.len() == 64 {
         return stripped.to_string();
     }
@@ -543,18 +528,55 @@ fn resolve_config_context(config_account_id: &str, who: &str) -> Option<RlnConfi
     })
 }
 
-/// Convert risc0-serde LE instruction bytes into the u32-word JSON array that
-/// `send_generic_public_transaction` expects. `None` if not word-aligned.
-fn instruction_words(instruction_bytes: &[u8]) -> Option<Vec<serde_json::Value>> {
-    if instruction_bytes.len() % 4 != 0 {
+/// The risc0-serde u32 instruction words as the JSON array
+/// `send_generic_public_transaction` expects.
+fn words_to_json(words: &[u32]) -> Vec<serde_json::Value> {
+    words.iter().map(|&w| serde_json::Value::from(w)).collect()
+}
+
+/// Submit one `send_generic_public_transaction` — the frozen 4-element args
+/// array `[account_ids, signing_reqs, instruction_words, program_id]` — with
+/// the C++ module's 180s timeout (a sequencer submit can far outlive the 20s
+/// protocol default). `None` = failed, already logged.
+fn send_generic_tx(
+    who: &str,
+    account_ids: Vec<String>,
+    signing_reqs: Vec<bool>,
+    instruction_words: Vec<serde_json::Value>,
+    program_id_hex: String,
+) -> Option<String> {
+    let send_result = wallet_call(
+        "send_generic_public_transaction",
+        &serde_json::json!([account_ids, signing_reqs, instruction_words, program_id_hex]),
+        TX_TIMEOUT_MS,
+    );
+    if send_result.is_empty() {
+        eprintln!("{who}: transaction failed");
         return None;
     }
-    Some(
-        instruction_bytes
-            .chunks_exact(4)
-            .map(|c| serde_json::Value::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]])))
-            .collect(),
-    )
+    Some(send_result)
+}
+
+/// Shared mint_tokens / claim_tokens entry: reject negative amounts, resolve
+/// the config context and the destination account. `None` = failed, already
+/// logged. Returns `(amount as u128, config context, dest 64-hex)`.
+fn funding_prologue(
+    who: &str,
+    config_account_id: &str,
+    dest_account_id: &str,
+    amount: i64,
+) -> Option<(u128, RlnConfigContext, String)> {
+    if amount < 0 {
+        eprintln!("{who}: negative amount");
+        return None;
+    }
+    let ctx = resolve_config_context(config_account_id, who)?;
+    let dest_hex = resolve_account_id(dest_account_id);
+    if dest_hex.is_empty() {
+        eprintln!("{who}: failed to resolve dest account");
+        return None;
+    }
+    Some((amount as u128, ctx, dest_hex))
 }
 
 fn derive_register_plan(
@@ -565,8 +587,8 @@ fn derive_register_plan(
     let accounts_plan =
         match native::merkle_proofs_plan(&ctx.config_data, &ctx.program_owner, &[]) {
             Ok(p) => p,
-            Err(_) => {
-                eprintln!("{who}: derive tree main failed");
+            Err(e) => {
+                eprintln!("{who}: derive tree main failed: {e}");
                 return None;
             }
         };
@@ -582,8 +604,8 @@ fn derive_register_plan(
         id_commitment,
     ) {
         Ok(plan) => Some(plan),
-        Err(_) => {
-            eprintln!("{who}: register_plan FFI failed");
+        Err(e) => {
+            eprintln!("{who}: register_plan FFI failed: {e}");
             None
         }
     }
@@ -596,6 +618,26 @@ fn roots_to_json_array(roots: &[[u8; 32]]) -> serde_json::Value {
             .map(|r| serde_json::Value::String(bytes_to_hex(r)))
             .collect(),
     )
+}
+
+/// Serialize proofs plus the shared `valid_roots` array to the wire JSON.
+/// `serde_json::Value` objects are BTreeMaps, so keys serialize
+/// alphabetically (QJsonObject parity) — byte-identical to the former
+/// serialize→parse→augment string round-trip (pinned by
+/// `augmented_proofs_match_legacy_string_roundtrip`).
+fn proofs_with_roots_json(proofs: &[native::ProofJson], roots_array: &serde_json::Value) -> String {
+    let augmented: Vec<serde_json::Value> = proofs
+        .iter()
+        .map(|p| {
+            let mut obj = match serde_json::to_value(p) {
+                Ok(serde_json::Value::Object(obj)) => obj,
+                _ => serde_json::Map::new(),
+            };
+            obj.insert("valid_roots".to_string(), roots_array.clone());
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::Value::Array(augmented).to_string()
 }
 
 // ------------------------------------------------------------- method bodies
@@ -674,15 +716,15 @@ fn get_merkle_proofs_impl(config_account_id: &str, leaf_indices_json: &str) -> S
         }
     };
 
-    // 4-7. Stable-snapshot loop (see the C++ module for the full rationale):
-    // the wallet's reads aren't snapshot-bound, so the subtree reads are
-    // bracketed by two main-account fetches; equal valid_roots windows prove
-    // no mutation occurred and the (main, subtree) pair is consistent.
+    // 4-7. Stable-snapshot loop: the wallet's reads aren't snapshot-bound, so
+    // the subtree reads are bracketed by two main-account fetches; equal
+    // valid_roots windows prove no mutation occurred and the (main, subtree)
+    // pair is consistent.
     const K_MAX_SNAPSHOT_ATTEMPTS: usize = 5;
     let main_hex = bytes_to_hex(&plan.main_account_id);
     let subtree_count = plan.subtree_count as usize;
 
-    let mut proofs_json = String::new();
+    let mut proofs: Vec<native::ProofJson> = Vec::new();
     let mut stable_roots: Vec<[u8; 32]> = Vec::new();
     let mut consistent = false;
 
@@ -694,8 +736,8 @@ fn get_merkle_proofs_impl(config_account_id: &str, leaf_indices_json: &str) -> S
         };
         let roots_a = match native::get_valid_roots(&main_data) {
             Ok(r) => r,
-            Err(_) => {
-                eprintln!("get_merkle_proofs: get_valid_roots(A) FFI error");
+            Err(e) => {
+                eprintln!("get_merkle_proofs: get_valid_roots(A) FFI error: {e}");
                 return String::new();
             }
         };
@@ -730,8 +772,8 @@ fn get_merkle_proofs_impl(config_account_id: &str, leaf_indices_json: &str) -> S
         };
         let roots_b = match native::get_valid_roots(&main_data_b) {
             Ok(r) => r,
-            Err(_) => {
-                eprintln!("get_merkle_proofs: get_valid_roots(B) FFI error");
+            Err(e) => {
+                eprintln!("get_merkle_proofs: get_valid_roots(B) FFI error: {e}");
                 return String::new();
             }
         };
@@ -747,8 +789,8 @@ fn get_merkle_proofs_impl(config_account_id: &str, leaf_indices_json: &str) -> S
             .iter()
             .map(|(id, data)| (*id, data.as_slice()))
             .collect();
-        proofs_json = match native::merkle_proofs_exec(&main_data, &subtree_refs, &leaf_indices) {
-            Ok(json) => json,
+        proofs = match native::merkle_proofs_exec(&main_data, &subtree_refs, &leaf_indices) {
+            Ok(p) => p,
             Err(e) => {
                 eprintln!("get_merkle_proofs: exec FFI error: {e}");
                 return String::new();
@@ -769,21 +811,7 @@ fn get_merkle_proofs_impl(config_account_id: &str, leaf_indices_json: &str) -> S
     }
 
     // Inject valid_roots into each proof object so a single RPC returns both.
-    let roots_array = roots_to_json_array(&stable_roots);
-    let proofs = serde_json::from_str::<serde_json::Value>(&proofs_json)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    let augmented: Vec<serde_json::Value> = proofs
-        .into_iter()
-        .map(|p| {
-            // C++ QJsonValue::toObject(): non-objects become empty objects.
-            let mut obj = p.as_object().cloned().unwrap_or_default();
-            obj.insert("valid_roots".to_string(), roots_array.clone());
-            serde_json::Value::Object(obj)
-        })
-        .collect();
-    serde_json::Value::Array(augmented).to_string()
+    proofs_with_roots_json(&proofs, &roots_to_json_array(&stable_roots))
 }
 
 // ------------------------------------------------------------ broadcast loops
@@ -799,10 +827,7 @@ static PROOF_BCAST_TARGET: Mutex<Option<(String, i64)>> = Mutex::new(None);
 static PROOF_BCAST_THREAD: Once = Once::new();
 
 fn root_broadcast_tick() {
-    let target = ROOT_BCAST_TARGET
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
+    let target = lock(&ROOT_BCAST_TARGET).clone();
     let Some(account_id) = target else { return };
     let roots = get_valid_roots_impl(&account_id);
     if roots.is_empty() {
@@ -813,10 +838,7 @@ fn root_broadcast_tick() {
 }
 
 fn proof_broadcast_tick() {
-    let target = PROOF_BCAST_TARGET
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
+    let target = lock(&PROOF_BCAST_TARGET).clone();
     let Some((config_account, leaf_index)) = target else { return };
     let indices_json = format!("[{leaf_index}]");
     let proofs_json = get_merkle_proofs_impl(&config_account, &indices_json);
@@ -852,9 +874,7 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
     }
 
     fn start_root_broadcast(&mut self, rln_account_id: String) -> serde_json::Value {
-        *ROOT_BCAST_TARGET
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rln_account_id);
+        *lock(&ROOT_BCAST_TARGET) = Some(rln_account_id);
         ROOT_BCAST_THREAD.call_once(|| {
             std::thread::spawn(|| loop {
                 std::thread::sleep(BROADCAST_INTERVAL);
@@ -876,10 +896,7 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         config_account_id: String,
         leaf_index: i64,
     ) -> serde_json::Value {
-        *PROOF_BCAST_TARGET
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some((config_account_id, leaf_index));
+        *lock(&PROOF_BCAST_TARGET) = Some((config_account_id, leaf_index));
         PROOF_BCAST_THREAD.call_once(|| {
             std::thread::spawn(|| loop {
                 std::thread::sleep(BROADCAST_INTERVAL);
@@ -895,7 +912,12 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         // there reads unowned memory (UB). The port pins that case to an
         // all-zero seed — deterministic, and identical for every well-formed
         // 32-byte input.
-        let seed = hex_to_bytes32(&wallet_account_id).unwrap_or([0u8; 32]);
+        let seed = hex_to_bytes32(&wallet_account_id).unwrap_or_else(|| {
+            eprintln!(
+                "generate_identity: input is not 64-hex; falling back to the all-zero seed"
+            );
+            [0u8; 32]
+        });
         let (id_commitment, id_secret_hash) = native::generate_identity(&seed);
         serde_json::json!({
             "id_commitment": bytes_to_hex(&id_commitment),
@@ -992,45 +1014,21 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         }
 
         // SPEL `Instruction::Register` needs all of {tree_id, id_commitment,
-        // rate_limit, subtree_id}. tree_id sits at offset 32..64 of the
-        // ConfigState borsh layout.
-        if ctx.config_data.len() < 64 {
-            eprintln!("register_member: configData too short for tree_id");
-            reg_in_flight(|m| m.remove(&reg_key));
-            return String::new();
-        }
-        let mut tree_id = [0u8; 32];
-        tree_id.copy_from_slice(&ctx.config_data[32..64]);
-        let instruction_bytes = match native::register_build_instruction(
-            &tree_id,
+        // rate_limit, subtree_id}; the plan carries tree_id from the config.
+        let instruction = match native::register_build_instruction(
+            &plan.tree_id,
             &id_commitment,
             rate_limit as u64,
             plan.subtree_id,
         ) {
-            Ok(bytes) => bytes,
+            Ok(words) => words,
             Err(e) => {
                 eprintln!("register_member: build_instruction FFI error: {e}");
                 reg_in_flight(|m| m.remove(&reg_key));
                 return String::new();
             }
         };
-
-        // Instruction bytes are u32 words serialized LE; upstream's
-        // send_generic_public_transaction takes the u32 words directly.
-        if instruction_bytes.len() % 4 != 0 {
-            eprintln!(
-                "register_member: instruction not word-aligned {}",
-                instruction_bytes.len()
-            );
-            reg_in_flight(|m| m.remove(&reg_key));
-            return String::new();
-        }
-        let instruction_words: Vec<serde_json::Value> = instruction_bytes
-            .chunks_exact(4)
-            .map(|c| {
-                serde_json::Value::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            })
-            .collect();
+        let instruction_words = words_to_json(&instruction);
 
         // Account order must match methods/guest/src/program.rs::register:
         //   config, tree_main, user_holding (signer), treasury, bottom_subtree,
@@ -1050,27 +1048,16 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
             .map(|a| *a == user_holding_hex)
             .collect();
 
-        let program_id_hex = bytes_to_hex(&ctx.program_owner);
-
-        // Submit via the upstream program-id-based generic transaction, with
-        // the C++ module's 180s timeout (a sequencer submit can far outlive
-        // the 20s protocol default).
-        let send_result = wallet_call(
-            "send_generic_public_transaction",
-            &serde_json::json!([
-                account_ids,
-                signing_reqs,
-                instruction_words,
-                program_id_hex
-            ]),
-            TX_TIMEOUT_MS,
-        );
-
-        if send_result.is_empty() {
-            eprintln!("register_member: transaction failed");
+        let Some(send_result) = send_generic_tx(
+            "register_member",
+            account_ids,
+            signing_reqs,
+            instruction_words,
+            bytes_to_hex(&ctx.program_owner),
+        ) else {
             reg_in_flight(|m| m.remove(&reg_key));
             return String::new();
-        }
+        };
 
         // Return once the sequencer accepts the submission; don't block on
         // confirmation — next_leaf_index is only a pre-submit estimate.
@@ -1127,20 +1114,12 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         dest_account_id: String,
         amount: i64,
     ) -> String {
-        if amount < 0 {
-            eprintln!("mint_tokens: negative amount");
-            return String::new();
-        }
-        let amount_u128 = amount as u128;
-        let Some(ctx) = resolve_config_context(&config_account_id, "mint_tokens") else {
+        let Some((amount_u128, ctx, dest_hex)) =
+            funding_prologue("mint_tokens", &config_account_id, &dest_account_id, amount)
+        else {
             return String::new();
         };
-        let dest_hex = resolve_account_id(&dest_account_id);
-        if dest_hex.is_empty() {
-            eprintln!("mint_tokens: failed to resolve dest account");
-            return String::new();
-        }
-        let (definition_id, token_program_id, instruction_bytes) =
+        let (definition_id, token_program_id, instruction) =
             match native::token_mint_plan(&ctx.config_data, amount_u128) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1148,31 +1127,20 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
                     return String::new();
                 }
             };
-        let Some(words) = instruction_words(&instruction_bytes) else {
-            eprintln!("mint_tokens: instruction not word-aligned");
-            return String::new();
-        };
         let definition_hex = bytes_to_hex(&definition_id);
         // Token program's Mint contract: [definition (mint authority, signer),
         // destination holder]. Both sign — a fresh destination is claimed
         // Claim::Authorized, and the wallet drops signer flags for keys it
         // doesn't hold (so already-initialized external destinations still work).
-        let account_ids = vec![definition_hex.clone(), dest_hex];
-        let signing_reqs = vec![true, true];
-        let send_result = wallet_call(
-            "send_generic_public_transaction",
-            &serde_json::json!([
-                account_ids,
-                signing_reqs,
-                words,
-                bytes_to_hex(&token_program_id)
-            ]),
-            TX_TIMEOUT_MS,
-        );
-        if send_result.is_empty() {
-            eprintln!("mint_tokens: transaction failed");
+        let Some(send_result) = send_generic_tx(
+            "mint_tokens",
+            vec![definition_hex.clone(), dest_hex],
+            vec![true, true],
+            words_to_json(&instruction),
+            bytes_to_hex(&token_program_id),
+        ) else {
             return String::new();
-        }
+        };
         serde_json::json!({
             "tx_result": send_result,
             "definition": definition_hex,
@@ -1187,20 +1155,12 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         dest_account_id: String,
         amount: i64,
     ) -> String {
-        if amount < 0 {
-            eprintln!("claim_tokens: negative amount");
-            return String::new();
-        }
-        let amount_u128 = amount as u128;
-        let Some(ctx) = resolve_config_context(&config_account_id, "claim_tokens") else {
+        let Some((amount_u128, ctx, dest_hex)) =
+            funding_prologue("claim_tokens", &config_account_id, &dest_account_id, amount)
+        else {
             return String::new();
         };
-        let dest_hex = resolve_account_id(&dest_account_id);
-        if dest_hex.is_empty() {
-            eprintln!("claim_tokens: failed to resolve dest account");
-            return String::new();
-        }
-        let (payment_def_id, instruction_bytes) =
+        let (payment_def_id, instruction) =
             match native::claim_plan(&ctx.config_data, &ctx.program_owner, amount_u128) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1208,30 +1168,19 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
                     return String::new();
                 }
             };
-        let Some(words) = instruction_words(&instruction_bytes) else {
-            eprintln!("claim_tokens: instruction not word-aligned");
-            return String::new();
-        };
         let payment_def_hex = bytes_to_hex(&payment_def_id);
         // Claim tx accounts: [config, payment_def, dest (signer)]; config +
         // payment_def are program-authorized PDAs, only the destination signs.
         // Submitted under the REGISTRATION program (the config's program_owner).
-        let account_ids = vec![ctx.config_hex.clone(), payment_def_hex.clone(), dest_hex];
-        let signing_reqs = vec![false, false, true];
-        let send_result = wallet_call(
-            "send_generic_public_transaction",
-            &serde_json::json!([
-                account_ids,
-                signing_reqs,
-                words,
-                bytes_to_hex(&ctx.program_owner)
-            ]),
-            TX_TIMEOUT_MS,
-        );
-        if send_result.is_empty() {
-            eprintln!("claim_tokens: transaction failed");
+        let Some(send_result) = send_generic_tx(
+            "claim_tokens",
+            vec![ctx.config_hex.clone(), payment_def_hex.clone(), dest_hex],
+            vec![false, false, true],
+            words_to_json(&instruction),
+            bytes_to_hex(&ctx.program_owner),
+        ) else {
             return String::new();
-        }
+        };
         serde_json::json!({
             "tx_result": send_result,
             "payment_definition": payment_def_hex,
@@ -1312,6 +1261,46 @@ mod tests {
         assert_eq!(leaf.len(), 64);
         assert_eq!(leaf, imp.compute_rate_commitment(idc, 100));
         assert_eq!(imp.compute_rate_commitment("nothex".into(), 100), "");
+    }
+
+    // Pins proofs_with_roots_json to the byte output of the legacy path
+    // (serialize the structs to a string, re-parse as Value, insert
+    // valid_roots, re-serialize) that the C++-parity wire format was
+    // originally validated against.
+    #[test]
+    fn augmented_proofs_match_legacy_string_roundtrip() {
+        let proofs = vec![native::ProofJson {
+            leaf: "aa".repeat(32),
+            root: "bb".repeat(32),
+            leaf_index: 5,
+            depth: 2,
+            path_elements: vec!["cc".repeat(32), "dd".repeat(32)],
+            path_indices: vec![1, 0],
+        }];
+        let roots_array = roots_to_json_array(&[[0xEE; 32]]);
+
+        let legacy_json = serde_json::to_string(&proofs).unwrap();
+        let legacy_parsed = serde_json::from_str::<serde_json::Value>(&legacy_json)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let legacy: Vec<serde_json::Value> = legacy_parsed
+            .into_iter()
+            .map(|p| {
+                let mut obj = p.as_object().cloned().unwrap_or_default();
+                obj.insert("valid_roots".to_string(), roots_array.clone());
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+        let legacy_str = serde_json::Value::Array(legacy).to_string();
+
+        let current_str = proofs_with_roots_json(&proofs, &roots_array);
+        assert_eq!(current_str, legacy_str);
+        // Alphabetical keys (QJsonObject parity), valid_roots last.
+        assert!(current_str.starts_with("[{\"depth\":2,\"leaf\":\"aa"));
+        assert!(current_str.contains("\"root\":\"bb"));
+        let expected_tail = format!("\"valid_roots\":[\"{}\"]}}]", "ee".repeat(32));
+        assert!(current_str.ends_with(&expected_tail));
     }
 
     #[test]

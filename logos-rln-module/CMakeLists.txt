@@ -39,8 +39,8 @@ message(STATUS "Found liblogos_rln_module Rust static library: ${LIBLOGOS_RLN_MO
 # calls; its own lp_* undefineds resolve against the logos-protocol archive
 # already in the plugin link (via logos-qt-sdk). Re-mention the protocol
 # target after the Rust archive so single-pass linkers (GNU ld) see it later
-# on the line. Unlike the wallet spike, no lssa crates are in the tree, so no
-# pyo3/libpython or Metal-prover bindings are needed.
+# on the line. No lssa crates are in the tree, so no pyo3/libpython or
+# Metal-prover bindings are needed.
 target_link_libraries(liblogos_rln_module_module_plugin PRIVATE
     ${LIBLOGOS_RLN_MODULE_RUST}
     logos-protocol::logos_protocol

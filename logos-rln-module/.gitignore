@@ -1,7 +1,7 @@
 target/
 result
 result-*
-# Staged source copies (see README "Staged sources") — recreate via rsync.
+# Staged source copies (see README "Staged sources") — recreate via ./stage-sources.sh.
 # The lez-rln-src/Cargo.toml workspace shim IS committed (lint inheritance).
 /logos-rust-sdk-src/
 /rust-lib/lez-rln-src/rln-layouts/

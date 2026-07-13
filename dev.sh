@@ -17,6 +17,10 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 # --- Provision the pinned sequencer source (clone-and-go, no manual placement) ---
+if [ -d "$SEQ_SRC/.git" ] && ! git -C "$SEQ_SRC" describe --tags --exact-match 2>/dev/null | grep -qx "$LEZ_REF"; then
+  echo "Cached sequencer at $SEQ_SRC is not $LEZ_REF — refreshing..."
+  rm -rf "$SEQ_SRC"
+fi
 if [ ! -d "$SEQ_SRC/.git" ]; then
   echo "Fetching sequencer source ($LEZ_REF) into $SEQ_SRC ..."
   rm -rf "$SEQ_SRC"

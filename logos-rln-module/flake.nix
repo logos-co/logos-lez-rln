@@ -26,20 +26,19 @@
       # logos-rust-sdk-src) into the sandbox, so path-deps must live inside
       # rust-lib/ to survive the builder's vendoring.
       #
-      # Unlike the wallet spike, no lssa crates are in the tree (rln-layouts is
-      # borsh-only), so no circuits/rapidsnark rustEnv pins and no pyo3 are
-      # needed. RISC0_SKIP_BUILD_KERNELS comes from metadata nix.rust.env
+      # No lssa crates are in the tree (rln-layouts is borsh-only), so no
+      # circuits/rapidsnark rustEnv pins and no pyo3 are needed.
+      # RISC0_SKIP_BUILD_KERNELS comes from metadata nix.rust.env
       # (risc0-zkvm is serde-only here; no proving).
-      module = system:
-        logos-module-builder.lib.mkLogosModule {
-          src = ./.;
-          configFile = ./metadata.json;
-          flakeInputs = inputs;
-        };
+      module = logos-module-builder.lib.mkLogosModule {
+        src = ./.;
+        configFile = ./metadata.json;
+        flakeInputs = inputs;
+      };
     in
     {
       packages = forAllSystems (system:
-        let m = (module system).packages.${system};
+        let m = module.packages.${system};
         in m // {
           liblogos_rln_module = m.default;
         });

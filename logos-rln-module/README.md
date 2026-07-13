@@ -1,14 +1,13 @@
 # logos-rln-module — the RLN module (Rust)
 
-`liblogos_rln_module`, built on logos-rust-sdk / logos-module-builder. This is
-**the** RLN module — it replaces the removed hand-written C++/Qt
-`logos-rln-module`, with the same module name, the same 11 methods
-(register/proof/identity + the funding methods `mint_tokens`/`claim_tokens`/
-`get_token_balance`) and the same two broadcast events, byte-level wire parity
-verified against the old C++ module. The RLN register / proof / funding logic
-lives in-crate (`rust-lib/src/rln_core.rs`, plain Rust) — there is no C ABI and
-no separate `lez-rln-ffi` crate. Gated by the mix_lez_chat sim at 15/15 on
-local and the public testnet (faucet funding).
+`liblogos_rln_module`, built on logos-rust-sdk / logos-module-builder. It is
+wire-compatible with the C++/Qt module it replaced — same module name, same
+11 methods (register/proof/identity + the funding methods
+`mint_tokens`/`claim_tokens`/`get_token_balance`), same two broadcast events —
+so existing consumers (delivery module, sim) work unchanged. The RLN
+register / proof / funding logic lives in-crate (`rust-lib/src/rln_core.rs`,
+plain Rust); there is no C ABI. Acceptance gate: the mix_lez_chat sim (see
+"Sim acceptance" below).
 
 ## Layout
 
@@ -33,15 +32,15 @@ mkLogosModule's `rustCrateSrc` stages only the crate dir (plus
 `logos-rust-sdk-src`) into the nix sandbox, so path-deps must live inside the
 module tree. Two staged copies are required and are NOT in git:
 
-```sh
-# 1. The SDK (logos-co/logos-rust-sdk @ e288fb0 or later):
-git clone https://github.com/logos-co/logos-rust-sdk /tmp/logos-rust-sdk
-rsync -a --delete --exclude .git --exclude target --exclude doctests \
-    --exclude result /tmp/logos-rust-sdk/ logos-rust-sdk-src/
+- `logos-rust-sdk-src/` — logos-co/logos-rust-sdk at the rev pinned in
+  `stage-sources.sh` (the rev the builder's codegen comes from).
+- `rust-lib/lez-rln-src/rln-layouts/` — a copy of `../lez-rln/rln-layouts`
+  (rln_core depends on it).
 
-# 2. The shared borsh-layout crate (from this repo — rln_core depends on it):
-rsync -a --delete --exclude target --exclude .git \
-    ../lez-rln/rln-layouts/ rust-lib/lez-rln-src/rln-layouts/
+Refresh both — rsync plus a diff verification that fails on drift — with:
+
+```sh
+./stage-sources.sh
 ```
 
 The committed `rust-lib/lez-rln-src/Cargo.toml` is a synthetic workspace root

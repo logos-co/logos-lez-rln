@@ -20,6 +20,10 @@
 
     logos-module-viewer.url = "github:logos-co/logos-module-viewer";
 
+    # Path input: its logos-module-builder closure inlines into flake.lock
+    # (roughly doubling it). Deliberately no nested `follows` — the duplicated
+    # nixpkgs nodes already lock our same rev, the builder pins its own
+    # rust-overlay/toolchain, and dedup is only reachable upstream in the builder.
     logos-rln-module.url = "path:./logos-rln-module";
   };
 
@@ -28,7 +32,6 @@
       self,
       nixpkgs,
       rust-overlay,
-      logos-core,
       logos-wallet-module,
       logos-module-viewer,
       logos-rln-module,
@@ -82,9 +85,7 @@
           pkgs = mkPkgs system;
           logosRlnModuleLib = self.packages.${system}.logos-rln-module;
           logosModuleViewerPackage = logos-module-viewer.packages.${system}.default;
-          extension = if pkgs.stdenv.isDarwin then "dylib"
-            else if pkgs.stdenv.hostPlatform.isWindows then "dll"
-            else "so";
+          extension = if pkgs.stdenv.isDarwin then "dylib" else "so";
           inspectModule = {
             type = "app";
             program =

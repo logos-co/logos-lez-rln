@@ -1,9 +1,11 @@
-; liblogos_rln_module — Rust port of the C++ RLN module
-; (logos-rln-module/src/logos_rln_module.cpp). Wire-compatible: method
-; names, QString/int wire types, JSON output shapes, empty-string errors
-; and the two broadcast events all mirror the C++ Q_INVOKABLEs.
-; initLogos(LogosAPI*) is deliberately NOT ported: it was an in-process
-; injection hack, not wire-callable; Rust modules use modules()/context().
+; liblogos_rln_module — Rust RLN module. Wire-compatible with the C++/Qt
+; module it replaced: method names, QString/int wire types, JSON output
+; shapes, empty-string errors and the two broadcast events all match the
+; old Q_INVOKABLE surface, which existing consumers were built against.
+; (Original C++ source: git show 4b403c1:logos-rln-module/src/logos_rln_module.cpp)
+; The C++ module's initLogos(LogosAPI*) has no equivalent here: it was an
+; in-process injection hack, not wire-callable; Rust modules use
+; modules()/context().
 module liblogos_rln_module {
   version "1.0.0"
   description "RLN Merkle Root Provider Module (Rust port)"

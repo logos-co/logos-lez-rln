@@ -24,9 +24,8 @@ panic = "abort"
 # lez-rln-src/rln-layouts (a copy of ../../lez-rln/rln-layouts). The staged copy
 # must live INSIDE this crate dir: mkLogosModule's rustCrateSrc stages only the
 # crate directory (plus logos-rust-sdk-src), so a ../../lez-rln path dep cannot
-# survive the builder's vendoring. Refresh with:
-#   rsync -a --delete --exclude target --exclude .git \
-#     ../../lez-rln/rln-layouts/ lez-rln-src/rln-layouts/
+# survive the builder's vendoring. Refresh with ../stage-sources.sh, which
+# also verifies the staged copies and holds the SDK rev pin.
 rln-layouts = { path = "lez-rln-src/rln-layouts" }
 token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
 rln = { version = "2.0.2", default-features = false, features = ["stateless"] }

@@ -1,11 +1,10 @@
-//! RLN core logic — pure Rust, in-process (formerly lez-rln-ffi's `native`
-//! module + funding plans). No C ABI: this crate is the RLN module itself, so
-//! the register/proof/funding logic lives here directly and is called from
-//! `lib.rs` as plain Rust.
+//! RLN core logic — pure Rust, in-process. No C ABI: this crate is the RLN
+//! module itself, so the register/proof/funding logic lives here directly and
+//! is called from `lib.rs` as plain Rust.
 
 use borsh::BorshDeserialize;
 use rln_layouts::{
-    combine_seeds, label_seed,
+    combine_seeds, label_seed, u32_seed,
     MembershipState, TreeMainLayout, ROOT_HISTORY_SIZE,
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA,
     TOP_DEPTH, TREE_DEPTH, SUBTREE_LEAVES,
@@ -14,18 +13,16 @@ use rln_layouts::{
 use serde::Serialize;
 use sha2::{Sha256, Digest};
 
-/// Maximum tree depth for proof arrays.
-pub const RLN_TREE_DEPTH: usize = 20;
 pub const MAX_SUBTREES_PER_CALL: usize = 64;
 
-/// A single merkle proof (formerly the C-ABI `RlnMerkleProof`, now plain Rust).
+/// A single merkle proof.
 pub struct RlnMerkleProof {
     pub leaf: [u8; 32],
     pub root: [u8; 32],
     pub leaf_index: u64,
     pub depth: u32,
-    pub path_elements: [[u8; 32]; RLN_TREE_DEPTH],
-    pub path_indices: [u8; RLN_TREE_DEPTH],
+    pub path_elements: [[u8; 32]; TREE_DEPTH],
+    pub path_indices: [u8; TREE_DEPTH],
 }
 
 /// The accounts a merkle-proofs call must fetch.
@@ -46,6 +43,9 @@ pub struct RlnRegisterPlan {
     /// Membership PDA from (program_owner, tree_id, id_commitment).
     /// Required by the `Register` instruction's `init`-marked membership account.
     pub membership_account_id: [u8; 32],
+    /// The config's tree_id (`CONFIG_OFFSET_TREE_ID`), carried so callers
+    /// building the `Register` instruction never re-slice raw config bytes.
+    pub tree_id: [u8; 32],
     pub subtree_id: u32,
     pub next_leaf_index: u64,
 }
@@ -111,16 +111,12 @@ fn derive_pda(program_id: &[u8; 32], pda_seed: &[u8; 32]) -> [u8; 32] {
     hash.into()
 }
 
-/// risc0-serde an instruction into LE u32-word bytes — the deployed programs'
-/// wire format (same convention as `register_build_instruction`).
-fn serialize_instruction<T: Serialize>(instruction: &T) -> Result<Vec<u8>, RlnError> {
-    let u32_vec =
-        risc0_zkvm::serde::to_vec(instruction).map_err(|_| RlnError::SerializationError)?;
-    let mut bytes: Vec<u8> = Vec::with_capacity(u32_vec.len() * 4);
-    for word in &u32_vec {
-        bytes.extend_from_slice(&word.to_le_bytes());
-    }
-    Ok(bytes)
+/// risc0-serde an instruction into its u32 words — the deployed programs'
+/// wire format (LE words on the wire; `send_generic_public_transaction`
+/// takes the words directly, so no byte flatten/re-chunk round-trip exists
+/// to get misaligned).
+fn serialize_instruction<T: Serialize>(instruction: &T) -> Result<Vec<u32>, RlnError> {
+    risc0_zkvm::serde::to_vec(instruction).map_err(|_| RlnError::SerializationError)
 }
 
 /// Parse tree-main account data and return the valid roots.
@@ -243,8 +239,10 @@ pub fn merkle_proofs_plan(
 
     let mut unique_ids: Vec<u32> = leaf_indices
         .iter()
-        .map(|&idx| (idx / SUBTREE_LEAVES as u64) as u32)
-        .collect();
+        .map(|&idx| {
+            u32::try_from(idx / SUBTREE_LEAVES as u64).map_err(|_| RlnError::InvalidLeafIndex)
+        })
+        .collect::<Result<_, _>>()?;
     unique_ids.sort_unstable();
     unique_ids.dedup();
 
@@ -260,11 +258,9 @@ pub fn merkle_proofs_plan(
     };
 
     for (i, &subtree_id) in unique_ids.iter().enumerate() {
-        let mut subtree_id_seed = [0u8; 32];
-        subtree_id_seed[..4].copy_from_slice(&subtree_id.to_le_bytes());
         plan.subtree_account_ids[i] = derive_pda(
             program_owner,
-            &combine_seeds(&[&label_seed("subtree"), tree_id, &subtree_id_seed]),
+            &combine_seeds(&[&label_seed("subtree"), tree_id, &u32_seed(subtree_id)]),
         );
         plan.subtree_ids[i] = subtree_id;
     }
@@ -272,30 +268,43 @@ pub fn merkle_proofs_plan(
     Ok(plan)
 }
 
+/// One wire proof object. Serialized by the caller via `serde_json::Value`
+/// (BTreeMap ⇒ alphabetical keys, the frozen QJsonObject order), so field
+/// order here is NOT wire-significant.
 #[derive(Serialize)]
-struct ProofJson {
-    leaf: String,
-    root: String,
-    leaf_index: u64,
-    depth: u32,
-    path_elements: Vec<String>,
-    path_indices: Vec<u8>,
+pub(crate) struct ProofJson {
+    pub(crate) leaf: String,
+    pub(crate) root: String,
+    pub(crate) leaf_index: u64,
+    pub(crate) depth: u32,
+    pub(crate) path_elements: Vec<String>,
+    pub(crate) path_indices: Vec<u8>,
 }
 
-fn bytes_to_hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
+/// Lowercase hex, no prefix — the module's single hex encoder (lib.rs
+/// imports it for all wire hex).
+pub(crate) fn bytes_to_hex(data: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(data.len() * 2);
+    for b in data {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
 }
 
-/// Phase 2: build all proofs from fetched account data, as a JSON array string.
+/// Phase 2: build all proofs from fetched account data, as typed proof
+/// objects (the caller serializes them together with `valid_roots`).
 pub fn merkle_proofs_exec(
     main_data: &[u8],
     subtrees: &[(u32, &[u8])],
     leaf_indices: &[u64],
-) -> Result<String, RlnError> {
+) -> Result<Vec<ProofJson>, RlnError> {
     let mut proofs = Vec::with_capacity(leaf_indices.len());
 
     for &leaf_index in leaf_indices {
-        let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
+        let subtree_id = u32::try_from(leaf_index / SUBTREE_LEAVES as u64)
+            .map_err(|_| RlnError::InvalidLeafIndex)?;
 
         let subtree_data: &[u8] = subtrees
             .iter()
@@ -319,7 +328,7 @@ pub fn merkle_proofs_exec(
         });
     }
 
-    serde_json::to_string(&proofs).map_err(|_| RlnError::SerializationError)
+    Ok(proofs)
 }
 
 /// Generate an RLN identity from a 32-byte seed. Returns `(id_commitment, id_secret_hash)`.
@@ -377,14 +386,9 @@ pub fn register_plan(
 
     let next_leaf_index = tree_main.next_index();
     let subtree_id = (next_leaf_index / SUBTREE_LEAVES as u64) as u32;
-    let subtree_id_seed = {
-        let mut s = [0u8; 32];
-        s[..4].copy_from_slice(&subtree_id.to_le_bytes());
-        s
-    };
     let subtree_account_id = derive_pda(
         program_owner,
-        &combine_seeds(&[&label_seed("subtree"), tree_id, &subtree_id_seed]),
+        &combine_seeds(&[&label_seed("subtree"), tree_id, &u32_seed(subtree_id)]),
     );
 
     let membership_account_id = derive_pda(
@@ -399,18 +403,19 @@ pub fn register_plan(
         subtree_account_id,
         clock_account_id: rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES,
         membership_account_id,
+        tree_id: *tree_id,
         subtree_id,
         next_leaf_index,
     })
 }
 
-/// Build the serialized `Instruction::Register` payload (risc0-serde, LE words).
+/// Build the `Instruction::Register` payload as risc0-serde u32 words.
 pub fn register_build_instruction(
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     rate_limit: u64,
     subtree_id: u32,
-) -> Result<Vec<u8>, RlnError> {
+) -> Result<Vec<u32>, RlnError> {
     let instruction = rln_layouts::Instruction::Register {
         tree_id: *tree_id,
         id_commitment: *id_commitment,
@@ -459,7 +464,7 @@ pub fn token_holding_info(data: &[u8]) -> Result<([u8; 32], u128), RlnError> {
 pub fn token_mint_plan(
     config_data: &[u8],
     amount: u128,
-) -> Result<([u8; 32], [u8; 32], Vec<u8>), RlnError> {
+) -> Result<([u8; 32], [u8; 32], Vec<u32>), RlnError> {
     if config_data.len() < CONFIG_STATE_MIN_SIZE {
         return Err(RlnError::InvalidConfig);
     }
@@ -483,7 +488,7 @@ pub fn claim_plan(
     config_data: &[u8],
     program_owner: &[u8; 32],
     amount: u128,
-) -> Result<([u8; 32], Vec<u8>), RlnError> {
+) -> Result<([u8; 32], Vec<u32>), RlnError> {
     if config_data.len() < CONFIG_STATE_MIN_SIZE {
         return Err(RlnError::InvalidConfig);
     }
@@ -539,6 +544,21 @@ mod tests {
             "last offset-read field must fit within the pre-policy floor"
         );
         assert!(bytes.len() >= CONFIG_STATE_MIN_SIZE);
+    }
+
+    // Pins the Register instruction's word encoding (risc0-serde: variant
+    // index 3, one word per u8, u64 as lo/hi words) — the exact words the
+    // former Vec<u8> representation flattened to LE bytes and re-chunked.
+    #[test]
+    fn register_instruction_words_pin() {
+        let words = register_build_instruction(&[0xAB; 32], &[0xCD; 32], 0x1_0000_0002, 7).unwrap();
+        assert_eq!(words.len(), 68);
+        assert_eq!(words[0], 3, "Register variant index");
+        assert_eq!(&words[1..33], &[0xABu32; 32], "tree_id, one word per byte");
+        assert_eq!(&words[33..65], &[0xCDu32; 32], "id_commitment");
+        assert_eq!(words[65], 2, "rate_limit low word");
+        assert_eq!(words[66], 1, "rate_limit high word");
+        assert_eq!(words[67], 7, "subtree_id");
     }
 
     #[test]
