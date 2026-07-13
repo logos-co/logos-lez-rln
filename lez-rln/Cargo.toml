@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
   "rln-layouts",
-  "lez-rln-ffi",
 ]
 
 [package]
@@ -69,8 +68,7 @@ rln-layouts = { path = "rln-layouts", default-features = false }
 #   arithmetic_side_effects, indexing_slicing, and the cast-discipline set.
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }
-# deny (not forbid) so a targeted per-item #[allow] remains possible where needed
-# (e.g. the C FFI boundary in lez-rln-ffi).
+# deny (not forbid) so a targeted per-item #[allow] remains possible where needed.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

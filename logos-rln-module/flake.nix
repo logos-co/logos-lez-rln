@@ -19,16 +19,17 @@
       # the delivery module's logos-cpp-sdk pin learns the deferred-result
       # sentinel — see README "Design constraints").
       #
-      # rust-lib path-deps lez-rln-ffi from rust-lib/lez-rln-src (a staged
-      # copy of ../lez-rln/{lez-rln-ffi,rln-layouts}): mkLogosModule's
-      # rustCrateSrc stages ONLY the crate dir (plus logos-rust-sdk-src) into
-      # the sandbox, so the deps must live inside rust-lib/ to survive the
-      # builder's vendoring.
+      # The RLN core lives in-crate at rust-lib/src/rln_core.rs; the only
+      # path-dep is the shared rln-layouts crate, staged at
+      # rust-lib/lez-rln-src/rln-layouts (a copy of ../lez-rln/rln-layouts):
+      # mkLogosModule's rustCrateSrc stages ONLY the crate dir (plus
+      # logos-rust-sdk-src) into the sandbox, so path-deps must live inside
+      # rust-lib/ to survive the builder's vendoring.
       #
-      # Unlike the wallet spike, no lssa crates are in the tree (lez-rln-ffi
-      # only path-deps rln-layouts), so no circuits/rapidsnark rustEnv pins
-      # and no pyo3 are needed. RISC0_SKIP_BUILD_KERNELS comes from metadata
-      # nix.rust.env (risc0-zkvm is serde-only here; no proving).
+      # Unlike the wallet spike, no lssa crates are in the tree (rln-layouts is
+      # borsh-only), so no circuits/rapidsnark rustEnv pins and no pyo3 are
+      # needed. RISC0_SKIP_BUILD_KERNELS comes from metadata nix.rust.env
+      # (risc0-zkvm is serde-only here; no proving).
       module = system:
         logos-module-builder.lib.mkLogosModule {
           src = ./.;

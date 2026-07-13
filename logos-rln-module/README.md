@@ -1,4 +1,4 @@
-# lez-rln-module-rs — the RLN module (Rust)
+# logos-rln-module — the RLN module (Rust)
 
 `liblogos_rln_module`, built on logos-rust-sdk / logos-module-builder. This is
 **the** RLN module — it replaces the removed hand-written C++/Qt
