@@ -64,7 +64,7 @@ async fn main() {
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
-        let user_holding_id = create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await;
+        let user_holding_id = create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await;
 
         let leaf_bytes = compute_rate_commitment(id_commitment, *rate_limit);
 

@@ -26,7 +26,7 @@ async fn main() {
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 
     for i in 0..count {
-        let user_holding_id = create_funded_user(&mut wallet_core, &tree_id, USER_FUNDING).await;
+        let user_holding_id = create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await;
 
         let RlnIdentity { id_commitment_bytes, leaf_bytes, id_secret_hash_hex, .. } =
             create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;

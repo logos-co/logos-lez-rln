@@ -1,0 +1,11 @@
+{
+  "name": "mlc-faucet-260712",
+  "tree_id": "01aa0cac6c592b4004f75e20cbab470e98fa35045b3273f030f301482e77d89a",
+  "sequencer": "https://testnet.lez.logos.co/",
+  "registration_program_id": "4847b5eb87d70a6be0fddf05d248eccabf414546b3b78f14911423794be3583e",
+  "merkle_program_id": "3f1d68843640973d7ce9ec1d2ce253ecfa115962b3f265e2637fd13f6328c66f",
+  "config_account": "J9tLeGcYYXqVg2csX3H2x84MndnjHQbDwj6VfTQwyU4s",
+  "payment_account": "D8vX49U6zHpsAtfcMGuVsG7osKZ5E8hzKANoepxjuWSB",
+  "supply_holding": "BbqTGpV6NumhnzfQ6twPym22hsEvnvLbT43v5re9Qrz",
+  "funding": "faucet"
+}

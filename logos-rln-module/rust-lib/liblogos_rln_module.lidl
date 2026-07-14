@@ -1,0 +1,75 @@
+; liblogos_rln_module — Rust RLN module. Wire-compatible with the C++/Qt
+; module it replaced: method names, QString/int wire types, JSON output
+; shapes, empty-string errors and the two broadcast events all match the
+; old Q_INVOKABLE surface, which existing consumers were built against.
+; (Original C++ source: git show 4b403c1:logos-rln-module/src/logos_rln_module.cpp)
+; The C++ module's initLogos(LogosAPI*) has no equivalent here: it was an
+; in-process injection hack, not wire-callable; Rust modules use
+; modules()/context().
+module liblogos_rln_module {
+  version "1.0.0"
+  description "RLN Merkle Root Provider Module (Rust port)"
+  category "blockchain"
+  depends [logos_execution_zone]
+
+  ; Compact JSON array of 32-byte lowercase-hex roots (current + non-zero
+  ; history), or "" on error.
+  method get_valid_roots(rln_account_id_hex: tstr) -> tstr
+
+  ; (Re)start the 10s valid_roots broadcast for this account; fires one
+  ; broadcast synchronously before returning (QTimer-restart semantics).
+  method start_root_broadcast(rln_account_id: tstr) -> void
+
+  ; leaf_indices_json is a JSON array of leaf indices. Returns a compact
+  ; JSON array of proof objects, each augmented with "valid_roots", from a
+  ; stable tree snapshot (5 attempts, "" on sustained churn); "[]" for an
+  ; empty index list, "" on error.
+  method get_merkle_proofs(config_account_id: tstr, leaf_indices_json: tstr) -> tstr
+
+  ; (Re)start the 10s merkle_proof broadcast for (config, leaf_index);
+  ; fires one broadcast synchronously before returning.
+  method start_merkle_proof_broadcast(config_account_id: tstr, leaf_index: int) -> void
+
+  ; Seeded RLN identity from a 32-byte hex seed (the wallet account id).
+  ; Compact JSON {"id_commitment","id_secret_hash"} (lowercase hex), or ""
+  ; on error.
+  method generate_identity(wallet_account_id: tstr) -> tstr
+
+  ; poseidon(id_commitment, rate_limit) as 64 lowercase hex chars, or ""
+  ; on error.
+  method compute_rate_commitment(id_commitment_hex: tstr, rate_limit: int) -> tstr
+
+  ; Idempotent on-chain registration. Existing membership PDA →
+  ; {"already_registered":true,"leaf_index":N}; otherwise submits the
+  ; Register tx and returns {"leaf_index":N,"pending":true,"tx_result":s}
+  ; without waiting for confirmation; "" on error.
+  method register_member(config_account_id: tstr, user_holding_account_id: tstr, id_commitment_hex: tstr, rate_limit: int) -> tstr
+
+  ; {"leaf_index":N,"registered":true} when the membership PDA decodes,
+  ; else {"registered":false}; "" on error.
+  method is_member_registered(config_account_id: tstr, id_commitment_hex: tstr) -> tstr
+
+  ; Mint `amount` of the config's payment token into dest via the Token
+  ; program's Mint (the definition/mint-authority key must be in the open
+  ; wallet). amount is int (like rate_limit) — the CLI coerces numeric args to
+  ; numbers on the wire; practical amounts fit i64 (100B « i64 max).
+  ; Non-blocking; returns {"tx_result":s,"definition":hex,"pending":true} or "".
+  method mint_tokens(config_account_id: tstr, dest_account_id: tstr, amount: int) -> tstr
+
+  ; Live token-holding balance for account_id.
+  ; {"exists":true,"balance":decimal,"definition":hex} |
+  ; {"exists":false,"balance":"0"} for absent | "" on error (NOT zero).
+  method get_token_balance(account_id: tstr) -> tstr
+
+  ; Faucet claim (faucet-funded deployments): mint `amount` into dest from the
+  ; program-owned payment PDA — no human key. amount is int (see mint_tokens).
+  ; Non-blocking; returns
+  ; {"tx_result":s,"payment_definition":hex,"pending":true} or "" on failure.
+  method claim_tokens(config_account_id: tstr, dest_account_id: tstr, amount: int) -> tstr
+
+  ; data[0] = the same compact JSON array get_valid_roots returns.
+  event valid_roots(roots_json: tstr)
+
+  ; data[0] = one compact proof object (as in get_merkle_proofs' array).
+  event merkle_proof(proof_json: tstr)
+}

@@ -69,7 +69,9 @@ mod tests {
         MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP,
         MEMBERSHIP_OFFSET_ACTIVE_DURATION,
         MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION,
+        CONFIG_OFFSET_AUTHORIZED_REGISTRAR,
         CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
+        CONFIG_OFFSET_FREE_QUOTA_REMAINING,
         CONFIG_OFFSET_MERKLE_PROGRAM_ID,
         CONFIG_OFFSET_TREE_ID,
         CONFIG_OFFSET_PAYMENT_TOKEN_ID,
@@ -181,6 +183,14 @@ mod tests {
 
     fn derive_credit_supply_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
         crate::rln::derive_credit_supply_account(&program_id, tree_id)
+    }
+
+    fn derive_payment_token_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
+        crate::rln::derive_payment_token_account(&program_id, tree_id)
+    }
+
+    fn derive_payment_supply_pda(program_id: nssa_core::program::ProgramId, tree_id: &[u8; 32]) -> AccountId {
+        crate::rln::derive_payment_supply_account(&program_id, tree_id)
     }
 
     fn derive_membership_pda(
@@ -977,6 +987,37 @@ mod tests {
         active_duration: u32,
         grace_period_duration: u32,
     ) -> [PublicTransaction; 3] {
+        build_registration_init_txs_with_policy(
+            registration,
+            merkle,
+            tree_id,
+            payment_token_id,
+            price_per_unit,
+            treasury_id,
+            max_total_rate_limit,
+            active_duration,
+            grace_period_duration,
+            [0u8; 32], // no free-quota registrar
+            0,         // no free quota
+            0,         // faucet disabled (wallet-key funding)
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_registration_init_txs_with_policy(
+        registration: &Program,
+        merkle: &Program,
+        tree_id: &[u8; 32],
+        payment_token_id: &AccountId,
+        price_per_unit: u128,
+        treasury_id: &AccountId,
+        max_total_rate_limit: u64,
+        active_duration: u32,
+        grace_period_duration: u32,
+        authorized_registrar: [u8; 32],
+        free_quota: u64,
+        faucet_claim_cap: u128,
+    ) -> [PublicTransaction; 3] {
         let config_id = derive_config_pda(registration.id(), tree_id);
         let credit_token_id = derive_credit_token_pda(registration.id(), tree_id);
         let credit_supply_id = derive_credit_supply_pda(registration.id(), tree_id);
@@ -995,6 +1036,9 @@ mod tests {
                 max_total_rate_limit,
                 active_duration_for_new_memberships: active_duration,
                 grace_period_duration_for_new_memberships: grace_period_duration,
+                authorized_registrar,
+                free_quota,
+                faucet_claim_cap,
             },
         );
 
@@ -1065,15 +1109,19 @@ mod tests {
     fn state_with_initialized_registration_config(
         max_total_rate_limit: u64,
     ) -> Option<TestSetup> {
-        let (mut state, merkle, registration) = state_with_programs()?;
+        state_with_policy_registration(max_total_rate_limit, [0u8; 32], 0)
+    }
 
-        // 1. Create keypairs for token accounts
-        let (treasury_key, treasury_id) = create_test_keypair(1);
-        let (user_payment_key, user_payment_id) = create_test_keypair(2);
-        let payment_def_id = AccountId::new([10; 32]);
-
-        // 2. Set up token accounts directly (bypassing public transactions which
-        // require both parties to sign for Claim::Authorized on new accounts).
+    /// Force-inserts a wallet-key payment token: definition + treasury holding
+    /// (total supply minus the user share) + funded user holding, bypassing
+    /// public transactions (which require both parties to sign for
+    /// Claim::Authorized on new accounts).
+    fn insert_funded_payment_token(
+        state: &mut V03State,
+        payment_def_id: &AccountId,
+        treasury_id: &AccountId,
+        user_payment_id: &AccountId,
+    ) {
         let total_supply: u128 = 1_000_000_000;
         let user_amount: u128 = 10_000_000;
         let token_id = programs::token().id();
@@ -1106,9 +1154,29 @@ mod tests {
             data: Data::from(&user_holding),
             ..Account::default()
         });
+    }
 
-        // 4. Initialize registration with custom config
-        let init_txs = build_registration_init_txs_with_config(
+    /// Like `state_with_initialized_registration_config`, with the deployment
+    /// policy knobs exposed (free-quota registrar). Wallet-key funding
+    /// (faucet_claim_cap = 0) — the faucet path has its own setup below.
+    #[allow(dead_code)]
+    fn state_with_policy_registration(
+        max_total_rate_limit: u64,
+        authorized_registrar: [u8; 32],
+        free_quota: u64,
+    ) -> Option<TestSetup> {
+        let (mut state, merkle, registration) = state_with_programs()?;
+
+        // 1. Create keypairs for token accounts
+        let (treasury_key, treasury_id) = create_test_keypair(1);
+        let (user_payment_key, user_payment_id) = create_test_keypair(2);
+        let payment_def_id = AccountId::new([10; 32]);
+
+        // 2. Set up token accounts directly
+        insert_funded_payment_token(&mut state, &payment_def_id, &treasury_id, &user_payment_id);
+
+        // 4. Initialize registration with custom config + policy
+        let init_txs = build_registration_init_txs_with_policy(
             &registration,
             &merkle,
             &TREE_ID,
@@ -1116,6 +1184,11 @@ mod tests {
             PRICE_PER_UNIT,
             &treasury_id,
             max_total_rate_limit,
+            DEFAULT_ACTIVE_DURATION,
+            DEFAULT_GRACE_PERIOD_DURATION,
+            authorized_registrar,
+            free_quota,
+            0, // wallet-key funding: faucet disabled
         );
         apply_registration_init(&mut state, &init_txs).ok()?;
 
@@ -1129,6 +1202,49 @@ mod tests {
             user_payment_id,
             user_payment_key,
         })
+    }
+
+    /// Faucet-mode setup: the payment token is the registration program's own
+    /// `payment` PDA (created via InitializePaymentToken) — no human mint key
+    /// exists anywhere in this state.
+    #[allow(dead_code)]
+    fn state_with_faucet_registration(claim_cap: u128) -> Option<(V03State, Program)> {
+        let (mut state, merkle, registration) = state_with_programs()?;
+
+        let (_treasury_key, treasury_id) = create_test_keypair(1);
+        let payment_def_id = derive_payment_token_pda(registration.id(), &TREE_ID);
+        let payment_supply_id = derive_payment_supply_pda(registration.id(), &TREE_ID);
+
+        let init_txs = build_registration_init_txs_with_policy(
+            &registration,
+            &merkle,
+            &TREE_ID,
+            &payment_def_id,
+            PRICE_PER_UNIT,
+            &treasury_id,
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION,
+            DEFAULT_GRACE_PERIOD_DURATION,
+            [0u8; 32],
+            0,
+            claim_cap,
+        );
+        apply_registration_init(&mut state, &init_txs).ok()?;
+
+        // 4th init tx: create RLNTOK as a program-owned PDA definition.
+        let init_payment = build_public_tx(
+            registration.id(),
+            vec![payment_def_id, payment_supply_id],
+            Instruction::InitializePaymentToken {
+                token_program_id: bytemuck::cast(programs::token().id()),
+                tree_id: TREE_ID,
+            },
+        );
+        state
+            .transition_from_public_transaction(&init_payment, 1, 0)
+            .ok()?;
+
+        Some((state, registration))
     }
 
     /// Creates a state with programs deployed, payment token created, user funded,
@@ -1151,38 +1267,7 @@ mod tests {
         let (user_payment_key, user_payment_id) = create_test_keypair(2);
         let payment_def_id = AccountId::new([10; 32]);
 
-        let total_supply: u128 = 1_000_000_000;
-        let user_amount: u128 = 10_000_000;
-        let token_id = programs::token().id();
-
-        let token_definition = token_core::TokenDefinition::Fungible {
-            name: String::from("PAYTKN"),
-            total_supply,
-            metadata_id: None,
-        };
-        state.force_insert_account(payment_def_id.clone(), Account {
-            program_owner: token_id,
-            data: Data::from(&token_definition),
-            ..Account::default()
-        });
-        let treasury_holding = token_core::TokenHolding::Fungible {
-            definition_id: payment_def_id.clone(),
-            balance: total_supply - user_amount,
-        };
-        state.force_insert_account(treasury_id.clone(), Account {
-            program_owner: token_id,
-            data: Data::from(&treasury_holding),
-            ..Account::default()
-        });
-        let user_holding = token_core::TokenHolding::Fungible {
-            definition_id: payment_def_id.clone(),
-            balance: user_amount,
-        };
-        state.force_insert_account(user_payment_id.clone(), Account {
-            program_owner: token_id,
-            data: Data::from(&user_holding),
-            ..Account::default()
-        });
+        insert_funded_payment_token(&mut state, &payment_def_id, &treasury_id, &user_payment_id);
 
         let init_txs = build_registration_init_txs_with_durations(
             &registration,
@@ -1360,17 +1445,44 @@ mod tests {
         user_nonce: Nonce,
         next_index: u64,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(setup.registration.id(), tree_id);
-        let sid = subtree_id_for_index(next_index);
-        let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
+        build_register_tx_parts(
+            &setup.registration,
+            tree_id,
+            &setup.user_payment_id,
+            &setup.user_payment_key,
+            &setup.treasury_id,
+            id_commitment,
+            rate_limit,
+            user_nonce,
+            next_index,
+        )
+    }
 
-        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+    /// `build_register_tx` for states without a `TestSetup` (e.g. faucet
+    /// deployments, where the payer/treasury holdings are claim-seeded).
+    #[allow(clippy::too_many_arguments)]
+    fn build_register_tx_parts(
+        registration: &Program,
+        tree_id: &[u8; 32],
+        user_payment_id: &AccountId,
+        user_payment_key: &PrivateKey,
+        treasury_id: &AccountId,
+        id_commitment: [u8; 32],
+        rate_limit: u64,
+        user_nonce: Nonce,
+        next_index: u64,
+    ) -> PublicTransaction {
+        let config_id = derive_config_pda(registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let sid = subtree_id_for_index(next_index);
+        let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
+
+        let membership_id = derive_membership_pda(registration.id(), tree_id, &id_commitment);
         let account_ids = vec![
             config_id,
             tree_main_id,
-            setup.user_payment_id.clone(),
-            setup.treasury_id.clone(),
+            user_payment_id.clone(),
+            treasury_id.clone(),
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             membership_id,
@@ -1384,7 +1496,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            setup.registration.id(),
+            registration.id(),
             account_ids,
             vec![user_nonce], // nonce for user_payment account (index 2)
             instruction,
@@ -1392,7 +1504,91 @@ mod tests {
 
         PublicTransaction::new(
             message.clone(),
-            WitnessSet::for_message(&message, &[&setup.user_payment_key])
+            WitnessSet::for_message(&message, &[user_payment_key])
+        )
+    }
+
+    /// Builds a free-quota registration transaction.
+    ///
+    /// Account order (no payment/treasury accounts — the registrar signs but
+    /// pays nothing):
+    /// - pre_states[0]: Config
+    /// - pre_states[1]: Tree main
+    /// - pre_states[2]: Authorized registrar (signer)
+    /// - pre_states[3]: Bottom subtree account
+    /// - pre_states[4]: CLOCK_50 system account
+    /// - pre_states[5]: Membership PDA (init)
+    #[allow(dead_code)]
+    fn build_register_free_tx(
+        registration: &Program,
+        tree_id: &[u8; 32],
+        registrar_id: &AccountId,
+        registrar_key: &PrivateKey,
+        id_commitment: [u8; 32],
+        rate_limit: u64,
+        registrar_nonce: Nonce,
+        next_index: u64,
+    ) -> PublicTransaction {
+        let config_id = derive_config_pda(registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let sid = subtree_id_for_index(next_index);
+        let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
+        let membership_id = derive_membership_pda(registration.id(), tree_id, &id_commitment);
+
+        let account_ids = vec![
+            config_id,
+            tree_main_id,
+            registrar_id.clone(),
+            subtree_account_id,
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+            membership_id,
+        ];
+
+        let instruction = Instruction::RegisterFree {
+            tree_id: *tree_id,
+            id_commitment,
+            rate_limit,
+            subtree_id: sid,
+        };
+
+        let message = Message::try_new(
+            registration.id(),
+            account_ids,
+            vec![registrar_nonce],
+            instruction,
+        ).expect("valid message");
+
+        PublicTransaction::new(
+            message.clone(),
+            WitnessSet::for_message(&message, &[registrar_key]),
+        )
+    }
+
+    /// Builds a faucet claim transaction. `dest_key = None` leaves the
+    /// destination unsigned (must be rejected for fresh holdings).
+    #[allow(dead_code)]
+    fn build_claim_tokens_tx(
+        registration: &Program,
+        tree_id: &[u8; 32],
+        dest_id: &AccountId,
+        dest_key: Option<&PrivateKey>,
+        amount: u128,
+        dest_nonce: Nonce,
+    ) -> PublicTransaction {
+        let config_id = derive_config_pda(registration.id(), tree_id);
+        let payment_def_id = derive_payment_token_pda(registration.id(), tree_id);
+
+        let account_ids = vec![config_id, payment_def_id, dest_id.clone()];
+        let instruction = Instruction::ClaimTokens { tree_id: *tree_id, amount };
+
+        let nonces = if dest_key.is_some() { vec![dest_nonce] } else { vec![] };
+        let message = Message::try_new(registration.id(), account_ids, nonces, instruction)
+            .expect("valid message");
+
+        let keys: Vec<&PrivateKey> = dest_key.into_iter().collect();
+        PublicTransaction::new(
+            message.clone(),
+            WitnessSet::for_message(&message, &keys),
         )
     }
 
@@ -1608,7 +1804,7 @@ mod tests {
             "Config account should have data"
         );
 
-        // Verify Borsh-encoded ConfigState layout (240 bytes under SPEL).
+        // Verify Borsh-encoded ConfigState layout (CONFIG_SIZE bytes under SPEL).
         let data = config_account.data.as_ref();
         assert!(data.len() >= CONFIG_SIZE, "Config should be at least {CONFIG_SIZE} bytes");
 
@@ -2353,6 +2549,293 @@ mod tests {
         let register_tx2 = build_register_tx(&setup, &TREE_ID, id_commitment2, 300, Nonce(1), 1);
         let result = setup.state.transition_from_public_transaction(&register_tx2, 1, 0);
         assert!(result.is_err(), "Second registration should fail (exceeds max_total_rate_limit)");
+    }
+
+    // ========================================================================
+    // Deployment Policy Tests — faucet funding + free-quota membership
+    // ========================================================================
+
+    fn read_holding(state: &V03State, id: &AccountId) -> Option<token_core::TokenHolding> {
+        let account = state.get_account_by_id(id.clone());
+        token_core::TokenHolding::try_from(&account.data).ok()
+    }
+
+    #[test]
+    fn test_faucet_init_creates_program_owned_payment_token() {
+        let (state, registration) = state_with_faucet_registration(10_000_000)
+            .expect("Faucet setup should succeed");
+
+        let payment_def_id = derive_payment_token_pda(registration.id(), &TREE_ID);
+        let def_account = state.get_account_by_id(payment_def_id);
+        assert_eq!(
+            def_account.program_owner,
+            programs::token().id(),
+            "Payment token definition should be owned by the token program"
+        );
+        let def = token_core::TokenDefinition::try_from(&def_account.data)
+            .expect("definition should decode");
+        match def {
+            token_core::TokenDefinition::Fungible { name, total_supply, .. } => {
+                assert_eq!(name, "RLNTOK");
+                assert_eq!(total_supply, 0, "Faucet token starts with zero supply");
+            }
+            token_core::TokenDefinition::NonFungible { .. } => {
+                panic!("Payment token should be fungible")
+            }
+        }
+    }
+
+    #[test]
+    fn test_claim_tokens_mints_to_fresh_account() {
+        let (mut state, registration) = state_with_faucet_registration(10_000_000)
+            .expect("Faucet setup should succeed");
+
+        let (dest_key, dest_id) = create_test_keypair(21);
+        let claim = build_claim_tokens_tx(
+            &registration, &TREE_ID, &dest_id, Some(&dest_key), 1_000_000, Nonce(0),
+        );
+        state.transition_from_public_transaction(&claim, 1, 0)
+            .expect("Claim should succeed");
+
+        let holding = read_holding(&state, &dest_id).expect("dest holding should decode");
+        match holding {
+            token_core::TokenHolding::Fungible { definition_id, balance } => {
+                assert_eq!(balance, 1_000_000, "Claimed amount should be credited");
+                assert_eq!(
+                    definition_id,
+                    derive_payment_token_pda(registration.id(), &TREE_ID),
+                    "Holding should reference the PDA definition"
+                );
+            }
+            token_core::TokenHolding::NftMaster { .. }
+            | token_core::TokenHolding::NftPrintedCopy { .. } => {
+                panic!("Dest holding should be fungible")
+            }
+        }
+
+        // Total supply tracks program-authority mints.
+        let def_account = state.get_account_by_id(
+            derive_payment_token_pda(registration.id(), &TREE_ID),
+        );
+        match token_core::TokenDefinition::try_from(&def_account.data).unwrap() {
+            token_core::TokenDefinition::Fungible { total_supply, .. } => {
+                assert_eq!(total_supply, 1_000_000);
+            }
+            token_core::TokenDefinition::NonFungible { .. } => {
+                panic!("definition should stay fungible")
+            }
+        }
+    }
+
+    #[test]
+    fn test_claim_tokens_rejects_over_cap() {
+        let (mut state, registration) = state_with_faucet_registration(1_000_000)
+            .expect("Faucet setup should succeed");
+
+        let (dest_key, dest_id) = create_test_keypair(22);
+        let claim = build_claim_tokens_tx(
+            &registration, &TREE_ID, &dest_id, Some(&dest_key), 1_000_001, Nonce(0),
+        );
+        let result = state.transition_from_public_transaction(&claim, 1, 0);
+        assert!(result.is_err(), "Claim above faucet_claim_cap should fail");
+    }
+
+    #[test]
+    fn test_claim_tokens_rejects_when_faucet_disabled() {
+        // Wallet-key deployment: faucet_claim_cap = 0.
+        let mut setup = state_with_initialized_registration()
+            .expect("Setup should succeed");
+
+        let (dest_key, dest_id) = create_test_keypair(23);
+        let claim = build_claim_tokens_tx(
+            &setup.registration, &TREE_ID, &dest_id, Some(&dest_key), 1, Nonce(0),
+        );
+        let result = setup.state.transition_from_public_transaction(&claim, 1, 0);
+        assert!(result.is_err(), "Claim should fail when the faucet is disabled");
+    }
+
+    #[test]
+    fn test_claim_tokens_rejects_unsigned_destination() {
+        let (mut state, registration) = state_with_faucet_registration(10_000_000)
+            .expect("Faucet setup should succeed");
+
+        let (_dest_key, dest_id) = create_test_keypair(24);
+        let claim = build_claim_tokens_tx(
+            &registration, &TREE_ID, &dest_id, None, 1_000_000, Nonce(0),
+        );
+        let result = state.transition_from_public_transaction(&claim, 1, 0);
+        assert!(
+            result.is_err(),
+            "Minting into a fresh holding requires the destination's signature (Claim::Authorized)"
+        );
+    }
+
+    #[test]
+    fn test_register_free_succeeds_and_decrements_quota() {
+        let (registrar_key, registrar_id) = create_test_keypair(31);
+        let mut setup = state_with_policy_registration(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            *registrar_id.value(),
+            2,
+        ).expect("Setup should succeed");
+
+        let tx = build_register_free_tx(
+            &setup.registration, &TREE_ID, &registrar_id, &registrar_key,
+            valid_field_element(0x51), 300, Nonce(0), 0,
+        );
+        setup.state.transition_from_public_transaction(&tx, 1, 0)
+            .expect("Free registration should succeed");
+
+        assert_eq!(
+            get_total_registrations(&setup.state, &setup.registration, &TREE_ID),
+            1,
+            "Free registration should count in total_registrations"
+        );
+        assert_eq!(
+            get_tree_next_index(&setup.state, &setup.registration, &TREE_ID),
+            1,
+            "Free registration should insert a leaf"
+        );
+
+        let config = setup.state.get_account_by_id(
+            derive_config_pda(setup.registration.id(), &TREE_ID),
+        );
+        let data = config.data.as_ref();
+        let quota = u64::from_le_bytes(
+            data[CONFIG_OFFSET_FREE_QUOTA_REMAINING..CONFIG_OFFSET_FREE_QUOTA_REMAINING + 8]
+                .try_into().unwrap(),
+        );
+        assert_eq!(quota, 1, "free_quota_remaining should decrement");
+        assert_eq!(
+            &data[CONFIG_OFFSET_AUTHORIZED_REGISTRAR..CONFIG_OFFSET_AUTHORIZED_REGISTRAR + 32],
+            registrar_id.value(),
+            "Config should store the authorized registrar at its frozen offset"
+        );
+    }
+
+    #[test]
+    fn test_register_free_quota_exhaustion() {
+        let (registrar_key, registrar_id) = create_test_keypair(32);
+        let mut setup = state_with_policy_registration(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            *registrar_id.value(),
+            1,
+        ).expect("Setup should succeed");
+
+        let tx1 = build_register_free_tx(
+            &setup.registration, &TREE_ID, &registrar_id, &registrar_key,
+            valid_field_element(0x52), 300, Nonce(0), 0,
+        );
+        setup.state.transition_from_public_transaction(&tx1, 1, 0)
+            .expect("First free registration should succeed");
+
+        let tx2 = build_register_free_tx(
+            &setup.registration, &TREE_ID, &registrar_id, &registrar_key,
+            valid_field_element(0x53), 300, Nonce(1), 1,
+        );
+        let result = setup.state.transition_from_public_transaction(&tx2, 1, 0);
+        assert!(result.is_err(), "Second free registration should fail (quota exhausted)");
+    }
+
+    #[test]
+    fn test_register_free_rejects_wrong_signer() {
+        let (_registrar_key, registrar_id) = create_test_keypair(33);
+        let (impostor_key, impostor_id) = create_test_keypair(34);
+        let mut setup = state_with_policy_registration(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            *registrar_id.value(),
+            5,
+        ).expect("Setup should succeed");
+
+        let tx = build_register_free_tx(
+            &setup.registration, &TREE_ID, &impostor_id, &impostor_key,
+            valid_field_element(0x54), 300, Nonce(0), 0,
+        );
+        let result = setup.state.transition_from_public_transaction(&tx, 1, 0);
+        assert!(result.is_err(), "Non-registrar signer must be rejected");
+    }
+
+    #[test]
+    fn test_register_free_rejects_without_registrar_config() {
+        // Default deployment: no registrar, no quota.
+        let mut setup = state_with_initialized_registration()
+            .expect("Setup should succeed");
+
+        let (key, id) = create_test_keypair(35);
+        let tx = build_register_free_tx(
+            &setup.registration, &TREE_ID, &id, &key,
+            valid_field_element(0x55), 300, Nonce(0), 0,
+        );
+        let result = setup.state.transition_from_public_transaction(&tx, 1, 0);
+        assert!(result.is_err(), "RegisterFree must fail when no registrar is configured");
+    }
+
+    #[test]
+    fn test_paid_register_still_works_in_quota_deployment() {
+        // Additive policy: the paid path is unaffected by a configured quota.
+        let (_registrar_key, registrar_id) = create_test_keypair(36);
+        let mut setup = state_with_policy_registration(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            *registrar_id.value(),
+            5,
+        ).expect("Setup should succeed");
+
+        let register_tx = build_register_tx(
+            &setup, &TREE_ID, valid_field_element(0x56), 300, Nonce(0), 0,
+        );
+        setup.state.transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("Paid registration should still succeed in a quota deployment");
+    }
+
+    #[test]
+    fn test_paid_register_works_in_faucet_deployment() {
+        // Faucet deployments keep the paid path: both holdings are seeded by
+        // claims (the treasury exactly as run_setup Step 5c does), then a
+        // normal Register pays treasury from the user's claimed balance.
+        let (mut state, registration) = state_with_faucet_registration(10_000_000)
+            .expect("Faucet setup should succeed");
+
+        // Same seed as state_with_faucet_registration's treasury (config
+        // records this account id; create_test_keypair is deterministic).
+        let (treasury_key, treasury_id) = create_test_keypair(1);
+        let seed_treasury = build_claim_tokens_tx(
+            &registration, &TREE_ID, &treasury_id, Some(&treasury_key), 1, Nonce(0),
+        );
+        state.transition_from_public_transaction(&seed_treasury, 1, 0)
+            .expect("Treasury seed claim should succeed");
+
+        let (user_key, user_id) = create_test_keypair(40);
+        let fund_user = build_claim_tokens_tx(
+            &registration, &TREE_ID, &user_id, Some(&user_key), 5_000_000, Nonce(0),
+        );
+        state.transition_from_public_transaction(&fund_user, 1, 0)
+            .expect("User funding claim should succeed");
+
+        let rate_limit = 300u64;
+        let register_tx = build_register_tx_parts(
+            &registration, &TREE_ID, &user_id, &user_key, &treasury_id,
+            valid_field_element(0x57), rate_limit, Nonce(1), 0,
+        );
+        state.transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("Paid registration should succeed in a faucet deployment");
+
+        assert_eq!(
+            get_total_registrations(&state, &registration, &TREE_ID),
+            1,
+            "Registration should be recorded in config"
+        );
+        let price = u128::from(rate_limit) * PRICE_PER_UNIT;
+        match read_holding(&state, &treasury_id).expect("treasury holding should decode") {
+            token_core::TokenHolding::Fungible { balance, .. } => assert_eq!(
+                balance,
+                1 + price,
+                "Treasury should hold its claim seed plus the registration payment"
+            ),
+            token_core::TokenHolding::NftMaster { .. }
+            | token_core::TokenHolding::NftPrintedCopy { .. } => {
+                panic!("Treasury holding should be fungible")
+            }
+        }
     }
 
     #[test]

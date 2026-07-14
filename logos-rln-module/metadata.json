@@ -1,12 +1,55 @@
 {
   "name": "liblogos_rln_module",
+  "display_name": "RLN Module (Rust)",
   "version": "1.0.0",
-  "description": "RLN Merkle Root Provider Module",
+  "description": "RLN Merkle Root Provider Module (Rust port)",
   "author": "Logos Blockchain Team",
   "type": "core",
+  "interface": "cdylib",
   "category": "blockchain",
-  "main": "liblogos_rln_module",
-  "dependencies": ["logos_execution_zone"],
+  "main": "liblogos_rln_module_plugin",
+  "dependencies": [
+    "logos_execution_zone"
+  ],
+  "include": [],
   "capabilities": [],
-  "include": ["liblez_rln_ffi.dylib"]
+  "codegen": {
+    "lidl": "rust-lib/liblogos_rln_module.lidl",
+    "rust": {
+      "crate": "rust-lib"
+    }
+  },
+  "dependency_overrides": {
+    "logos_execution_zone": {
+      "file": "rust-lib/deps/logos_execution_zone.lidl"
+    }
+  },
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": []
+    },
+    "rust": {
+      "toolchain": "1.94.0",
+      "packages": {
+        "build": [
+          "pkg-config",
+          "perl",
+          "protobuf",
+          "cmake",
+          "python3",
+          "clang"
+        ],
+        "runtime": []
+      },
+      "env": {
+        "RISC0_SKIP_BUILD_KERNELS": "1"
+      }
+    }
+  }
 }

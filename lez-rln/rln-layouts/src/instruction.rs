@@ -20,6 +20,9 @@ pub enum Instruction {
         max_total_rate_limit: u64,
         active_duration_for_new_memberships: u32,
         grace_period_duration_for_new_memberships: u32,
+        authorized_registrar: [u8; 32],
+        free_quota: u64,
+        faucet_claim_cap: u128,
     },
     InitializeCreditToken {
         token_program_id: [u8; 32],
@@ -58,6 +61,28 @@ pub enum Instruction {
     Erase {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
+        subtree_id: u32,
+    },
+    /// Create the payment token ("RLNTOK") as a program-owned PDA definition
+    /// — faucet deployments only; the mint authority is the program itself,
+    /// no human key. Mirrors `InitializeCreditToken`.
+    InitializePaymentToken {
+        token_program_id: [u8; 32],
+        tree_id: [u8; 32],
+    },
+    /// Faucet: mint up to `faucet_claim_cap` payment tokens to the (signing)
+    /// destination holding. Rejected when the deployment's cap is 0.
+    ClaimTokens {
+        tree_id: [u8; 32],
+        amount: u128,
+    },
+    /// Create a membership without payment — only the deployment's
+    /// `authorized_registrar` may call it, and only while
+    /// `free_quota_remaining > 0`.
+    RegisterFree {
+        tree_id: [u8; 32],
+        id_commitment: [u8; 32],
+        rate_limit: u64,
         subtree_id: u32,
     },
 }

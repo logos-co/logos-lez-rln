@@ -1,0 +1,30 @@
+# Synthetic workspace root for the staged rln-layouts crate (which declares
+# `[lints] workspace = true` upstream and cannot resolve the real lez-rln
+# workspace from inside this module's tree). Mirrors the upstream
+# [workspace.lints.*] tables from lez-rln/Cargo.toml — keep in sync when
+# refreshing the staged copy (see the module README, "Staged sources").
+[workspace]
+resolver = "3"
+members = [
+  "rln-layouts",
+]
+
+[workspace.dependencies]
+rln-layouts = { path = "rln-layouts", default-features = false }
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+large_enum_variant = "deny"
+wildcard_enum_match_arm = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"
