@@ -1,0 +1,29 @@
+{
+  "name": "rln_membership_ui",
+  "display_name": "RLN Membership",
+  "version": "0.3.1",
+  "type": "ui_qml",
+  "category": "blockchain",
+  "description": "RLN membership GUI: guided onboarding wizard, membership status card, and an advanced expert view (drives liblogos_rln_membership_module)",
+  "author": "Logos Blockchain Team",
+  "view": "qml/Main.qml",
+  "icon": "icons/rln-membership.svg",
+  "dependencies": [
+    "logos_execution_zone",
+    "liblogos_rln_membership_module",
+    "liblogos_rln_module"
+  ],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
