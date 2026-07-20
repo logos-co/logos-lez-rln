@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 2,
+  "repositoryName": "logos-rln-membership",
+  "generatedAt": "2026-07-20T04:08:44Z",
+  "packages": [
+    {
+      "name": "liblogos_rln_membership_module",
+      "versions": [
+        {
+          "releasedAt": "2026-07-20T04:08:44Z",
+          "publisherRef": "liblogos_rln_membership_module-v0.3.0",
+          "url": "https://raw.githubusercontent.com/logos-co/logos-lez-rln/catalog/liblogos_rln_membership_module-0.3.0.lgx",
+          "size": 4139492,
+          "sha256": "5e10cadfeb1cc1943888b7cb6bf633ec9f0f86f9b8a2be06c6b154cf719b6aa6",
+          "rootHash": "01759045e84edc4e68a62fa84ce10ee47d1667d7ce1327a5cdf67006af5a0efc",
+          "manifest": {
+            "author": "Logos Blockchain Team",
+            "category": "blockchain",
+            "dependencies": [
+              "liblogos_rln_module"
+            ],
+            "description": "Registry-agnostic RLN membership management (RLN-MEMBERSHIP-MANAGEMENT)",
+            "display_name": "RLN Membership Management Module",
+            "hashes": {
+              "root": "01759045e84edc4e68a62fa84ce10ee47d1667d7ce1327a5cdf67006af5a0efc",
+              "variants": "14ebe8ebf26216bc8ca389c5ba5b72c760d32ecb930fa341dc702df76af01da2",
+              "variants/darwin-arm64": "aac82d0cf96429b107223d64b7a413ca07440d17fa4214d188861aa356747916"
+            },
+            "icon": "",
+            "main": {
+              "darwin-arm64": "liblogos_rln_membership_module_plugin.dylib"
+            },
+            "manifestVersion": "0.3.0",
+            "name": "liblogos_rln_membership_module",
+            "type": "core",
+            "version": "0.3.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "liblogos_rln_module",
+      "versions": [
+        {
+          "releasedAt": "2026-07-20T04:08:44Z",
+          "publisherRef": "liblogos_rln_module-v1.1.0",
+          "url": "https://raw.githubusercontent.com/logos-co/logos-lez-rln/catalog/liblogos_rln_module-1.1.0.lgx",
+          "size": 7479728,
+          "sha256": "70fd26f8e72765a57ab61e87b4b8bba18a21fd90d739298caa7a7e67e83bcb38",
+          "rootHash": "280d3cb1cfc355fdc3035b213e308526dfb3b5248817ba932101784e694f14e4",
+          "manifest": {
+            "author": "Logos Blockchain Team",
+            "category": "blockchain",
+            "dependencies": [
+              "logos_execution_zone"
+            ],
+            "description": "RLN Merkle Root Provider Module (Rust port)",
+            "display_name": "RLN Module (Rust)",
+            "hashes": {
+              "root": "280d3cb1cfc355fdc3035b213e308526dfb3b5248817ba932101784e694f14e4",
+              "variants": "7305911209bebb750ba6e3120412b7dc4dcbf745bbf99fea4fd6318bc468ed6b",
+              "variants/darwin-arm64": "1926dea0300743d56b1eb287b2b9204dc1ecdd0885e33192bbf6f0c229a0b752"
+            },
+            "icon": "",
+            "main": {
+              "darwin-arm64": "liblogos_rln_module_plugin.dylib"
+            },
+            "manifestVersion": "0.3.0",
+            "name": "liblogos_rln_module",
+            "type": "core",
+            "version": "1.1.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "rln_membership_ui",
+      "versions": [
+        {
+          "releasedAt": "2026-07-20T04:08:44Z",
+          "publisherRef": "rln_membership_ui-v0.3.1",
+          "url": "https://raw.githubusercontent.com/logos-co/logos-lez-rln/catalog/rln_membership_ui-0.3.1.lgx",
+          "size": 42499,
+          "sha256": "45ff4ca651cd8cc2dddb0586790a9dce6f3df940f7fc094c1356fda1828dd88c",
+          "rootHash": "1dd9a10bac22e3aafda295aeeacdc52e7905fb1948ef4bc072a66f112de4904f",
+          "manifest": {
+            "author": "Logos Blockchain Team",
+            "category": "blockchain",
+            "dependencies": [
+              "logos_execution_zone",
+              "liblogos_rln_membership_module",
+              "liblogos_rln_module"
+            ],
+            "description": "RLN membership GUI: guided onboarding wizard, membership status card, and an advanced expert view (drives liblogos_rln_membership_module)",
+            "display_name": "RLN Membership",
+            "hashes": {
+              "root": "1dd9a10bac22e3aafda295aeeacdc52e7905fb1948ef4bc072a66f112de4904f",
+              "variants": "d568a7a08ab1c9c897996c007b97a18e7497a6ff1097a898f6834d4789beaff0",
+              "variants/darwin-arm64": "252a4b8751817c6a0a8631bfd25e185fb2094a86b4ef50f95b8a6c14f9647a25"
+            },
+            "icon": "rln-membership.svg",
+            "main": {},
+            "manifestVersion": "0.3.0",
+            "name": "rln_membership_ui",
+            "type": "ui_qml",
+            "version": "0.3.1",
+            "view": "qml/Main.qml"
+          }
+        }
+      ]
+    }
+  ]
+}

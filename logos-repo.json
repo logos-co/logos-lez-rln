@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "logos-rln-membership",
+  "displayName": "Logos RLN Membership",
+  "description": "RLN membership management for Logos Basecamp (UI + backend modules).",
+  "homepage": "https://github.com/logos-co/logos-lez-rln",
+  "indexUrl": "https://raw.githubusercontent.com/logos-co/logos-lez-rln/catalog/index.json",
+  "trustedSigners": []
+}
