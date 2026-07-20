@@ -13,7 +13,9 @@ plain Rust); there is no C ABI. Acceptance gate: the mix_lez_chat sim (see
 
 - `metadata.json` — module manifest: `codegen.rust` drives logos-module-builder
   (lidl scaffold + typed `logos_execution_zone` client + Qt cdylib glue).
-- `rust-lib/liblogos_rln_module.lidl` — the module contract (11 methods + 2 events).
+- `rust-lib/liblogos_rln_module.lidl` — the module contract (13 methods + 2
+  events): the 11 C++-wire-compatible methods plus the additive v1.1
+  `get_membership` / `get_registry_bounds`.
 - `rust-lib/deps/logos_execution_zone.lidl` — hand-maintained dependency
   contract for the wallet module, wired via `dependency_overrides`.
 - `rust-lib/src/lib.rs` — the provider implementation (wallet lp client + the
@@ -55,6 +57,26 @@ nix build 'path:.#default'   # path: scheme — the dir is untracked in-repo
 # plugin: result/lib/liblogos_rln_module_plugin.dylib
 nix build 'path:.#lgx'       # .lgx bundle for RLN_LGX
 ```
+
+## Live-registry tests (testnet)
+
+`src/testnet_tests.rs` validates rln_core's chain-facing logic — ConfigState
+offsets, PDA derivation, valid roots, merkle-proof construction (recomputed
+via poseidon), clock decode, membership reads — against a DEPLOYED
+registration program. Read-only, off by default (each test skips unless
+gated), no new crate deps (`curl` subprocess speaks the sequencer's
+JSON-RPC `getAccount` — the same read the wallet serves this module at
+runtime):
+
+```sh
+LEZ_RLN_TESTNET_TESTS=1 cargo test testnet_ -- --nocapture
+# registry selection (default shared-faucet):
+LEZ_RLN_TESTNET_DEPLOYMENT=shared-5ade-v2 LEZ_RLN_TESTNET_TESTS=1 cargo test testnet_
+```
+
+The registry comes from `../deployments/<name>/deployment.json`. These
+catch what unit pins can't: layout drift against the pinned guest image,
+PDA-derivation divergence, tree-encoding drift, chain-clock unit changes.
 
 ## Sim acceptance
 

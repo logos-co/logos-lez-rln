@@ -29,11 +29,16 @@
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{Mutex, Once};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod rln_core;
 use rln_core as native;
 use rln_core::{bytes_to_hex, RlnRegisterPlan};
+
+// Live-registry integration tests (env-gated, read-only): see the module's
+// header for the LEZ_RLN_TESTNET_TESTS gate and deployment selection.
+#[cfg(test)]
+mod testnet_tests;
 
 mod generated {
     #![allow(warnings)]
@@ -171,12 +176,24 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// duplicate Register submit poisons the gifter wallet's nonce sequence and
 /// freezes the gifter for the whole confirmation window. The C++ module only
 /// avoided this by accidental Qt serialization timing.
-static REG_IN_FLIGHT: Mutex<Option<std::collections::HashMap<(String, String), String>>> =
-    Mutex::new(None);
+/// (reply, inserted_at) per in-flight `(config, commitment)` registration.
+type RegInFlightMap = std::collections::HashMap<(String, String), (String, Instant)>;
 
-fn reg_in_flight<R>(f: impl FnOnce(&mut std::collections::HashMap<(String, String), String>) -> R) -> R {
+static REG_IN_FLIGHT: Mutex<Option<RegInFlightMap>> = Mutex::new(None);
+
+/// Entries expire after this TTL: an accepted submission that never applies
+/// on-chain (the membership module reports it Failed after its confirmation
+/// window) must be re-submittable in the same session, and the TTL is far
+/// above the seconds-apart double-fire the map exists to absorb. 300s also
+/// comfortably covers the 60-90s testnet confirmation delay, so a confirming
+/// registration is never double-submitted.
+const REG_IN_FLIGHT_TTL: Duration = Duration::from_secs(300);
+
+fn reg_in_flight<R>(f: impl FnOnce(&mut RegInFlightMap) -> R) -> R {
     let mut guard = lock(&REG_IN_FLIGHT);
-    f(guard.get_or_insert_with(std::collections::HashMap::new))
+    let map = guard.get_or_insert_with(RegInFlightMap::new);
+    map.retain(|_, (_, inserted_at)| inserted_at.elapsed() < REG_IN_FLIGHT_TTL);
+    f(map)
 }
 
 /// Create the process-lifetime wallet lp client. MUST run on the host's main
@@ -1000,9 +1017,9 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         })
         .to_string();
         let prior = reg_in_flight(|m| match m.get(&reg_key) {
-            Some(reply) => Some(reply.clone()),
+            Some((reply, _)) => Some(reply.clone()),
             None => {
-                m.insert(reg_key.clone(), placeholder.clone());
+                m.insert(reg_key.clone(), (placeholder.clone(), Instant::now()));
                 None
             }
         });
@@ -1069,7 +1086,7 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
             "pending": true,
         })
         .to_string();
-        reg_in_flight(|m| m.insert(reg_key, reply.clone()));
+        reg_in_flight(|m| m.insert(reg_key, (reply.clone(), Instant::now())));
         reply
     }
 
@@ -1216,6 +1233,113 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
             },
         }
     }
+
+    // ---- v1.1 additive surface (see the lidl): registry-provider reads for
+    // the membership management module. Same conventions as the frozen
+    // methods: "" = error, compact alphabetical JSON otherwise.
+
+    fn get_membership(&mut self, config_account_id: String, id_commitment_hex: String) -> String {
+        let Some(id_commitment) = hex_to_bytes32(&id_commitment_hex) else {
+            eprintln!("get_membership: invalid id_commitment hex");
+            return String::new();
+        };
+
+        // Same derivation path as register_member / is_member_registered so
+        // the membership PDA address is computed identically.
+        let Some(ctx) = resolve_config_context(&config_account_id, "get_membership") else {
+            return String::new();
+        };
+        let Some(plan) = derive_register_plan(&ctx, &id_commitment, "get_membership") else {
+            return String::new();
+        };
+
+        // Absent covers both never-registered and erased/slashed (those empty
+        // the PDA data entirely) — indistinguishable on this registry class.
+        // Error is a transport/RPC failure and MUST NOT collapse into
+        // "registered": false: the membership poller treats an authoritative
+        // "not registered" as proof a live membership was erased and acts
+        // destructively. "" maps to provider_failure, which the poller leaves
+        // the record untouched for — the intended safe path.
+        let membership_pda_hex = bytes_to_hex(&plan.membership_account_id);
+        let data = match fetch_account_data_tri_state(&membership_pda_hex) {
+            FetchOutcome::Present(data) => data,
+            FetchOutcome::Absent => {
+                return serde_json::json!({ "registered": false }).to_string();
+            }
+            FetchOutcome::Error => {
+                eprintln!("get_membership: membership PDA fetch failed for {membership_pda_hex}");
+                return String::new();
+            }
+        };
+        let membership = match native::decode_membership(&data) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("get_membership: membership decode error: {e}");
+                return String::new();
+            }
+        };
+
+        // Lifecycle state MUST come from chain time; the sequencer refreshes
+        // CLOCK_50 every 50 blocks and the guest judges extend/erase against
+        // it, so a local clock would disagree with the registry's view.
+        let Some(clock_data) = fetch_account_data(&bytes_to_hex(&plan.clock_account_id), None)
+        else {
+            eprintln!("get_membership: failed to fetch clock account");
+            return String::new();
+        };
+        let now = match native::decode_clock_timestamp(&clock_data) {
+            Ok(ts) => ts,
+            Err(e) => {
+                eprintln!("get_membership: clock decode error: {e}");
+                return String::new();
+            }
+        };
+
+        serde_json::json!({
+            "clock_timestamp": now,
+            "grace_period_duration": membership.grace_period_duration,
+            "grace_period_start_timestamp": membership.grace_period_start_timestamp,
+            "leaf_index": membership.leaf_index as i64,
+            "rate_limit": membership.rate_limit as i64,
+            "registered": true,
+            "state": native::membership_status(
+                membership.grace_period_start_timestamp,
+                membership.grace_period_duration,
+                now,
+            ),
+        })
+        .to_string()
+    }
+
+    fn get_registry_bounds(&mut self, config_account_id: String) -> String {
+        let Some(ctx) = resolve_config_context(&config_account_id, "get_registry_bounds") else {
+            return String::new();
+        };
+        if ctx.config_data.len() < native::CONFIG_STATE_MIN_SIZE {
+            eprintln!("get_registry_bounds: config data too short");
+            return String::new();
+        }
+        let cfg = &ctx.config_data;
+        serde_json::json!({
+            "active_duration":
+                native::config_field_u32(cfg, native::CONFIG_OFFSET_ACTIVE_DURATION),
+            "current_total_rate_limit":
+                native::config_field_u64(cfg, native::CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT),
+            "grace_period_duration":
+                native::config_field_u32(cfg, native::CONFIG_OFFSET_GRACE_DURATION),
+            "max_rate_limit": native::MAX_RATE_LIMIT,
+            "max_total_rate_limit":
+                native::config_field_u64(cfg, native::CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT),
+            "min_rate_limit": native::MIN_RATE_LIMIT,
+            // u128 exceeds JSON number precision → decimal string, like
+            // get_token_balance's balance.
+            "price_per_unit":
+                native::config_field_u128(cfg, native::CONFIG_OFFSET_PRICE_PER_UNIT).to_string(),
+            "total_registrations":
+                native::config_field_u64(cfg, native::CONFIG_OFFSET_TOTAL_REGISTRATIONS),
+        })
+        .to_string()
+    }
 }
 
 #[no_mangle]
@@ -1261,6 +1385,29 @@ mod tests {
         assert_eq!(leaf.len(), 64);
         assert_eq!(leaf, imp.compute_rate_commitment(idc, 100));
         assert_eq!(imp.compute_rate_commitment("nothex".into(), 100), "");
+    }
+
+    // TTL eviction: a stale entry (Failed registration awaiting retry) must
+    // fall out of the dedup map, while a fresh entry keeps deduping.
+    #[test]
+    fn reg_in_flight_entries_expire_after_ttl() {
+        let stale_key = ("cfg-ttl-test".to_string(), "aa".repeat(32));
+        let fresh_key = ("cfg-ttl-test".to_string(), "bb".repeat(32));
+        let Some(back_dated) =
+            Instant::now().checked_sub(REG_IN_FLIGHT_TTL + Duration::from_secs(1))
+        else {
+            eprintln!("reg_in_flight ttl test: uptime too short to back-date; skipping");
+            return;
+        };
+        reg_in_flight(|m| {
+            m.insert(stale_key.clone(), ("stale".to_string(), back_dated));
+            m.insert(fresh_key.clone(), ("fresh".to_string(), Instant::now()));
+        });
+        reg_in_flight(|m| {
+            assert!(!m.contains_key(&stale_key), "stale entry must be evicted");
+            assert_eq!(m.get(&fresh_key).map(|(r, _)| r.as_str()), Some("fresh"));
+            m.remove(&fresh_key);
+        });
     }
 
     // Pins proofs_with_roots_json to the byte output of the legacy path

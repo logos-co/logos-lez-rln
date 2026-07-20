@@ -13,6 +13,8 @@ use rln_layouts::{
 use serde::Serialize;
 use sha2::{Sha256, Digest};
 
+pub use rln_layouts::{MAX_RATE_LIMIT, MIN_RATE_LIMIT};
+
 pub const MAX_SUBTREES_PER_CALL: usize = 64;
 
 /// A single merkle proof.
@@ -57,7 +59,13 @@ pub struct RlnRegisterPlan {
 /// where an exact-size borsh decode would reject the other version.
 pub const CONFIG_OFFSET_TREE_ID: usize = 32;
 pub const CONFIG_OFFSET_PAYMENT_TOKEN_ID: usize = 64;
+pub const CONFIG_OFFSET_PRICE_PER_UNIT: usize = 128;
 pub const CONFIG_OFFSET_TREASURY_ACCOUNT_ID: usize = 144;
+pub const CONFIG_OFFSET_TOTAL_REGISTRATIONS: usize = 176;
+pub const CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT: usize = 184;
+pub const CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT: usize = 192;
+pub const CONFIG_OFFSET_ACTIVE_DURATION: usize = 200;
+pub const CONFIG_OFFSET_GRACE_DURATION: usize = 204;
 pub const CONFIG_OFFSET_TOKEN_PROGRAM_ID: usize = 208;
 /// Minimum (pre-policy) ConfigState size — the precheck floor. NOT the full
 /// policy-era size (296, the host's `CONFIG_SIZE`); accepting 240 is what
@@ -69,6 +77,32 @@ pub fn config_field_32(config_data: &[u8], offset: usize) -> [u8; 32] {
     config_data[offset..offset + 32]
         .try_into()
         .expect("32-byte config field")
+}
+
+/// LE-integer field readers for the same offset scheme (callers pre-check
+/// `CONFIG_STATE_MIN_SIZE`, matching config_field_32's panic-on-short slice).
+pub fn config_field_u32(config_data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        config_data[offset..offset + 4]
+            .try_into()
+            .expect("u32 config field"),
+    )
+}
+
+pub fn config_field_u64(config_data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        config_data[offset..offset + 8]
+            .try_into()
+            .expect("u64 config field"),
+    )
+}
+
+pub fn config_field_u128(config_data: &[u8], offset: usize) -> u128 {
+    u128::from_le_bytes(
+        config_data[offset..offset + 16]
+            .try_into()
+            .expect("u128 config field"),
+    )
 }
 
 /// Borsh size of the on-chain `MembershipState` (8+8+32+8+4+4 bytes).
@@ -434,6 +468,38 @@ pub fn decode_membership(account_data: &[u8]) -> Result<MembershipState, RlnErro
         .map_err(|_| RlnError::SerializationError)
 }
 
+/// Extract the timestamp from fetched CLOCK_50 account data (borsh
+/// `ClockAccountData { block_id: u64, timestamp: u64 }` — LE u64 at 8..16).
+pub fn decode_clock_timestamp(account_data: &[u8]) -> Result<u64, RlnError> {
+    if account_data.len() < 16 {
+        return Err(RlnError::DataTooShort);
+    }
+    Ok(u64::from_le_bytes(
+        account_data[8..16].try_into().expect("8-byte clock field"),
+    ))
+}
+
+/// Registry-visible lifecycle state of a membership at chain time `now`.
+/// Registration sets `grace_period_start = now + active_duration`, so before
+/// grace_start the membership is active; the guest's own boundary helpers
+/// classify the remaining phases (the leaf stays in the tree through
+/// grace_period AND expired — expired only means permissionlessly erasable).
+///
+/// Wire contract: the returned "active"/"grace_period"/"expired" strings are
+/// consumed verbatim by the membership module's store ST_ACTIVE / ST_GRACE /
+/// ST_EXPIRED consts (logos-rln-membership-module). The two crates are
+/// deliberately decoupled — no shared type — and the contract is pinned by
+/// that crate's `membership_state_wire_strings` test.
+pub fn membership_status(grace_start: u64, grace_duration: u32, now: u64) -> &'static str {
+    if rln_layouts::is_expired(grace_start, grace_duration, now) {
+        "expired"
+    } else if rln_layouts::is_in_grace_period(grace_start, grace_duration, now) {
+        "grace_period"
+    } else {
+        "active"
+    }
+}
+
 // ============================================================================
 // Funding plans (mint / claim / balance)
 // ============================================================================
@@ -513,11 +579,12 @@ mod tests {
             tree_id: [0x42; 32],
             payment_token_id: [0x22; 32],
             receipt_token_id: [0x23; 32],
-            price_per_unit: 1,
+            // Exceeds u64::MAX so the u128 offset read is proven 16 bytes wide.
+            price_per_unit: 77_000_000_000_000_000_000,
             treasury_account_id: [0x33; 32],
-            total_registrations: 0,
+            total_registrations: 12_345,
             max_total_rate_limit: 1_000_000,
-            current_total_rate_limit: 0,
+            current_total_rate_limit: 4_242,
             active_duration_for_new_memberships: 100,
             grace_period_duration_for_new_memberships: 10,
             token_program_id: [0x44; 32],
@@ -539,11 +606,44 @@ mod tests {
         assert_eq!(config_field_32(&bytes, CONFIG_OFFSET_TREASURY_ACCOUNT_ID), [0x33; 32]);
         assert_eq!(config_field_32(&bytes, CONFIG_OFFSET_TOKEN_PROGRAM_ID), [0x44; 32]);
         assert_eq!(
+            config_field_u128(&bytes, CONFIG_OFFSET_PRICE_PER_UNIT),
+            77_000_000_000_000_000_000
+        );
+        assert_eq!(config_field_u64(&bytes, CONFIG_OFFSET_TOTAL_REGISTRATIONS), 12_345);
+        assert_eq!(config_field_u64(&bytes, CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT), 1_000_000);
+        assert_eq!(
+            config_field_u64(&bytes, CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT),
+            4_242
+        );
+        assert_eq!(config_field_u32(&bytes, CONFIG_OFFSET_ACTIVE_DURATION), 100);
+        assert_eq!(config_field_u32(&bytes, CONFIG_OFFSET_GRACE_DURATION), 10);
+        assert_eq!(
             CONFIG_OFFSET_TOKEN_PROGRAM_ID + 32,
             CONFIG_STATE_MIN_SIZE,
             "last offset-read field must fit within the pre-policy floor"
         );
         assert!(bytes.len() >= CONFIG_STATE_MIN_SIZE);
+    }
+
+    // Pins decode_clock_timestamp to clock_core's borsh ClockAccountData
+    // layout: block_id u64 at 0..8, timestamp u64 at 8..16.
+    #[test]
+    fn clock_timestamp_decodes_and_rejects_short_data() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&9u64.to_le_bytes());
+        data.extend_from_slice(&1_234_567u64.to_le_bytes());
+        assert_eq!(decode_clock_timestamp(&data), Ok(1_234_567));
+        assert_eq!(decode_clock_timestamp(&data[..15]), Err(RlnError::DataTooShort));
+    }
+
+    // Boundary semantics come from the guest helpers: grace starts AT
+    // grace_start (inclusive) and expiry AT grace_start + duration (inclusive).
+    #[test]
+    fn membership_status_boundaries() {
+        assert_eq!(membership_status(1_000, 50, 999), "active");
+        assert_eq!(membership_status(1_000, 50, 1_000), "grace_period");
+        assert_eq!(membership_status(1_000, 50, 1_049), "grace_period");
+        assert_eq!(membership_status(1_000, 50, 1_050), "expired");
     }
 
     // Pins the Register instruction's word encoding (risc0-serde: variant

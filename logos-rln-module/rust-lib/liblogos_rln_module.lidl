@@ -7,7 +7,7 @@
 ; in-process injection hack, not wire-callable; Rust modules use
 ; modules()/context().
 module liblogos_rln_module {
-  version "1.0.0"
+  version "1.1.0"
   description "RLN Merkle Root Provider Module (Rust port)"
   category "blockchain"
   depends [logos_execution_zone]
@@ -66,6 +66,27 @@ module liblogos_rln_module {
   ; Non-blocking; returns
   ; {"tx_result":s,"payment_definition":hex,"pending":true} or "" on failure.
   method claim_tokens(config_account_id: tstr, dest_account_id: tstr, amount: int) -> tstr
+
+  ; --- v1.1 additive surface: registry-provider reads for the membership
+  ; management module (RLN-MEMBERSHIP-MANAGEMENT spec). New methods only —
+  ; the 11 methods above and the 2 events below stay byte-frozen.
+
+  ; Membership PDA read + lifecycle state derived from the on-chain CLOCK_50
+  ; timestamp (never local time). {"registered":false} when the PDA is absent
+  ; or emptied (erase/slash); otherwise {"clock_timestamp":N,
+  ; "grace_period_duration":N,"grace_period_start_timestamp":N,"leaf_index":N,
+  ; "rate_limit":N,"registered":true,"state":"active"|"grace_period"|"expired"};
+  ; "" on error (including clock fetch failure).
+  method get_membership(config_account_id: tstr, id_commitment_hex: tstr) -> tstr
+
+  ; Registry-declared registration bounds: the compile-time rate-limit range
+  ; plus ConfigState capacity/pricing/duration fields read by offset.
+  ; price_per_unit is a decimal STRING (u128 exceeds JSON number precision,
+  ; like get_token_balance's balance). {"active_duration":N,
+  ; "current_total_rate_limit":N,"grace_period_duration":N,"max_rate_limit":600,
+  ; "max_total_rate_limit":N,"min_rate_limit":100,"price_per_unit":"<decimal>",
+  ; "total_registrations":N}; "" on error.
+  method get_registry_bounds(config_account_id: tstr) -> tstr
 
   ; data[0] = the same compact JSON array get_valid_roots returns.
   event valid_roots(roots_json: tstr)
