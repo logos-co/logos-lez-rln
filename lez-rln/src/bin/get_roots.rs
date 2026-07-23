@@ -1,5 +1,7 @@
-use logos_lez_rln::rln::client::{init_wallet, load_programs, tree_id_from_env};
-use logos_lez_rln::merkle_tree::fetch_root;
+use logos_lez_rln::{
+    merkle_tree::fetch_root,
+    rln::client::{init_wallet, load_programs, tree_id_from_env},
+};
 
 #[tokio::main]
 async fn main() {

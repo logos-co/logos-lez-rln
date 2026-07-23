@@ -10,15 +10,14 @@
 use std::time::Duration;
 
 use nssa::program::Program;
-use rln::prelude::Fr;
-use rln::utils::bytes_le_to_fr;
+use rln::{prelude::Fr, utils::bytes_le_to_fr};
 use tokio::time::sleep;
 use wallet::WalletCore;
 
 use super::{
-    OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
-    OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE, OFFSET_TOP_TREE_DATA, TREE_DEPTH, TOP_DEPTH,
-    derive_main_account, derive_subtree_account,
+    OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY,
+    OFFSET_TOP_TREE_DATA, ROOT_HISTORY_SIZE, TOP_DEPTH, TREE_DEPTH, derive_main_account,
+    derive_subtree_account,
 };
 
 // ============================================================================
@@ -57,7 +56,9 @@ impl ParsedTreeMain {
         Self {
             depth: data[OFFSET_DEPTH],
             next_index: u64::from_le_bytes(
-                data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8].try_into().unwrap()
+                data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
+                    .try_into()
+                    .unwrap(),
             ),
             root: data[OFFSET_ROOT..OFFSET_ROOT + 32].try_into().unwrap(),
             root_history,
@@ -183,7 +184,12 @@ pub async fn fetch_node_hash(
                 } else {
                     &[]
                 };
-                read_sparse_node(top_tree_data, level, node_index as usize, &cached_defaults[level])
+                read_sparse_node(
+                    top_tree_data,
+                    level,
+                    node_index as usize,
+                    &cached_defaults[level],
+                )
             }
             Err(_) => cached_defaults[level],
         }
@@ -227,7 +233,8 @@ pub async fn wait_for_leaf(
             TREE_DEPTH as u8,
             leaf_index,
             &cached_defaults,
-        ).await;
+        )
+        .await;
 
         if &stored_leaf == expected_leaf {
             return true;
@@ -293,7 +300,8 @@ pub async fn get_merkle_proof(
         depth as u8,
         leaf_index,
         &cached_defaults,
-    ).await;
+    )
+    .await;
 
     // Collect sibling hashes
     let mut path_elements: Vec<[u8; 32]> = Vec::with_capacity(depth);
@@ -318,7 +326,8 @@ pub async fn get_merkle_proof(
             level as u8,
             sibling_index,
             &cached_defaults,
-        ).await;
+        )
+        .await;
 
         path_elements.push(sibling);
         current_index /= 2;
@@ -334,7 +343,8 @@ pub async fn get_merkle_proof(
 }
 
 pub fn proof_to_fr(proof: &MerkleProof) -> (Vec<Fr>, Vec<u8>, Fr) {
-    let path_elements: Vec<Fr> = proof.path_elements
+    let path_elements: Vec<Fr> = proof
+        .path_elements
         .iter()
         .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
         .collect();

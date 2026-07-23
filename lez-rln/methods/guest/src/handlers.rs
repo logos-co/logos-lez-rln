@@ -13,16 +13,18 @@ use nssa_core::{
     program::{AccountPostState, ChainedCall, Claim, PdaSeed},
 };
 use rln_layouts::{
-    combine_seeds, is_expired, is_in_grace_period, label_seed, u32_seed, MerkleOpcode,
-    SUBTREE_LEAVES,
+    MerkleOpcode, SUBTREE_LEAVES, combine_seeds, is_expired, is_in_grace_period, label_seed,
+    u32_seed,
 };
 use spel_framework::prelude::SpelOutput;
 
-use crate::hash::{hash_single, validate_field_element};
-use crate::program::{ConfigState, MembershipState};
-use crate::registration::{
-    calculate_payment_amount, compute_registration_leaf, parse_token_holding, read_tree_next_index,
-    require_clock, validate_rate_limit, TokenHolding,
+use crate::{
+    hash::{hash_single, validate_field_element},
+    program::{ConfigState, MembershipState},
+    registration::{
+        TokenHolding, calculate_payment_amount, compute_registration_leaf, parse_token_holding,
+        read_tree_next_index, require_clock, validate_rate_limit,
+    },
 };
 
 type Output = SpelOutput;
@@ -93,8 +95,7 @@ fn merkle_chained_call(
     ChainedCall {
         program_id: bytemuck::cast(merkle_program_id),
         pre_states: vec![authorized(tree_main), authorized(bottom_subtree)],
-        instruction_data: risc0_zkvm::serde::to_vec(&payload)
-            .expect("serialize merkle payload"),
+        instruction_data: risc0_zkvm::serde::to_vec(&payload).expect("serialize merkle payload"),
         pda_seeds: vec![
             PdaSeed::new(main_seed(tree_id)),
             PdaSeed::new(subtree_seed(tree_id, subtree_id)),
@@ -119,7 +120,11 @@ fn new_membership_state(
     }
 }
 
-fn write_borsh<T: BorshSerialize>(account: &mut AccountWithMetadata, value: &T, what: &'static str) {
+fn write_borsh<T: BorshSerialize>(
+    account: &mut AccountWithMetadata,
+    value: &T,
+    what: &'static str,
+) {
     account.account.data = borsh::to_vec(value)
         .unwrap_or_else(|_| panic!("borsh serialize {what}"))
         .try_into()
@@ -145,7 +150,10 @@ pub fn initialize(
     free_quota: u64,
     faucet_claim_cap: u128,
 ) -> Output {
-    assert!(max_total_rate_limit > 0, "Max total rate limit must be positive");
+    assert!(
+        max_total_rate_limit > 0,
+        "Max total rate limit must be positive"
+    );
     assert!(
         active_duration_for_new_memberships > 0,
         "Active duration must be positive"
@@ -242,9 +250,12 @@ pub fn claim_tokens(
 ) -> Output {
     assert!(amount > 0, "Amount must be positive");
 
-    let config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    let config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
     assert!(
         config_state.faucet_claim_cap > 0,
         "Faucet disabled for this deployment"
@@ -267,7 +278,9 @@ pub fn claim_tokens(
     let mint = ChainedCall::new(
         bytemuck::cast(config_state.token_program_id),
         vec![authorized(&payment_token_def), dest_holding.clone()],
-        &token_core::Instruction::Mint { amount_to_mint: amount },
+        &token_core::Instruction::Mint {
+            amount_to_mint: amount,
+        },
     )
     .with_pda_seeds(vec![PdaSeed::new(payment_seed(&tree_id))]);
 
@@ -313,10 +326,16 @@ pub fn register(
     validate_field_element(&id_commitment);
     validate_rate_limit(rate_limit);
 
-    let mut config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
-    assert!(config_state.can_register(rate_limit), "Would exceed max total rate limit");
+    let mut config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
+    assert!(
+        config_state.can_register(rate_limit),
+        "Would exceed max total rate limit"
+    );
 
     let now = require_clock(&clock_account);
     let grace_period_start_timestamp =
@@ -324,13 +343,21 @@ pub fn register(
     let payment_amount = calculate_payment_amount(rate_limit, config_state.price_per_unit);
 
     assert!(user_holding.is_authorized, "User must authorize payment");
-    let TokenHolding { definition_id: user_token, balance: user_balance } =
-        parse_token_holding(user_holding.account.data.as_ref());
-    assert_eq!(user_token, config_state.payment_token_id, "Wrong payment token");
+    let TokenHolding {
+        definition_id: user_token,
+        balance: user_balance,
+    } = parse_token_holding(user_holding.account.data.as_ref());
+    assert_eq!(
+        user_token, config_state.payment_token_id,
+        "Wrong payment token"
+    );
     assert!(user_balance >= payment_amount, "Insufficient balance");
 
     let treasury_id: [u8; 32] = *treasury_holding.account_id.value();
-    assert_eq!(treasury_id, config_state.treasury_account_id, "Wrong treasury");
+    assert_eq!(
+        treasury_id, config_state.treasury_account_id,
+        "Wrong treasury"
+    );
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
     let expected_subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
@@ -342,8 +369,9 @@ pub fn register(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     config_state.total_registrations = config_state.total_registrations.saturating_add(1);
-    config_state.current_total_rate_limit =
-        config_state.current_total_rate_limit.saturating_add(rate_limit);
+    config_state.current_total_rate_limit = config_state
+        .current_total_rate_limit
+        .saturating_add(rate_limit);
     write_borsh(&mut config, &config_state, "ConfigState");
 
     let membership_state = new_membership_state(
@@ -358,7 +386,9 @@ pub fn register(
     let token_transfer = ChainedCall::new(
         user_holding.account.program_owner,
         vec![authorized(&user_holding), treasury_holding.clone()],
-        &token_core::Instruction::Transfer { amount_to_transfer: payment_amount },
+        &token_core::Instruction::Transfer {
+            amount_to_transfer: payment_amount,
+        },
     );
 
     let merkle_insert = merkle_chained_call(
@@ -401,10 +431,16 @@ pub fn register_free(
     validate_field_element(&id_commitment);
     validate_rate_limit(rate_limit);
 
-    let mut config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
-    assert!(config_state.can_register(rate_limit), "Would exceed max total rate limit");
+    let mut config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
+    assert!(
+        config_state.can_register(rate_limit),
+        "Would exceed max total rate limit"
+    );
 
     assert_ne!(
         config_state.authorized_registrar, [0u8; 32],
@@ -435,8 +471,9 @@ pub fn register_free(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     config_state.total_registrations = config_state.total_registrations.saturating_add(1);
-    config_state.current_total_rate_limit =
-        config_state.current_total_rate_limit.saturating_add(rate_limit);
+    config_state.current_total_rate_limit = config_state
+        .current_total_rate_limit
+        .saturating_add(rate_limit);
     config_state.free_quota_remaining -= 1;
     write_borsh(&mut config, &config_state, "ConfigState");
 
@@ -483,9 +520,12 @@ pub fn buy_credits(
 ) -> Output {
     assert!(amount > 0, "Amount must be positive");
 
-    let config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    let config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
 
     let payment_amount = config_state.price_per_unit.saturating_mul(amount);
 
@@ -495,25 +535,40 @@ pub fn buy_credits(
         "Wrong receipt token definition"
     );
 
-    assert!(user_payment_holding.is_authorized, "User must authorize payment");
-    let TokenHolding { definition_id: user_token, balance: user_balance } =
-        parse_token_holding(user_payment_holding.account.data.as_ref());
-    assert_eq!(user_token, config_state.payment_token_id, "Wrong payment token");
+    assert!(
+        user_payment_holding.is_authorized,
+        "User must authorize payment"
+    );
+    let TokenHolding {
+        definition_id: user_token,
+        balance: user_balance,
+    } = parse_token_holding(user_payment_holding.account.data.as_ref());
+    assert_eq!(
+        user_token, config_state.payment_token_id,
+        "Wrong payment token"
+    );
     assert!(user_balance >= payment_amount, "Insufficient balance");
 
     let treasury_id: [u8; 32] = *treasury_holding.account_id.value();
-    assert_eq!(treasury_id, config_state.treasury_account_id, "Wrong treasury");
+    assert_eq!(
+        treasury_id, config_state.treasury_account_id,
+        "Wrong treasury"
+    );
 
     let token_program_id = user_payment_holding.account.program_owner;
     let transfer = ChainedCall::new(
         token_program_id,
         vec![authorized(&user_payment_holding), treasury_holding.clone()],
-        &token_core::Instruction::Transfer { amount_to_transfer: payment_amount },
+        &token_core::Instruction::Transfer {
+            amount_to_transfer: payment_amount,
+        },
     );
     let mint = ChainedCall::new(
         token_program_id,
         vec![authorized(&credit_token_def), user_credit_holding.clone()],
-        &token_core::Instruction::Mint { amount_to_mint: amount },
+        &token_core::Instruction::Mint {
+            amount_to_mint: amount,
+        },
     )
     .with_pda_seeds(vec![PdaSeed::new(receipt_seed(&tree_id))]);
 
@@ -545,23 +600,43 @@ pub fn register_with_credits(
     let rate_limit = amount_to_burn;
     validate_rate_limit(rate_limit);
 
-    let mut config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
-    assert!(config_state.can_register(rate_limit), "Would exceed max total rate limit");
+    let mut config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
+    assert!(
+        config_state.can_register(rate_limit),
+        "Would exceed max total rate limit"
+    );
 
     let now = require_clock(&clock_account);
     let grace_period_start_timestamp =
         now.saturating_add(config_state.active_duration_for_new_memberships as u64);
 
     let receipt_def_id: [u8; 32] = *credit_token_def.account_id.value();
-    assert_eq!(receipt_def_id, config_state.receipt_token_id, "Wrong receipt token");
+    assert_eq!(
+        receipt_def_id, config_state.receipt_token_id,
+        "Wrong receipt token"
+    );
 
-    assert!(user_credit_holding.is_authorized, "User must authorize burn");
-    let TokenHolding { definition_id: user_token, balance: user_balance } =
-        parse_token_holding(user_credit_holding.account.data.as_ref());
-    assert_eq!(user_token, config_state.receipt_token_id, "Wrong token type");
-    assert!(user_balance >= rate_limit as u128, "Insufficient receipt tokens");
+    assert!(
+        user_credit_holding.is_authorized,
+        "User must authorize burn"
+    );
+    let TokenHolding {
+        definition_id: user_token,
+        balance: user_balance,
+    } = parse_token_holding(user_credit_holding.account.data.as_ref());
+    assert_eq!(
+        user_token, config_state.receipt_token_id,
+        "Wrong token type"
+    );
+    assert!(
+        user_balance >= rate_limit as u128,
+        "Insufficient receipt tokens"
+    );
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
     let expected_subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
@@ -573,8 +648,9 @@ pub fn register_with_credits(
     let leaf_value = compute_registration_leaf(&id_commitment, rate_limit);
 
     config_state.total_registrations = config_state.total_registrations.saturating_add(1);
-    config_state.current_total_rate_limit =
-        config_state.current_total_rate_limit.saturating_add(rate_limit);
+    config_state.current_total_rate_limit = config_state
+        .current_total_rate_limit
+        .saturating_add(rate_limit);
     write_borsh(&mut config, &config_state, "ConfigState");
 
     let membership_state = new_membership_state(
@@ -589,7 +665,9 @@ pub fn register_with_credits(
     let burn = ChainedCall::new(
         user_credit_holding.account.program_owner,
         vec![credit_token_def.clone(), authorized(&user_credit_holding)],
-        &token_core::Instruction::Burn { amount_to_burn: rate_limit as u128 },
+        &token_core::Instruction::Burn {
+            amount_to_burn: rate_limit as u128,
+        },
     );
     let merkle_insert = merkle_chained_call(
         config_state.merkle_program_id,
@@ -632,9 +710,12 @@ pub fn slash(
         "id_commitment arg must match hash(identity_secret)"
     );
 
-    let mut config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    let mut config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
 
     let membership_bytes = membership.account.data.as_ref();
     assert!(
@@ -688,9 +769,12 @@ pub fn extend(
 ) -> Output {
     let now = require_clock(&clock_account);
 
-    let config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    let config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
 
     let membership_bytes = membership.account.data.as_ref();
     assert!(
@@ -734,9 +818,12 @@ pub fn erase(
 ) -> Output {
     let now = require_clock(&clock_account);
 
-    let mut config_state = ConfigState::try_from_slice(config.account.data.as_ref())
-        .expect("decode ConfigState");
-    assert_eq!(config_state.tree_id, tree_id, "tree_id arg must match config");
+    let mut config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, tree_id,
+        "tree_id arg must match config"
+    );
 
     let membership_bytes = membership.account.data.as_ref();
     assert!(

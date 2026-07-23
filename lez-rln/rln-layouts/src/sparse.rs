@@ -32,9 +32,8 @@ pub fn read_sparse_node(
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         let entry_start = 2 + mid * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
+        let entry_offset =
+            u16::from_le_bytes(data[entry_start..entry_start + 2].try_into().unwrap());
         if entry_offset < target {
             lo = mid + 1;
         } else {
@@ -44,9 +43,8 @@ pub fn read_sparse_node(
 
     if lo < count {
         let entry_start = 2 + lo * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
+        let entry_offset =
+            u16::from_le_bytes(data[entry_start..entry_start + 2].try_into().unwrap());
         if entry_offset == target {
             return data[entry_start + 2..entry_start + 34].try_into().unwrap();
         }

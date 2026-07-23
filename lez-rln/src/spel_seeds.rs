@@ -9,7 +9,6 @@
 
 use nssa::AccountId;
 use nssa_core::program::{PdaSeed, ProgramId};
-
 pub use rln_layouts::{combine_seeds, label_seed, u32_seed};
 
 /// Derive a PDA account ID from program_id and a list of 32-byte seeds.

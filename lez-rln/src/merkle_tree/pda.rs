@@ -58,14 +58,20 @@ mod tests {
     fn subtree_pdas_vary_by_id() {
         let p = mock_program_id();
         let t = [1u8; 32];
-        assert_ne!(derive_subtree_account(&p, &t, 0), derive_subtree_account(&p, &t, 1));
+        assert_ne!(
+            derive_subtree_account(&p, &t, 0),
+            derive_subtree_account(&p, &t, 1)
+        );
     }
 
     #[test]
     fn main_and_subtree_are_distinct() {
         let p = mock_program_id();
         let t = [1u8; 32];
-        assert_ne!(derive_main_account(&p, &t), derive_subtree_account(&p, &t, 0));
+        assert_ne!(
+            derive_main_account(&p, &t),
+            derive_subtree_account(&p, &t, 0)
+        );
     }
 
     #[test]

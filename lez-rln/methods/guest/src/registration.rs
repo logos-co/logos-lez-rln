@@ -1,22 +1,19 @@
 //! Helpers shared by the SPEL `rln_registration` guest binary.
 
-use crate::hash::{hash_pair, validate_field_element};
-use crate::layouts;
-use nssa_core::Timestamp;
-use nssa_core::account::AccountWithMetadata;
-
-// Re-export rate limit and expiration constants / helpers from shared crate
-pub use crate::layouts::{
-    MIN_RATE_LIMIT, MAX_RATE_LIMIT,
-    CLOCK_50_ACCOUNT_ID_BYTES,
-    is_in_grace_period, is_expired,
-};
-
+use nssa_core::{Timestamp, account::AccountWithMetadata};
 // ============================================================================
 // Merkle Tree Account Layout
 // ============================================================================
-
 pub use rln_layouts::OFFSET_NEXT_INDEX as TREE_OFFSET_NEXT_INDEX;
+
+// Re-export rate limit and expiration constants / helpers from shared crate
+pub use crate::layouts::{
+    CLOCK_50_ACCOUNT_ID_BYTES, MAX_RATE_LIMIT, MIN_RATE_LIMIT, is_expired, is_in_grace_period,
+};
+use crate::{
+    hash::{hash_pair, validate_field_element},
+    layouts,
+};
 
 // ============================================================================
 // Token Operations
@@ -48,12 +45,14 @@ pub fn validate_rate_limit(rate_limit: u64) {
     assert!(
         rate_limit >= MIN_RATE_LIMIT,
         "Rate limit {} below minimum {}",
-        rate_limit, MIN_RATE_LIMIT
+        rate_limit,
+        MIN_RATE_LIMIT
     );
     assert!(
         rate_limit <= MAX_RATE_LIMIT,
         "Rate limit {} above maximum {}",
-        rate_limit, MAX_RATE_LIMIT
+        rate_limit,
+        MAX_RATE_LIMIT
     );
 }
 
@@ -83,7 +82,9 @@ pub fn compute_registration_leaf(id_commitment: &[u8; 32], rate_limit: u64) -> [
 /// Read next_index from tree main account data.
 pub fn read_tree_next_index(tree_main_data: &[u8]) -> u64 {
     u64::from_le_bytes(
-        tree_main_data[TREE_OFFSET_NEXT_INDEX..TREE_OFFSET_NEXT_INDEX + 8].try_into().unwrap()
+        tree_main_data[TREE_OFFSET_NEXT_INDEX..TREE_OFFSET_NEXT_INDEX + 8]
+            .try_into()
+            .unwrap(),
     )
 }
 

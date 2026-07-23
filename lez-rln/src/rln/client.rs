@@ -1,6 +1,8 @@
 //! Client helpers for the RLN registration program (shared by `run_rln_proof`,
 //! `bulk_register`, and `run_setup`).
 
+use std::{path::PathBuf, time::Duration};
+
 use common::transaction::LeeTransaction as NSSATransaction;
 use nssa::{
     AccountId, ProgramDeploymentTransaction, PublicTransaction,
@@ -8,20 +10,21 @@ use nssa::{
     program_deployment_transaction,
     public_transaction::{Message, WitnessSet},
 };
-use rln::hashers::poseidon_hash;
-use rln::prelude::{Fr, seeded_keygen};
-use rln::utils::{IdSecret, fr_to_bytes_le};
+use rln::{
+    hashers::poseidon_hash,
+    prelude::{Fr, seeded_keygen},
+    utils::{IdSecret, fr_to_bytes_le},
+};
 use sequencer_service_rpc::RpcClient as _;
-use std::path::PathBuf;
-use std::time::Duration;
-use wallet::WalletCore;
-use wallet::program_facades::token::Token;
+use wallet::{WalletCore, program_facades::token::Token};
 
-use crate::merkle_tree::SUBTREE_LEAVES;
-use crate::rln::{
-    CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, derive_config_account,
-    derive_payment_supply_account, derive_payment_token_account, derive_subtree_account,
-    derive_tree_main_account, Instruction,
+use crate::{
+    merkle_tree::SUBTREE_LEAVES,
+    rln::{
+        CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction,
+        derive_config_account, derive_payment_supply_account, derive_payment_token_account,
+        derive_subtree_account, derive_tree_main_account,
+    },
 };
 
 pub const PRICE_PER_UNIT: u128 = 10_000;
@@ -100,7 +103,11 @@ pub fn policy_from_env() -> DeployPolicy {
             std::process::exit(2);
         }),
     };
-    DeployPolicy { funding, authorized_registrar, free_quota }
+    DeployPolicy {
+        funding,
+        authorized_registrar,
+        free_quota,
+    }
 }
 
 /// 30 days, in seconds.
@@ -114,7 +121,8 @@ pub fn clock_account_id() -> AccountId {
     AccountId::new(crate::rln::CLOCK_50_ACCOUNT_ID_BYTES)
 }
 
-pub const REGISTRATION_BINARY: &str = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
+pub const REGISTRATION_BINARY: &str =
+    "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin";
 pub const MERKLE_TREE_BINARY: &str =
     "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
 pub const DATA_DIR: &str = ".logos-lez-rln";
@@ -131,7 +139,9 @@ pub fn init_wallet() -> WalletCore {
         WalletCore::new_update_chain(config_path, storage_path, None).unwrap()
     } else {
         println!("First run: initializing wallet storage at {storage_path:?}");
-        WalletCore::new_init_storage(config_path, storage_path, None, "").unwrap().0
+        WalletCore::new_init_storage(config_path, storage_path, None, "")
+            .unwrap()
+            .0
     }
 }
 
@@ -310,10 +320,7 @@ pub struct RlnIdentity {
 
 /// Create a new wallet account, derive an RLN identity from its signing key, and
 /// compute the rate commitment (leaf value = poseidon(id_commitment, rate_limit)).
-pub async fn create_identity(
-    wallet_core: &mut WalletCore,
-    user_message_limit: u64,
-) -> RlnIdentity {
+pub async fn create_identity(wallet_core: &mut WalletCore, user_message_limit: u64) -> RlnIdentity {
     let (account_id, _chain_index) = wallet_core.create_new_account_public(None);
     wallet_core
         .store_persistent_data()
@@ -324,8 +331,7 @@ pub async fn create_identity(
         .expect("Account should be self-owned public");
 
     let seed = signing_key.value();
-    let (mut identity_secret_fr, id_commitment_fr) =
-        seeded_keygen(seed);
+    let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(seed);
 
     let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
     let id_secret_hash_hex: String = id_secret_hash_bytes
@@ -375,7 +381,11 @@ async fn send_deploy_tx(
         .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
         .await
     {
-        Ok(_) => println!("  {} deployed (program ID: {:?})", program_name, program.id()),
+        Ok(_) => println!(
+            "  {} deployed (program ID: {:?})",
+            program_name,
+            program.id()
+        ),
         Err(e) => {
             let err_str = format!("{:?}", e);
             if err_str.contains("already")
@@ -480,8 +490,10 @@ pub async fn run_setup(
 ) -> AccountId {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_id = derive_tree_main_account(&registration_program.id(), tree_id);
-    let credit_token_id = crate::rln::derive_credit_token_account(&registration_program.id(), tree_id);
-    let credit_supply_id = crate::rln::derive_credit_supply_account(&registration_program.id(), tree_id);
+    let credit_token_id =
+        crate::rln::derive_credit_token_account(&registration_program.id(), tree_id);
+    let credit_supply_id =
+        crate::rln::derive_credit_supply_account(&registration_program.id(), tree_id);
 
     println!("Setup Step 1: Checking/deploying programs...");
 
@@ -559,9 +571,10 @@ pub async fn run_setup(
             wallet_core
                 .store_persistent_data()
                 .expect("Failed to store wallet");
-            let payment_def =
-                derive_payment_token_account(&registration_program.id(), tree_id);
-            println!("Setup Step 3-4: Faucet funding — payment token will be the program PDA {payment_def} (created in Step 5b; treasury seeded by claim)");
+            let payment_def = derive_payment_token_account(&registration_program.id(), tree_id);
+            println!(
+                "Setup Step 3-4: Faucet funding — payment token will be the program PDA {payment_def} (created in Step 5b; treasury seeded by claim)"
+            );
             *payment_def.value()
         }
     };
@@ -627,8 +640,7 @@ pub async fn run_setup(
         // program's own PDA definition — mirror of InitializeCreditToken.
         println!("Setup Step 5b: Creating payment token (program-owned PDA)...");
         let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
-        let payment_supply_id =
-            derive_payment_supply_account(&registration_program.id(), tree_id);
+        let payment_supply_id = derive_payment_supply_account(&registration_program.id(), tree_id);
         send_init_tx(
             wallet_core,
             registration_program,
@@ -679,9 +691,11 @@ pub async fn claim_payment_tokens(
 ) {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
     let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
-    let instruction_data =
-        Program::serialize_instruction(Instruction::ClaimTokens { tree_id: *tree_id, amount })
-            .expect("serialize ClaimTokens");
+    let instruction_data = Program::serialize_instruction(Instruction::ClaimTokens {
+        tree_id: *tree_id,
+        amount,
+    })
+    .expect("serialize ClaimTokens");
     let hash = wallet_core
         .send_pub_tx(
             vec![
@@ -724,8 +738,12 @@ pub async fn create_funded_user(
             amount,
         )
         .await;
-        wait_for_account_data(wallet_core, &user_payment_holding_id, wait_account_attempts())
-            .await;
+        wait_for_account_data(
+            wallet_core,
+            &user_payment_holding_id,
+            wait_account_attempts(),
+        )
+        .await;
         println!("  User payment holding: {}", user_payment_holding_id);
         println!("  User funded with {} tokens\n", amount);
         return user_payment_holding_id;
@@ -749,7 +767,12 @@ pub async fn create_funded_user(
         .await
         .expect("Failed to fund user. The supply holding may be out of funds.");
 
-    wait_for_account_data(wallet_core, &user_payment_holding_id, wait_account_attempts()).await;
+    wait_for_account_data(
+        wallet_core,
+        &user_payment_holding_id,
+        wait_account_attempts(),
+    )
+    .await;
     println!("  User payment holding: {}", user_payment_holding_id);
     println!("  User funded with {} tokens\n", user_funding);
 
@@ -827,11 +850,8 @@ pub async fn register_identity(
     let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
 
-    let membership_account = crate::rln::derive_membership_account(
-        &registration_program.id(),
-        tree_id,
-        id_commitment,
-    );
+    let membership_account =
+        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
     let accounts = vec![
         config_account,
         tree_main_account,
@@ -889,11 +909,8 @@ pub async fn extend_membership(
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
-    let membership_account = crate::rln::derive_membership_account(
-        &registration_program.id(),
-        tree_id,
-        id_commitment,
-    );
+    let membership_account =
+        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
 
     let accounts = vec![config_account, membership_account, clock_account_id()];
 
@@ -939,11 +956,8 @@ pub async fn erase_membership(
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
-    let membership_account = crate::rln::derive_membership_account(
-        &registration_program.id(),
-        tree_id,
-        id_commitment,
-    );
+    let membership_account =
+        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
     let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
     let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
 

@@ -1,14 +1,19 @@
 //! End-to-end RLN proof demo. Requires `run_setup` to have been run first.
 
-use logos_lez_rln::merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf};
-use logos_lez_rln::rln::client::{
-    RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
-    register_identity, tree_id_from_env,
-};
-use rln::hashers::poseidon_hash;
-use rln::prelude::{hash_to_field_le, Fr, RLNWitnessInput, RLN};
-use rln::utils::fr_to_bytes_le;
 use std::time::Duration;
+
+use logos_lez_rln::{
+    merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf},
+    rln::client::{
+        RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
+        register_identity, tree_id_from_env,
+    },
+};
+use rln::{
+    hashers::poseidon_hash,
+    prelude::{Fr, RLN, RLNWitnessInput, hash_to_field_le},
+    utils::fr_to_bytes_le,
+};
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -27,13 +32,26 @@ async fn main() {
 
     println!("=== RLN Proof Demo ===\n");
 
-    let user_holding_id = create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await;
+    let user_holding_id = create_funded_user(
+        &mut wallet_core,
+        &registration_program,
+        &tree_id,
+        USER_FUNDING,
+    )
+    .await;
 
     // Step 1: Create identity using zerokit
     println!("Step 1: Creating identity...");
-    let RlnIdentity { identity_secret, id_commitment_bytes, leaf_bytes, .. } =
-        create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
-    println!("  Identity commitment: {}", hex::encode(&id_commitment_bytes));
+    let RlnIdentity {
+        identity_secret,
+        id_commitment_bytes,
+        leaf_bytes,
+        ..
+    } = create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
+    println!(
+        "  Identity commitment: {}",
+        hex::encode(&id_commitment_bytes)
+    );
 
     // Step 2: Register via the registration program
     println!("\nStep 2: Registering...");
@@ -45,7 +63,8 @@ async fn main() {
         &user_holding_id,
         USER_MESSAGE_LIMIT,
         None,
-    ).await;
+    )
+    .await;
     println!("  Registered at index: {}", leaf_index);
 
     // Wait for transaction to be finalized
@@ -57,7 +76,8 @@ async fn main() {
         &leaf_bytes,
         90,
         Duration::from_millis(500),
-    ).await;
+    )
+    .await;
     if !finalized {
         panic!("Timeout waiting for leaf to appear on-chain");
     }
@@ -67,7 +87,10 @@ async fn main() {
     let proof = get_merkle_proof(&wallet_core, &registration_program, &tree_id, leaf_index).await;
     let (path_elements, path_indices, root) = proof_to_fr(&proof);
 
-    assert_eq!(leaf_bytes, proof.leaf, "Leaf mismatch - transaction may not be finalized");
+    assert_eq!(
+        leaf_bytes, proof.leaf,
+        "Leaf mismatch - transaction may not be finalized"
+    );
 
     // Step 4: Generate RLN proof
     println!("\nStep 4: Generating RLN proof...");
@@ -98,8 +121,14 @@ async fn main() {
         .expect("Failed to generate RLN proof");
 
     println!("  Proof generated successfully!");
-    println!("  Nullifier: {}", hex::encode(fr_to_bytes_le(&proof_values.nullifier())));
-    println!("  Root in proof: {}", hex::encode(fr_to_bytes_le(&proof_values.root())));
+    println!(
+        "  Nullifier: {}",
+        hex::encode(fr_to_bytes_le(&proof_values.nullifier()))
+    );
+    println!(
+        "  Root in proof: {}",
+        hex::encode(fr_to_bytes_le(&proof_values.root()))
+    );
 
     // Step 5: Verify the RLN proof
     println!("\nStep 5: Verifying RLN proof...");
