@@ -7,8 +7,8 @@
 //!
 //! # Architecture
 //!
-//! - **Main account**: Stores tree metadata (depth, next_index, root, cached defaults)
-//!   plus top tree nodes in sparse format (grows dynamically)
+//! - **Main account**: Stores tree metadata (depth, next_index, root, cached defaults) plus top
+//!   tree nodes in sparse format (grows dynamically)
 //! - **Bottom subtree accounts**: Each stores a depth-10 subtree in sparse format
 //!
 //! Each insert/remove touches exactly 2 accounts: the main account and one
@@ -26,26 +26,23 @@
 //! ensures only the owning program (via tail call with PDA seeds) can modify
 //! the tree.
 
-use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::{AccountPostState, Claim};
-pub use rln_layouts::{
-    TREE_DEPTH, TOP_DEPTH, BOTTOM_DEPTH, SUBTREE_LEAVES,
-    OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY, ROOT_HISTORY_SIZE,
-    OFFSET_CACHED_NODES, OFFSET_TOP_TREE_DATA,
-    read_sparse_node, subtree_node_offset,
+use nssa_core::{
+    account::AccountWithMetadata,
+    program::{AccountPostState, Claim},
 };
+pub use rln_layouts::{
+    BOTTOM_DEPTH, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
+    OFFSET_ROOT_HISTORY, OFFSET_TOP_TREE_DATA, ROOT_HISTORY_SIZE, SUBTREE_LEAVES, TOP_DEPTH,
+    TREE_DEPTH, read_sparse_node, subtree_node_offset,
+};
+
+use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
 
 /// Write a 32-byte hash into sparse tree node storage.
 ///
 /// Format: `[count(u16le), entries...]` where each entry is `[offset(u16le), hash(32)]`.
 /// Entries are kept sorted by offset. Updates existing entries in-place, or inserts new ones.
-fn write_sparse_node(
-    data: &mut Vec<u8>,
-    level: usize,
-    index: usize,
-    hash: &[u8; 32],
-) {
+fn write_sparse_node(data: &mut Vec<u8>, level: usize, index: usize, hash: &[u8; 32]) {
     if data.len() < 2 {
         data.resize(2, 0);
     }
@@ -58,9 +55,8 @@ fn write_sparse_node(
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         let entry_start = 2 + mid * 34;
-        let entry_offset = u16::from_le_bytes(
-            data[entry_start..entry_start + 2].try_into().unwrap(),
-        );
+        let entry_offset =
+            u16::from_le_bytes(data[entry_start..entry_start + 2].try_into().unwrap());
         if entry_offset < target {
             lo = mid + 1;
         } else {
@@ -71,9 +67,7 @@ fn write_sparse_node(
     let insert_pos = 2 + lo * 34;
 
     if lo < count {
-        let entry_offset = u16::from_le_bytes(
-            data[insert_pos..insert_pos + 2].try_into().unwrap(),
-        );
+        let entry_offset = u16::from_le_bytes(data[insert_pos..insert_pos + 2].try_into().unwrap());
         if entry_offset == target {
             // Update existing entry in-place
             data[insert_pos + 2..insert_pos + 34].copy_from_slice(hash);
@@ -136,7 +130,10 @@ pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<AccountPostS
     let mut post_account = main_account.account.clone();
     post_account.data = data.try_into().expect("Data should fit");
 
-    vec![AccountPostState::new_claimed_if_default(post_account, Claim::Authorized)]
+    vec![AccountPostState::new_claimed_if_default(
+        post_account,
+        Claim::Authorized,
+    )]
 }
 
 /// Insert a leaf into the Merkle tree.
@@ -428,10 +425,10 @@ fn extract_cached_nodes(main_data: &[u8], depth: usize) -> Vec<[u8; 32]> {
 /// Compute the new root after updating a leaf value.
 ///
 /// Two-phase approach:
-/// 1. **Bottom subtree** (BOTTOM_DEPTH levels): Walk local_index from leaf
-///    to subtree root, reading/writing from bottom_tree_data
-/// 2. **Top tree** (TOP_DEPTH levels): Walk subtree_id from its position
-///    in the top tree to the overall root, reading/writing from top_tree_data
+/// 1. **Bottom subtree** (BOTTOM_DEPTH levels): Walk local_index from leaf to subtree root,
+///    reading/writing from bottom_tree_data
+/// 2. **Top tree** (TOP_DEPTH levels): Walk subtree_id from its position in the top tree to the
+///    overall root, reading/writing from top_tree_data
 fn compute_root_after_update(
     leaf_value: [u8; 32],
     leaf_index: usize,
@@ -573,10 +570,10 @@ pub fn read_root(main_data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use nssa_core::account::{Account, AccountId};
+
     use super::*;
     use crate::hash::ZERO;
-    use nssa_core::account::Account;
-    use nssa_core::account::AccountId;
 
     // ========================================================================
     // Test Fixtures
@@ -966,7 +963,10 @@ mod tests {
 
         let (remove_post_states, _) = remove_leaf(remove_pre_states, &remove_instruction);
 
-        assert_eq!(read_next_index(remove_post_states[0].account().data.as_ref()), 1);
+        assert_eq!(
+            read_next_index(remove_post_states[0].account().data.as_ref()),
+            1
+        );
     }
 
     #[test]
@@ -1017,7 +1017,10 @@ mod tests {
         let (remove_post_states, _) = remove_leaf(remove_pre_states, &remove_instruction);
 
         let root_after_remove = read_root(remove_post_states[0].account().data.as_ref());
-        assert_ne!(root_after_remove, root_after_two, "Root should change after removal");
+        assert_ne!(
+            root_after_remove, root_after_two,
+            "Root should change after removal"
+        );
     }
 
     // ========================================================================
@@ -1069,9 +1072,7 @@ mod tests {
     /// Helper: sequentially insert `count` leaves starting from a fresh tree.
     /// Returns (main_account_data, subtree_map) where subtree_map tracks
     /// each subtree's data by subtree_id.
-    fn insert_n_leaves(
-        count: usize,
-    ) -> (Account, std::collections::HashMap<u32, Account>) {
+    fn insert_n_leaves(count: usize) -> (Account, std::collections::HashMap<u32, Account>) {
         use std::collections::HashMap;
 
         // Initialize tree
@@ -1082,10 +1083,7 @@ mod tests {
         for i in 0..count {
             let subtree_id = (i / SUBTREE_LEAVES) as u32;
 
-            let subtree_account = subtrees
-                .get(&subtree_id)
-                .cloned()
-                .unwrap_or_default();
+            let subtree_account = subtrees.get(&subtree_id).cloned().unwrap_or_default();
 
             let mut instruction = Vec::with_capacity(40);
             instruction.extend_from_slice(&(i as u64).to_le_bytes());
@@ -1206,11 +1204,8 @@ mod tests {
         let last_index: u64 = (1u64 << TREE_DEPTH) - 1;
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
 
-        let main_data = create_main_account_data_with_state(
-            last_index,
-            cached_nodes[0],
-            &cached_nodes,
-        );
+        let main_data =
+            create_main_account_data_with_state(last_index, cached_nodes[0], &cached_nodes);
 
         let main_account = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
@@ -1232,10 +1227,7 @@ mod tests {
         insert_instr.extend_from_slice(&last_index.to_le_bytes());
         insert_instr.extend_from_slice(&[1u8; 32]);
 
-        let post_insert = insert_leaf(
-            vec![main_account, subtree_account],
-            &insert_instr,
-        );
+        let post_insert = insert_leaf(vec![main_account, subtree_account], &insert_instr);
         let root_after_insert = read_root(post_insert[0].account().data.as_ref());
 
         // Remove
@@ -1347,8 +1339,14 @@ mod tests {
         }
 
         let final_root = read_root(current_main.data.as_ref());
-        assert_eq!(final_root, empty_root, "Removing all leaves should restore empty root");
+        assert_eq!(
+            final_root, empty_root,
+            "Removing all leaves should restore empty root"
+        );
         // next_index should still be 1024 (removals don't decrement it)
-        assert_eq!(read_next_index(current_main.data.as_ref()), SUBTREE_LEAVES as u64);
+        assert_eq!(
+            read_next_index(current_main.data.as_ref()),
+            SUBTREE_LEAVES as u64
+        );
     }
 }

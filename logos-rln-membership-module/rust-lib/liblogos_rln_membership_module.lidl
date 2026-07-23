@@ -1,0 +1,133 @@
+; liblogos_rln_membership_module — RLN Membership Management Module (spec:
+; RLN-MEMBERSHIP-MANAGEMENT, logos-lips docs/anoncomms/raw/
+; rln-membership-management.md). Registry-agnostic membership API: CAIP-10
+; registry ids routed per namespace to a registry provider, memberships held
+; in an encrypted keystore (WAKU-RLN-KEYSTORE format), lifecycle tracked
+; with a bounded Pending confirmation window, per-scope selection. The
+; lez-rln provider ("logos" namespace) is a wire client of the sibling
+; liblogos_rln_module.
+;
+; Reply conventions (this module only — the sibling keeps its ""-on-error):
+; every method returns a compact JSON object, serde_json alphabetical key
+; order; failures are {"error":{"kind":"<kind>","message":"<detail>"}} with
+; kinds: unknown_registry | unknown_membership | provider_failure (the trio
+; the spec mandates distinguishing) | locked | bad_password |
+; no_usable_membership | ambiguous_selection | invalid_argument |
+; keychain_unavailable | internal.
+; Hex args accept an optional 0x prefix; 0x-prefixed is the CLI-safe
+; spelling (the CLI coerces digit-leading strings to numbers).
+module liblogos_rln_membership_module {
+  version "0.3.0"
+  description "RLN Membership Management Module"
+  category "blockchain"
+  depends [liblogos_rln_module]
+
+  ; Open (create-if-absent) the keystore at the instance persistence path
+  ; and hold the session password in memory (needed to write credentials on
+  ; register and decrypt them on select). {"membership_count":N,
+  ; "unlocked":true}; bad_password when an existing credential envelope
+  ; fails its MAC under this password. Reads (get_memberships,
+  ; get_membership_state) work without unlocking — the sidecar metadata is
+  ; plaintext-safe by design.
+  method unlock_keystore(password: tstr) -> tstr
+
+  ; Drop the session password (zeroized). Lifecycle polling continues — it
+  ; touches only the plaintext-safe metadata. {"locked":true}.
+  method lock_keystore() -> tstr
+
+  ; Spec register(). registry_id: CAIP-10, e.g. logos:<ref>:<config-hex>.
+  ; credential_json: {"identity_commitment":hex32,"identity_secret_hash":
+  ; hex32,"identity_trapdoor"?:hex32,"identity_nullifier"?:hex32} (LE hex —
+  ; generation is the consumer's job, e.g. the sibling's generate_identity).
+  ; options_json for the logos namespace: {"funding_holding_account_id":
+  ; "<account>"}. Idempotent per (registry_id, identity_commitment); returns
+  ; the public Membership view (commitment only, no secrets),
+  ; "state":"pending" on a fresh submit — poll get_membership_state for the
+  ; pending->active transition; "rate_limit_mismatch":true when already
+  ; registered on-chain with a different rate limit.
+  method register(registry_id: tstr, credential_json: tstr, rate_limit: int, options_json: tstr) -> tstr
+
+  ; Spec get_membership_state(): the live registry read overlaid on the
+  ; local record, so an in-window unconfirmed submission reports "pending"
+  ; (not "unknown") and a vanished previously-active membership reports
+  ; "erased". {"registry_id":…,"state":"pending"|"failed"|"active"|
+  ; "grace_period"|"expired"|"erased"|"unknown"} plus membership_hash /
+  ; leaf_index / rate_limit when known.
+  method get_membership_state(registry_id: tstr, identity_commitment_hex: tstr) -> tstr
+
+  ; Spec get_memberships(): all locally managed memberships for the
+  ; registry, ANY state including pending and failed (filtering usable ones
+  ; is select's job); public view. {"memberships":[…]}.
+  method get_memberships(registry_id: tstr) -> tstr
+
+  ; Spec select(). rln_identifier_hex: the application's 32-byte scope key
+  ; (opaque here — it never reaches the registry; proof generation with it
+  ; happens in the consumer). Candidates: state active|grace_period only.
+  ; selector_json: "" or "{}" (required sole candidate),
+  ; {"by_hash":"<membership_hash>"}, or {"strategy":"round_robin"|
+  ; "highest_rate_limit"} (round_robin state is per (registry_id,
+  ; rln_identifier) scope). Returns the FULL membership including the
+  ; decrypted credential — the module's single plaintext release point;
+  ; requires an unlocked keystore.
+  method select_membership(registry_id: tstr, rln_identifier_hex: tstr, selector_json: tstr) -> tstr
+
+  ; Provider passthrough. One proof object from a single tree snapshot,
+  ; augmented with the SAME snapshot's valid_roots (never fetch the two
+  ; separately — roots rotate in seconds on an active tree):
+  ; {"depth":N,"leaf":…,"leaf_index":N,"path_elements":[…],
+  ;  "path_indices":[…],"root":…,"valid_roots":[…]}.
+  method get_merkle_proof(registry_id: tstr, leaf_index: int) -> tstr
+
+  ; Provider passthrough. {"valid_roots":["<hex64>",…]} — wrapped in an
+  ; object so the same shape can become the pass-2 subscription event
+  ; payload (which must carry registry_id).
+  method get_valid_roots(registry_id: tstr) -> tstr
+
+  ; Provision a wallet-home under this module's persistence dir. Why HERE:
+  ; sandboxed ui_qml views cannot create files, the execution-zone wallet
+  ; module is external pre-lidl C++ that cannot provision its own config,
+  ; and this module owns the only host-stamped writable directory on this
+  ; wire (the keystore already lives there). Creates
+  ; <instance_persistence_path>/wallet-home/ if needed and writes
+  ; wallet_config.json IF ABSENT from options_json.sequencer_addr
+  ; (required; invalid_argument when missing/empty) plus the deployed
+  ; testnet's working defaults (seq_poll_timeout "30s",
+  ; seq_tx_poll_max_blocks 15, seq_poll_max_retries 10,
+  ; seq_block_poll_max_amount 100 — field-for-field the shape
+  ; tools/deployments/stage.sh emits). NEVER creates storage.json — that
+  ; stays the wallet module's job (create_new), so an existing funded
+  ; wallet is never touched. {"config_existed":bool,"config_path":…,
+  ; "storage_exists":bool,"storage_path":…}; internal when the host
+  ; provided no persistence path (same policy as the keystore).
+  method provision_wallet_home(options_json: tstr) -> tstr
+
+  ; OS-keychain auto-unlock (macOS only for now — the `security` CLI
+  ; backend; elsewhere keychain_unavailable and the caller falls back to the
+  ; manual password). Fetches this instance's secret from the login keychain
+  ; (service org.logos.rln-membership.keystore, account = sha256 of the
+  ; verbatim persistence dir) and unlocks through the NORMAL verification
+  ; seam; with no item and an EMPTY keystore it generates 32 random bytes,
+  ; writes the item FIRST, then unlocks. The item carries
+  ; -T /usr/bin/security (dev trust level: any same-user process — where the
+  ; passwordless wallet already lives; production Developer-ID signing
+  ; enables a stricter app-bound ACL later). Returns the secret so a GUI can
+  ; reuse it as the wallet passphrase — the one reply that carries it; treat
+  ; it like the manual password. {"membership_count":N,"secret":…,
+  ; "source":"created"|"existing","unlocked":true}. Errors:
+  ; keychain_unavailable (non-macOS, denied/locked keychain, item missing
+  ; while the keystore HAS credentials — it never invents a secret over one,
+  ; foreign payload, write failure), bad_password (item secret fails the
+  ; keystore MAC — manual-era keystore: unlock manually once and remember),
+  ; internal (no persistence path). CAVEAT: for auto-created accounts the
+  ; user never saw the secret — deleting the keychain item orphans the
+  ; credentials (a future export surface can reveal it first).
+  method unlock_keystore_auto() -> tstr
+
+  ; Persist the CURRENT session password to the OS keychain so the next
+  ; unlock_keystore_auto succeeds silently — the manual-to-auto migration
+  ; hook (the plaintext never re-crosses the wire; it is read module-side).
+  ; Overwrites any existing item (-U; one delete+re-add retry on ACL
+  ; conflicts). {"remembered":true}; locked when nothing is unlocked,
+  ; keychain_unavailable / internal as above.
+  method remember_keystore_password() -> tstr
+}

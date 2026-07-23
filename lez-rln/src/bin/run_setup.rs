@@ -7,11 +7,13 @@
 //! source dev/env.sh && cargo run --bin run_setup
 //! ```
 
-use logos_lez_rln::rln::client::{
-    init_wallet, load_programs, is_initialized, policy_from_env,
-    run_setup, create_funded_user, save_payment_account, tree_id_from_env,
+use logos_lez_rln::rln::{
+    client::{
+        create_funded_user, init_wallet, is_initialized, load_programs, policy_from_env, run_setup,
+        save_payment_account, tree_id_from_env,
+    },
+    derive_config_account, derive_tree_main_account,
 };
-use logos_lez_rln::rln::{derive_config_account, derive_tree_main_account};
 
 /// 10 B RLNTOK funded per payment account. At PRICE_PER_UNIT=10_000 and the
 /// demo's rateLimit=100, each registration burns 1 M tokens — so each payment
@@ -30,7 +32,13 @@ async fn main() {
 
     let user_holding_id = if is_initialized(&wallet_core, &registration_program, &tree_id).await {
         println!("Registration already initialized, creating new funded account...\n");
-        create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await
+        create_funded_user(
+            &mut wallet_core,
+            &registration_program,
+            &tree_id,
+            USER_FUNDING,
+        )
+        .await
     } else {
         println!("First run, deploying programs and initializing tree...\n");
         run_setup(

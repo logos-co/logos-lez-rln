@@ -15,14 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Pinned nightly: rustfmt.toml uses unstable options (needs nightly), and an
+      # unpinned `nightly` drifts formatting rules between runs. Bump deliberately.
       - name: Install nightly toolchain for rustfmt
-        run: rustup install nightly --profile minimal --component rustfmt
+        run: rustup toolchain install nightly-2025-12-15 --profile minimal --component rustfmt
 
       - name: Check host workspace is formatted
-        run: cargo +nightly fmt --manifest-path lez-rln/Cargo.toml --all -- --check
+        run: cargo +nightly-2025-12-15 fmt --manifest-path lez-rln/Cargo.toml --all -- --check
 
       - name: Check guest workspace is formatted
-        run: cargo +nightly fmt --manifest-path lez-rln/methods/guest/Cargo.toml --all -- --check
+        run: cargo +nightly-2025-12-15 fmt --manifest-path lez-rln/methods/guest/Cargo.toml --all -- --check
 
   lint:
     name: Lint
@@ -36,8 +38,8 @@ jobs:
           toolchain: "1.94.0"
           components: clippy
 
-      - name: Install nightly clippy (guest deps use #![feature])
-        run: rustup install nightly --profile minimal --component clippy
+      - name: Install pinned nightly clippy (guest deps use #![feature])
+        run: rustup toolchain install nightly-2025-12-15 --profile minimal --component clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -67,9 +69,10 @@ jobs:
         run: cargo clippy --manifest-path lez-rln/Cargo.toml --workspace --all-targets
 
       # Guest deps (rust-poseidon-bn254-pure) use #![feature], so guest lint/test
-      # run on nightly — same reason the guest unit tests below use +nightly.
+      # run on nightly. Pinned: a rolling nightly stabilized the features the dep
+      # gates on, breaking its compilation. Bump deliberately (keep synced w/ fmt).
       - name: Clippy (guest workspace)
-        run: cargo +nightly clippy --manifest-path lez-rln/methods/guest/Cargo.toml --all-targets
+        run: cargo +nightly-2025-12-15 clippy --manifest-path lez-rln/methods/guest/Cargo.toml --all-targets
 
   unit-tests:
     name: Unit Tests
@@ -82,8 +85,8 @@ jobs:
         with:
           toolchain: "1.94.0"
 
-      - name: Install nightly (for guest unit tests)
-        run: rustup install nightly --profile minimal
+      - name: Install pinned nightly (for guest unit tests)
+        run: rustup toolchain install nightly-2025-12-15 --profile minimal
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -103,7 +106,7 @@ jobs:
           RISC0_DEV_MODE: 1
 
       - name: Guest unit tests
-        run: cargo +nightly test --manifest-path lez-rln/methods/guest/Cargo.toml
+        run: cargo +nightly-2025-12-15 test --manifest-path lez-rln/methods/guest/Cargo.toml
         env:
           RISC0_DEV_MODE: 1
 

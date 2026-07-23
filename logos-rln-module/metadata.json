@@ -1,7 +1,7 @@
 {
   "name": "liblogos_rln_module",
   "display_name": "RLN Module (Rust)",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "RLN Merkle Root Provider Module (Rust port)",
   "author": "Logos Blockchain Team",
   "type": "core",

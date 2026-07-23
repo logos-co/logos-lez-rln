@@ -18,8 +18,8 @@
 //!
 //! # Storage Model
 //!
-//! - **Main Account**: Stores tree metadata (depth, next_index, root, cached defaults)
-//!   and top tree nodes (levels 0-10) in sparse format
+//! - **Main Account**: Stores tree metadata (depth, next_index, root, cached defaults) and top tree
+//!   nodes (levels 0-10) in sparse format
 //! - **Subtree Accounts**: Each stores a depth-10 bottom subtree in sparse format
 //!
 //! # Compatibility
@@ -27,10 +27,10 @@
 //! The on-chain program uses `rust-poseidon-bn254-pure` for hashing, which is
 //! compatible with zerokit/RLN's Poseidon implementation.
 
+mod client;
 mod constants;
 mod pda;
-mod client;
 
+pub use client::*;
 pub use constants::*;
 pub use pda::*;
-pub use client::*;

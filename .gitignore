@@ -27,5 +27,7 @@ dev/logs/
 .DS_Store
 result
 result-*
+/dist/
 .mcp.json
 .mcp_data/
+.gc-roots/

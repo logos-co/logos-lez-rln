@@ -1,0 +1,22 @@
+# Standalone, wallet-free membership verifier: derives the membership PDA from
+# an identity commitment and reads it off the sequencer. Light deps only
+# (rln-layouts is borsh/sha2, no risc0), so it builds fast and reuses the exact
+# on-chain layouts + PDA seed rules rather than reimplementing them.
+[package]
+name = "check-membership"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "check-membership"
+path = "src/main.rs"
+
+[dependencies]
+rln-layouts = { path = "../../lez-rln/rln-layouts" }
+serde_json = "1"
+sha2 = "0.10"
+bs58 = "0.5"
+borsh = { version = "1", default-features = false, features = ["derive"] }
+
+[profile.release]
+strip = true

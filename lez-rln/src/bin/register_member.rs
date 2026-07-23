@@ -5,13 +5,18 @@
 //! source dev/env.sh && cargo run --bin register_member -- --count 5  # batch
 //! ```
 
-use logos_lez_rln::merkle_tree::wait_for_leaf;
-use logos_lez_rln::rln::client::{
-    RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
-    register_identity, tree_id_from_env,
-};
-use logos_lez_rln::rln::derive_config_account;
 use std::time::Duration;
+
+use logos_lez_rln::{
+    merkle_tree::wait_for_leaf,
+    rln::{
+        client::{
+            RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
+            register_identity, tree_id_from_env,
+        },
+        derive_config_account,
+    },
+};
 
 const USER_FUNDING: u128 = 100_000_000;
 const USER_MESSAGE_LIMIT: u64 = 100;
@@ -26,10 +31,20 @@ async fn main() {
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 
     for i in 0..count {
-        let user_holding_id = create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await;
+        let user_holding_id = create_funded_user(
+            &mut wallet_core,
+            &registration_program,
+            &tree_id,
+            USER_FUNDING,
+        )
+        .await;
 
-        let RlnIdentity { id_commitment_bytes, leaf_bytes, id_secret_hash_hex, .. } =
-            create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
+        let RlnIdentity {
+            id_commitment_bytes,
+            leaf_bytes,
+            id_secret_hash_hex,
+            ..
+        } = create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
 
         let leaf_index = register_identity(
             &wallet_core,
@@ -61,7 +76,12 @@ async fn main() {
         println!("IDENTITY_SECRET_HASH={}", id_secret_hash_hex);
 
         if count > 1 {
-            eprintln!("  Registered member {}/{}: leaf={}", i + 1, count, leaf_index);
+            eprintln!(
+                "  Registered member {}/{}: leaf={}",
+                i + 1,
+                count,
+                leaf_index
+            );
         }
     }
 }

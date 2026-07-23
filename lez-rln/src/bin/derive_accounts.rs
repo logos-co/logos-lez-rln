@@ -7,8 +7,8 @@
 //! LEZ_RLN_TREE_ID_HEX=<64hex> cargo run --bin derive_accounts   # run from lez-rln/
 //! ```
 
-use logos_lez_rln::rln::client::{load_programs, tree_id_from_env};
 use logos_lez_rln::rln::{
+    client::{load_programs, tree_id_from_env},
     derive_config_account, derive_credit_supply_account, derive_credit_token_account,
     derive_tree_main_account,
 };

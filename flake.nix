@@ -20,11 +20,13 @@
 
     logos-module-viewer.url = "github:logos-co/logos-module-viewer";
 
-    # Path input: its logos-module-builder closure inlines into flake.lock
-    # (roughly doubling it). Deliberately no nested `follows` — the duplicated
-    # nixpkgs nodes already lock our same rev, the builder pins its own
-    # rust-overlay/toolchain, and dedup is only reachable upstream in the builder.
+    # Path inputs: each one's logos-module-builder closure inlines into
+    # flake.lock (roughly doubling it per module). Deliberately no nested
+    # `follows` — the duplicated nixpkgs nodes already lock our same rev, the
+    # builder pins its own rust-overlay/toolchain, and dedup is only
+    # reachable upstream in the builder.
     logos-rln-module.url = "path:./logos-rln-module";
+    logos-rln-membership-module.url = "path:./logos-rln-membership-module";
   };
 
   outputs =
@@ -35,6 +37,7 @@
       logos-wallet-module,
       logos-module-viewer,
       logos-rln-module,
+      logos-rln-membership-module,
       ...
     }:
     let
@@ -70,11 +73,38 @@
           # staged sources — logos-rust-sdk-src + rust-lib/lez-rln-src — are
           # visible; the default `path:./logos-rln-module` covers in-tree builds.
           rlnModule = logos-rln-module.packages.${system};
+
+          # Membership management module (RLN-MEMBERSHIP-MANAGEMENT spec);
+          # same staged-sources caveat as the RLN module — refresh its
+          # logos-rust-sdk-src via logos-rln-membership-module/stage-sources.sh.
+          membershipModule = logos-rln-membership-module.packages.${system};
+
+          # Standalone membership verifier (tools/check-membership): a small
+          # rln-layouts-only crate, built with the repo's pinned toolchain and
+          # wrapped so `curl` (its sequencer transport) is on PATH.
+          rust = pkgs.rust-bin.stable."1.94.0".minimal;
+          checkMembership =
+            (pkgs.makeRustPlatform { cargo = rust; rustc = rust; }).buildRustPackage {
+              pname = "check-membership";
+              version = "0.1.0";
+              src = ./.;
+              cargoRoot = "tools/check-membership";
+              buildAndTestSubdir = "tools/check-membership";
+              cargoLock.lockFile = ./tools/check-membership/Cargo.lock;
+              nativeBuildInputs = [ pkgs.makeWrapper ];
+              postInstall = ''
+                wrapProgram $out/bin/check-membership \
+                  --prefix PATH : ${pkgs.curl}/bin
+              '';
+            };
         in
         {
           logos-rln-module = rlnModule.default;
           logos-rln-module-lgx = rlnModule.lgx;
+          logos-rln-membership-module = membershipModule.default;
+          logos-rln-membership-module-lgx = membershipModule.lgx;
           wallet-module = walletModulePackage;
+          check-membership = checkMembership;
           default = rlnModule.lgx;
         }
       );
@@ -84,6 +114,7 @@
         let
           pkgs = mkPkgs system;
           logosRlnModuleLib = self.packages.${system}.logos-rln-module;
+          logosMembershipModuleLib = self.packages.${system}.logos-rln-membership-module;
           logosModuleViewerPackage = logos-module-viewer.packages.${system}.default;
           extension = if pkgs.stdenv.isDarwin then "dylib" else "so";
           inspectModule = {
@@ -94,9 +125,22 @@
                   --module ${logosRlnModuleLib}/lib/liblogos_rln_module_plugin.${extension}
               ''}/bin/inspect-module";
           };
+          inspectMembershipModule = {
+            type = "app";
+            program =
+              "${pkgs.writeShellScriptBin "inspect-membership-module" ''
+                exec ${logosModuleViewerPackage}/bin/logos-module-viewer \
+                  --module ${logosMembershipModuleLib}/lib/liblogos_rln_membership_module_plugin.${extension}
+              ''}/bin/inspect-membership-module";
+          };
         in
         {
           inspect-module = inspectModule;
+          inspect-membership-module = inspectMembershipModule;
+          check-membership = {
+            type = "app";
+            program = "${self.packages.${system}.check-membership}/bin/check-membership";
+          };
           default = inspectModule;
         }
       );

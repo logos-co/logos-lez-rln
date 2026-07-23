@@ -11,10 +11,8 @@ use nssa_core::program::ProgramId;
 // merkle program never owns its own data accounts), but their canonical
 // derivation lives next to the merkle program's other client code.
 pub use crate::merkle_tree::{
-    derive_main_account as derive_tree_main_account,
-    derive_subtree_account,
+    derive_main_account as derive_tree_main_account, derive_subtree_account,
 };
-
 // `spel_seeds` is a leaf module so both this and `merkle_tree::pda` can depend
 // on it without a cross-module cycle.
 pub use crate::spel_seeds::{combine_seeds, derive_pda, label_seed, u32_seed};
@@ -39,7 +37,8 @@ pub fn derive_payment_token_account(program_id: &ProgramId, tree_id: &[u8; 32]) 
     derive_pda(program_id, &[&label_seed("payment"), tree_id])
 }
 
-/// Payment token supply holder (faucet deployments): `seeds = [literal("payment_supply"), arg("tree_id")]`.
+/// Payment token supply holder (faucet deployments): `seeds = [literal("payment_supply"),
+/// arg("tree_id")]`.
 pub fn derive_payment_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
     derive_pda(program_id, &[&label_seed("payment_supply"), tree_id])
 }
@@ -63,8 +62,9 @@ pub fn membership_pda_seed(tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> [u8;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use nssa_core::program::PdaSeed;
+
+    use super::*;
 
     fn mock_program_id() -> ProgramId {
         bytemuck::cast([1u8; 32])
@@ -92,7 +92,10 @@ mod tests {
         let p = mock_program_id();
         let mut t2 = tree_id_a();
         t2[1] = 9;
-        assert_ne!(derive_config_account(&p, &tree_id_a()), derive_config_account(&p, &t2));
+        assert_ne!(
+            derive_config_account(&p, &tree_id_a()),
+            derive_config_account(&p, &t2)
+        );
     }
 
     #[test]
@@ -108,7 +111,14 @@ mod tests {
         let subtree = derive_subtree_account(&p, &t, 0);
         let mem = derive_membership_account(&p, &t, &[3u8; 32]);
         let all = [
-            &config, &main, &credit, &supply, &payment, &payment_supply, &subtree, &mem,
+            &config,
+            &main,
+            &credit,
+            &supply,
+            &payment,
+            &payment_supply,
+            &subtree,
+            &mem,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {

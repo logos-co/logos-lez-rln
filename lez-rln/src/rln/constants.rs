@@ -14,8 +14,7 @@ pub fn subtree_id_for_index(leaf_index: u64) -> u32 {
     (leaf_index / SUBTREE_LEAVES as u64) as u32
 }
 
-pub use rln_layouts::MAX_RATE_LIMIT;
-pub use rln_layouts::MIN_RATE_LIMIT;
+pub use rln_layouts::{MAX_RATE_LIMIT, MIN_RATE_LIMIT};
 
 // Layout source of truth: `rln_layouts::ConfigState`.
 pub const CONFIG_OFFSET_MERKLE_PROGRAM_ID: usize = 0;

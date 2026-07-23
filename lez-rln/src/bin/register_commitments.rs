@@ -7,15 +7,19 @@
 //! source dev/env.sh && cargo run --bin register_commitments -- commitments.csv
 //! ```
 
-use logos_lez_rln::merkle_tree::wait_for_leaf;
-use logos_lez_rln::rln::client::{
-    init_wallet, load_programs, create_funded_user, rate_commitment_from_fr, register_identity,
-    tree_id_from_env,
+use std::{fs, time::Duration};
+
+use logos_lez_rln::{
+    merkle_tree::wait_for_leaf,
+    rln::{
+        client::{
+            create_funded_user, init_wallet, load_programs, rate_commitment_from_fr,
+            register_identity, tree_id_from_env,
+        },
+        derive_config_account,
+    },
 };
-use logos_lez_rln::rln::derive_config_account;
 use rln::utils::bytes_le_to_fr;
-use std::fs;
-use std::time::Duration;
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -31,15 +35,17 @@ fn hex_to_bytes32(hex: &str) -> [u8; 32] {
 }
 
 fn compute_rate_commitment(id_commitment_bytes: &[u8; 32], rate_limit: u64) -> [u8; 32] {
-    let (id_commitment_fr, _) = bytes_le_to_fr(id_commitment_bytes)
-        .expect("Invalid id_commitment bytes");
+    let (id_commitment_fr, _) =
+        bytes_le_to_fr(id_commitment_bytes).expect("Invalid id_commitment bytes");
     rate_commitment_from_fr(&id_commitment_fr, rate_limit)
 }
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let csv_path = args.get(1).expect("Usage: register_commitments <commitments.csv>");
+    let csv_path = args
+        .get(1)
+        .expect("Usage: register_commitments <commitments.csv>");
 
     let content = fs::read_to_string(csv_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", csv_path, e));
@@ -49,14 +55,20 @@ async fn main() {
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let parts: Vec<&str> = line.split(',').collect();
-            assert!(parts.len() >= 2, "Expected: hex_commitment,rate_limit[,idSecretHash]");
+            assert!(
+                parts.len() >= 2,
+                "Expected: hex_commitment,rate_limit[,idSecretHash]"
+            );
             let commitment = hex_to_bytes32(parts[0]);
             let rate_limit: u64 = parts[1].trim().parse().expect("Invalid rate_limit");
             (commitment, rate_limit)
         })
         .collect();
 
-    eprintln!("Registering {} identity commitments on-chain...", entries.len());
+    eprintln!(
+        "Registering {} identity commitments on-chain...",
+        entries.len()
+    );
 
     let mut wallet_core = init_wallet();
     let tree_id = tree_id_from_env();
@@ -64,7 +76,13 @@ async fn main() {
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
-        let user_holding_id = create_funded_user(&mut wallet_core, &registration_program, &tree_id, USER_FUNDING).await;
+        let user_holding_id = create_funded_user(
+            &mut wallet_core,
+            &registration_program,
+            &tree_id,
+            USER_FUNDING,
+        )
+        .await;
 
         let leaf_bytes = compute_rate_commitment(id_commitment, *rate_limit);
 

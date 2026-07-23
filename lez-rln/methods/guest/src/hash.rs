@@ -1,11 +1,16 @@
-use rust_poseidon_bn254_pure::bn254::field::Felt;
-use rust_poseidon_bn254_pure::poseidon::permutation::{compress_1, compress_2};
+use rust_poseidon_bn254_pure::{
+    bn254::field::Felt,
+    poseidon::permutation::{compress_1, compress_2},
+};
 
 pub const ZERO: [u8; 32] = [0u8; 32];
 
 pub fn validate_field_element(bytes: &[u8; 32]) {
     let felt = Felt::unsafe_from_le_bytes(bytes);
-    assert!(Felt::is_valid(&felt), "Input is not a valid BN254 field element (must be < prime)");
+    assert!(
+        Felt::is_valid(&felt),
+        "Input is not a valid BN254 field element (must be < prime)"
+    );
 }
 
 pub fn hash_single(input: &[u8; 32]) -> [u8; 32] {

@@ -103,9 +103,15 @@ pub struct TokenHoldingLayout {
 impl TokenHoldingLayout {
     pub const SIZE: usize = 49;
 
-    #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
+    #[inline]
+    pub fn parse(data: &[u8]) -> &Self {
+        bytemuck::from_bytes(&data[..Self::SIZE])
+    }
 
-    #[inline] pub fn balance(&self) -> u128 { self.balance.get() }
+    #[inline]
+    pub fn balance(&self) -> u128 {
+        self.balance.get()
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<TokenHoldingLayout>() == TokenHoldingLayout::SIZE);
@@ -206,9 +212,15 @@ pub struct TreeMainLayout {
 impl TreeMainLayout {
     pub const SIZE: usize = 169;
 
-    #[inline] pub fn parse(data: &[u8]) -> &Self { bytemuck::from_bytes(&data[..Self::SIZE]) }
+    #[inline]
+    pub fn parse(data: &[u8]) -> &Self {
+        bytemuck::from_bytes(&data[..Self::SIZE])
+    }
 
-    #[inline] pub fn next_index(&self) -> u64 { self.next_index.get() }
+    #[inline]
+    pub fn next_index(&self) -> u64 {
+        self.next_index.get()
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<TreeMainLayout>() == TreeMainLayout::SIZE);

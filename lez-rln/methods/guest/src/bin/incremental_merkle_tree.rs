@@ -38,5 +38,12 @@ fn main() {
         MerkleOpcode::Set => set_leaf(pre_states.clone(), &instruction[1..]),
     };
 
-    ProgramOutput::new(self_program_id, caller_program_id, instruction_words, pre_states, post_states).write();
+    ProgramOutput::new(
+        self_program_id,
+        caller_program_id,
+        instruction_words,
+        pre_states,
+        post_states,
+    )
+    .write();
 }
