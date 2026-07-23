@@ -59,7 +59,13 @@ Item {
         completionRefresh = false
         flow.callRetry(M.MEMBERSHIP_MODULE, "get_memberships", [registryId], function (r) {
             view.refreshing = false
-            if (r.error) { view.error = M.errorText(r.error); return }
+            if (r.error) {
+                // A transient poll hiccup (bridge/module timeout, e.g. a slow
+                // on-chain read) must NOT replace the shown memberships with an
+                // error — keep the last-known list and let the next tick retry.
+                if (!M.isTransientError(r.error.kind)) view.error = M.errorText(r.error)
+                return
+            }
             view.error = ""
             var list = (r.memberships || []).map(function (m) {
                 return {
