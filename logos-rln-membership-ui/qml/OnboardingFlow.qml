@@ -110,6 +110,47 @@ Item {
     // register, which hands it to the module's encrypted keystore.
     property string secretHash: ""
 
+    // ---- Gifter path (alternative to Phases A/B/D) -------------------------
+    // "gifter" replaces wallet-provision + sync + faucet with a libp2p dial to
+    // a gifter node that pays for the registration, authorized by a Keycard
+    // attestation. Phase C (keystore unlock) and the Phase E register+poll tail
+    // are REUSED — the gifter registers the identity on-chain, then the
+    // idempotent register() records it in the keystore with no funds. Set on
+    // Welcome; reset to "wallet" by resetForNewRegistration.
+    property string registrationMode: "wallet"
+    // idle | running | done | error. gifterStage is the running sub-step, for
+    // the progress caption: node -> identity -> capture -> dial -> persist.
+    property string gifterPhase: "idle"
+    property string gifterStage: ""
+    property string gifterError: ""
+    // Gifter node coordinates (StepGifter inputs); both prefilled to the local
+    // dev gifter's stable peerId + address, freely editable.
+    property string gifterPeerId: M.GIFTER_PEER_ID_DEFAULT
+    property string gifterMultiaddr: M.GIFTER_MULTIADDR_DEFAULT
+    // The seed we derive the identity from and re-hand to rlnGifterRequest (it
+    // re-derives the SAME identity internally), and the card's one-shot
+    // nullifier from the verified attestation (kept for display/diagnostics).
+    property string gifterSeed: ""
+    property string gifterNullifier: ""
+    // The gifter's on-chain register_member tx hash, passed to register() so the
+    // gifted membership's detail view shows the transaction.
+    property string gifterTxHash: ""
+    // createNode + start are one-time per session; once a node answers peerInfo
+    // we skip re-creating it on a retry or a second gifted membership.
+    property bool libp2pNodeReady: false
+    // The gifter pays for registration, but the CLIENT still needs an OPEN wallet
+    // for on-chain READS: get_membership and the idempotent register both fetch
+    // accounts through the wallet's sequencer connection ("Null wallet handle"
+    // otherwise). Provisioned + opened once, unfunded, unsynced.
+    property bool gifterWalletReady: false
+    // On-chain confirmation of the gifter's registration (it submits the tx, so
+    // the PDA is Pending for a bit before get_membership can read it). Poll until
+    // it lands, then persist. Bounded so it always terminates.
+    property int giftConfirmPolls: 0
+    property int giftConfirmBudget: 40
+    property int giftConfirmMs: 6000
+    property string giftConfirmCfg: ""
+
     // Fired by finish() when the user leaves the completed wizard.
     signal completed(string commitment)
 
@@ -170,6 +211,17 @@ Item {
             regState = ""
             commitment = ""
             rateLimitMismatch = false
+        }
+        // A re-run re-offers the Welcome choice, so default back to the wallet
+        // path and clear the last gift attempt (a fresh seed/attestation next
+        // time). The libp2p node, if up, stays up.
+        registrationMode = "wallet"
+        if (gifterPhase !== "running") {
+            gifterPhase = "idle"
+            gifterStage = ""
+            gifterError = ""
+            gifterSeed = ""
+            gifterNullifier = ""
         }
     }
 
@@ -560,7 +612,13 @@ Item {
             identity_commitment: commitment,
             identity_secret_hash: secretHash
         })
-        var options = JSON.stringify({ funding_holding_account_id: holdingHex })
+        // The gifter already funded + registered this identity on-chain, so
+        // register() is idempotent here: with no funding account it detects the
+        // existing membership and just records it in the keystore (no faucet,
+        // no wallet). The wallet path passes its faucet holding as before.
+        var options = registrationMode === "gifter"
+            ? JSON.stringify({ gifter_tx_hash: gifterTxHash })
+            : JSON.stringify({ funding_holding_account_id: holdingHex })
         callRetry(M.MEMBERSHIP_MODULE, "register",
                [registryId, credential, rateLimit, options], function (r) {
             flow.secretHash = ""
@@ -624,6 +682,238 @@ Item {
         })
     }
 
+    // ---- Gifter path ---------------------------------------------------------
+    // One callback chain replacing wallet/sync/faucet: bring up a libp2p node,
+    // derive an identity from a fresh seed, capture a Keycard attestation bound
+    // to its commitment, ask the gifter to register it (the gifter pays), then
+    // hand off to the Phase E persist+confirm tail (which drives regPhase, so
+    // OnboardingView completes the wizard exactly as the wallet path does).
+    // ORDER MATTERS: the attestation must be bound to the commitment, so the
+    // identity is derived BEFORE capture.
+    function startGifter() {
+        if (gifterPhase === "running" || gifterPhase === "done")
+            return
+        // Keycard grants are clamped server-side to RATE_LIMIT_MIN regardless of
+        // the request, so ask for exactly that — otherwise the persist step sees
+        // the granted rate differ from the requested one and warns spuriously.
+        rateLimit = M.RATE_LIMIT_MIN
+        gifterPhase = "running"
+        gifterError = ""
+        gifterStage = "wallet"
+        ensureGifterWallet(function (wErr) {
+        if (wErr) { flow.failGifter(wErr); return }
+        flow.gifterStage = "node"
+        flow.ensureLibp2pNode(function (nodeErr) {
+            if (nodeErr) { flow.failGifter(nodeErr); return }
+            flow.gifterStage = "identity"
+            flow.gifterSeed = M.randomSeedHex()
+            flow.callRetry(M.RLN_MODULE, "generate_identity", [flow.gifterSeed], function (r) {
+                if (r.error) { flow.failGifter(M.errorText(r.error)); return }
+                if (!r.id_commitment || !r.id_secret_hash) {
+                    flow.failGifter("generate_identity returned no credential: " + JSON.stringify(r))
+                    return
+                }
+                flow.commitment = r.id_commitment
+                flow.secretHash = r.id_secret_hash
+                flow.captureAndRequest()
+            })
+        })
+        })
+    }
+
+    // Open a wallet for the CLIENT's on-chain reads (the gifter still pays for the
+    // registration). provision_wallet_home creates the config/home; then open an
+    // existing store or create a fresh one — NO sync, NO faucet. get_membership +
+    // the idempotent register need this or they hit "Null wallet handle".
+    function ensureGifterWallet(cb) {
+        if (gifterWalletReady) { cb(""); return }
+        flow.callRetry(M.MEMBERSHIP_MODULE, "provision_wallet_home",
+               [JSON.stringify({ sequencer_addr: M.TESTNET_SEQUENCER_ADDR })], function (r) {
+            if (r.error) { cb("Couldn't set up the wallet: " + M.errorText(r.error)); return }
+            var configPath = String(r.config_path || "")
+            var storagePath = String(r.storage_path || "")
+            if (r.storage_exists === true) {
+                flow.callRetry(M.WALLET_MODULE, "open", [configPath, storagePath], function (ro) {
+                    // A non-zero open on an already-open daemon wallet is fine for
+                    // reads; proceed either way.
+                    flow.gifterWalletReady = true
+                    cb("")
+                })
+            } else {
+                M.call(bridge, M.WALLET_MODULE, "create_new", [configPath, storagePath, flow.password], function (rc) {
+                    if (rc.error && rc.error.kind !== "empty_reply") {
+                        cb("Couldn't create the wallet: " + M.errorText(rc.error)); return
+                    }
+                    M.call(bridge, M.WALLET_MODULE, "save", [], function () {
+                        flow.gifterWalletReady = true
+                        cb("")
+                    })
+                })
+            }
+        })
+    }
+
+    function retryGifter() {
+        if (gifterPhase === "running")
+            return
+        gifterPhase = "idle"
+        startGifter()
+    }
+
+    function failGifter(msg) {
+        flow.gifterStage = ""
+        flow.gifterPhase = "error"
+        flow.gifterError = msg
+    }
+
+    // Every libp2p_module call is RELAYED through rln_gifter_module.libp2p_call
+    // — direct libp2p replies marshal to null over the QML bridge. argObj is the
+    // libp2p method's single object arg (undefined for no-arg methods); cb gets
+    // the parsed {success,value,error}.
+    function libp2pCall(method, argObj, cb, timeoutMs) {
+        if (!bridge) { cb({ error: "no bridge" }); return }
+        var args = (argObj === undefined || argObj === null) ? [] : [JSON.stringify(argObj)]
+        bridge.callModuleAsync(M.GIFTER_MODULE, "libp2p_call",
+            [JSON.stringify({ method: method, args: args })], function (raw) {
+                cb(M.parseLibp2pReply(raw))
+            }, timeoutMs === undefined ? 30000 : timeoutMs)
+    }
+
+    // Bring up a PLAIN libp2p node with createNode + start — the gifter client
+    // only needs to dial the gifter and open a stream, so no RLN/mix context is
+    // required (works against vanilla upstream libp2p_module). start's success is
+    // the gate. The FIRST libp2p_call can race libp2p_module's token registration
+    // ("auth token not recognized"/"Invalid response"); retry a few times.
+    function ensureLibp2pNode(cb) {
+        if (libp2pNodeReady) { cb(""); return }
+        flow.createNodeAttempt(0, cb)
+    }
+
+    function createNodeAttempt(attempt, cb) {
+        flow.libp2pCall("createNode", M.LIBP2P_NODE_CONFIG, function (r) {
+            var err = M.libp2pError(r)
+            if (err !== "" && err.indexOf("already") === -1) {
+                var racey = err.indexOf("token") !== -1 || err.indexOf("Invalid response") !== -1
+                          || err.indexOf("not recognized") !== -1 || err.indexOf("not connected") !== -1
+                if (attempt < 8 && racey) {
+                    var t = retryTimerComponent.createObject(flow, { interval: 700 })
+                    t.triggered.connect(function () { t.destroy(); flow.createNodeAttempt(attempt + 1, cb) })
+                    t.start()
+                    return
+                }
+                cb("Could not create the peer-to-peer node: " + err)
+                return
+            }
+            flow.libp2pCall("start", undefined, function (r2) {
+                var e2 = M.libp2pError(r2)
+                if (e2 !== "" && e2.indexOf("already") === -1) {
+                    cb("Could not start the peer-to-peer node: " + e2)
+                    return
+                }
+                flow.libp2pNodeReady = true
+                cb("")
+            })
+        })
+    }
+
+    // Capture the attestation (blocks until the card is tapped — no timeout),
+    // then dial the gifter. On grant, hand off to the persist+confirm tail.
+    function captureAndRequest() {
+        gifterStage = "capture"
+        M.call(bridge, M.CAPTURE_MODULE, "capture_attestation", [commitment], function (r) {
+            if (r.error) { flow.failGifter(M.errorText(r.error)); return }
+            if (r.verified !== true || !r.attestation_tlv) {
+                flow.failGifter("The Keycard attestation could not be verified. Is a genuine card tapped?")
+                return
+            }
+            flow.gifterNullifier = r.nullifier || ""
+            var cfg = M.registryConfigHex(flow.registryId)
+            if (cfg === "") {
+                flow.failGifter("Registry id is not logos:<ref>:<64-hex> — cannot derive the config account.")
+                return
+            }
+            flow.gifterStage = "dial"
+            var reqObj = {
+                gifterPeerId: flow.gifterPeerId.trim(),
+                gifterMultiaddr: flow.gifterMultiaddr.trim(),
+                config: cfg,
+                seed: flow.gifterSeed,
+                rate: flow.rateLimit,
+                attestation: r.attestation_tlv
+            }
+            // rln_gifter_module.request runs the whole gifter protocol over
+            // libp2p_module's generic bridge and returns a plain-String JSON
+            // (real value through the QML bridge, unlike a libp2p LogosResult).
+            // Its internal timeout is 180s (dial + auth + on-chain register);
+            // give the client a little more so we see the real error rather than
+            // a client-side cutoff.
+            M.call(bridge, M.GIFTER_MODULE, "request", [JSON.stringify(reqObj)], function (rr) {
+                if (rr.error) {
+                    // The module registers on-chain BEFORE the (best-effort) mix
+                    // identity adoption, so a real error here means nothing was
+                    // granted — auth refused, dial/timeout. Fail fast.
+                    flow.failGifter(M.gifterErrorText(rr.error))
+                    return
+                }
+                if (rr.auth_success !== true && rr.leaf_index === undefined) {
+                    flow.failGifter("The gifter did not grant a membership: " + JSON.stringify(rr))
+                    return
+                }
+                // The gifter's on-chain tx — carried into the record so the detail
+                // view shows it (the gifter submitted it on our behalf).
+                flow.gifterTxHash = rr.tx_hash || ""
+                // Granted (identity_adopted may be false — mix adoption is optional
+                // and not needed here). The PDA is Pending briefly, so poll for the
+                // on-chain confirmation, then persist to the keystore.
+                flow.confirmAndPersist(cfg)
+            }, 190000)
+        }, 0)
+    }
+
+    // The gift IS registered on-chain (rlnGifterRequest returned success), but the
+    // PDA is Pending for a bit, so poll get_membership until it lands, then
+    // persist + confirm. Stays in the running "confirm" stage (progress, not an
+    // error); times out with a clear message if it never confirms (e.g. the
+    // gifter couldn't apply the tx).
+    function confirmAndPersist(cfg) {
+        flow.gifterStage = "confirm"
+        flow.giftConfirmCfg = cfg
+        flow.giftConfirmPolls = 0
+        flow.pollGiftConfirm()
+        giftConfirmTimer.start()
+    }
+
+    function pollGiftConfirm() {
+        flow.giftConfirmPolls += 1
+        M.call(bridge, M.RLN_MODULE, "get_membership", [flow.giftConfirmCfg, commitment], function (r) {
+            if (!r.error && r.registered === true) {
+                giftConfirmTimer.stop()
+                flow.gifterStage = "persist"
+                flow.gifterPhase = "done"
+                flow.persistGifterMembership()
+                return
+            }
+            if (flow.giftConfirmPolls >= flow.giftConfirmBudget) {
+                giftConfirmTimer.stop()
+                flow.failGifter("Your membership was requested, but it didn't confirm on-chain in time. "
+                    + "The gifter may be busy — try again in a moment.")
+            }
+        })
+    }
+
+    // Persist the gifted grant + confirm it, reusing Phase E. The identity is
+    // already on-chain (the gifter registered it), so register() is idempotent
+    // and needs no funds (see submitRegistration's gifter branch); regTimer then
+    // polls it to active — driving regPhase, which OnboardingView watches to
+    // complete the wizard.
+    function persistGifterMembership() {
+        regPhase = "running"
+        regError = ""
+        regState = ""
+        rateLimitMismatch = false
+        submitRegistration()
+    }
+
     // No sync progress Timer anymore: mid-sync reads starve (and can crash
     // the module host) — chunk completions are the progress ticks.
 
@@ -639,6 +929,13 @@ Item {
         interval: flow.statePollMs
         repeat: true
         onTriggered: flow.pollRegistration()
+    }
+
+    Timer {
+        id: giftConfirmTimer
+        interval: flow.giftConfirmMs
+        repeat: true
+        onTriggered: flow.pollGiftConfirm()
     }
 
     // One-shot backoff timer for callRetry, instantiated per retry and

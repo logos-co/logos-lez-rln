@@ -8,6 +8,15 @@
 var MEMBERSHIP_MODULE = "liblogos_rln_membership_module";
 var RLN_MODULE = "liblogos_rln_module";
 var WALLET_MODULE = "logos_execution_zone";
+// The gifter path (alternative registration) additionally drives these three:
+// rln_gifter_module runs the whole gifter protocol (dial + request) over
+// libp2p_module's GENERIC protocol bridge AND relays libp2p_module calls
+// (node bring-up); keycard_capture_module does the in-process PC/SC Keycard
+// IDENTIFY capture; libp2p_module provides the libp2p node the gifter dials
+// through. None is touched by the base wallet path.
+var LIBP2P_MODULE = "libp2p_module";
+var GIFTER_MODULE = "rln_gifter_module";
+var CAPTURE_MODULE = "keycard_capture_module";
 
 // shared-faucet testnet registry (CAIP-10; descriptor under
 // <repo>/deployments/shared-faucet/) — the GUI's prefill, freely editable.
@@ -33,6 +42,52 @@ function sc(x) {
 // The deployed testnet sequencer (deployments/shared-faucet/deployment.json)
 // — prefill for provision_wallet_home's wallet_config.json.
 var TESTNET_SEQUENCER_ADDR = "https://testnet.lez.logos.co/";
+
+// Gifter path prefills — both freely editable in StepGifter. The defaults point
+// at the local dev gifter (tools/run-local-gifter.sh): a fixed node key gives it
+// a stable peerId, so this default stays valid across gifter restarts. Point
+// these elsewhere for a different gifter.
+var GIFTER_PEER_ID_DEFAULT = "16Uiu2HAm8KkYKyhBK5f8ZcSDJP947bxCqVRRbzP8DKDigqePtX2Y";
+var GIFTER_MULTIADDR_DEFAULT = "/ip4/127.0.0.1/tcp/9000";
+
+// Config for the app's OWN libp2p node — brought up only to dial the gifter
+// (the wallet path never runs libp2p). Ephemeral localhost listen port; a
+// direct protocol dial to a known peer needs no gossipsub/kad/discovery. A plain
+// object: libp2pCall JSON.stringifies it into createNode's single string arg.
+var LIBP2P_NODE_CONFIG = {
+    addrs: ["/ip4/127.0.0.1/tcp/0"],
+    transport: "tcp",
+    maxConnections: 16,
+    maxInConnections: 8,
+    maxOutConnections: 8,
+    maxConnsPerPeer: 1,
+    mountGossipsub: false,
+    mountKad: false,
+    mountServiceDiscovery: false
+};
+
+// libp2p_module's C++ methods return a StdLogosResult that marshals to `null`
+// through the QML bridge, so every libp2p call is relayed through
+// keycard_rln_module.libp2p_call (a module-to-module SDK call). It hands back the
+// real {success,value,error} as a JSON string (bridge-double-encoded like other
+// tstr replies). Parse it as-is — NOT through parseReply, whose empty-"error"
+// rule would flag a successful libp2p reply (error:"") as a failure.
+function parseLibp2pReply(payload) {
+    var v;
+    try { v = JSON.parse(payload); } catch (e) { return { error: "unparseable libp2p reply: " + payload }; }
+    if (typeof v === "string") {
+        try { v = JSON.parse(v); } catch (e) { return { error: v }; }
+    }
+    if (v === null || typeof v !== "object")
+        return { error: "unexpected libp2p reply: " + payload };
+    return v;
+}
+
+// A libp2p relay reply carries an error only when its `error` field is a
+// NON-empty string (success replies carry error:"").
+function libp2pError(r) {
+    return (r && typeof r.error === "string" && r.error !== "") ? r.error : "";
+}
 
 function mkError(kind, message) {
     return { error: { kind: kind, message: message } };
@@ -124,6 +179,29 @@ function errorText(err) {
     var msg = err && err.message ? err.message : "";
     var hint = ERROR_HINTS[kind];
     return kind + ": " + msg + (hint ? "\n" + hint : "");
+}
+
+// The gifter surfaces auth/dial failures as free-text in the error message
+// (e.g. "authentication failed: card already used"). Map the exact substrings
+// the gifter protocol emits to plain-language guidance; fall back to errorText.
+var GIFTER_ERROR_HINTS = [
+    ["card already used", "This Keycard has already claimed a membership from this provider."],
+    ["attestation CA is not trusted", "This provider doesn't recognize your Keycard."],
+    ["challenge signature does not verify", "The captured attestation didn't match this identity — re-tap your Keycard."],
+    ["attestation parse failed", "Couldn't read the card attestation — re-tap your Keycard."],
+    ["unsupported authentication_type", "This provider doesn't accept Keycard registration."],
+    ["No libp2p context", "The peer-to-peer node isn't running yet — try again in a moment."]
+];
+
+function gifterErrorText(err) {
+    var msg = (typeof err === "string") ? err
+            : (err && err.message) ? err.message
+            : (err && err.kind ? err.kind : "");
+    for (var i = 0; i < GIFTER_ERROR_HINTS.length; i++) {
+        if (msg.indexOf(GIFTER_ERROR_HINTS[i][0]) !== -1)
+            return GIFTER_ERROR_HINTS[i][1] + "\n(" + msg + ")";
+    }
+    return (typeof err === "string") ? msg : errorText(err);
 }
 
 function truncateHex(hex, head, tail) {

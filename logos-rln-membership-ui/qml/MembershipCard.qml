@@ -61,7 +61,12 @@ Item {
             return
         refreshing = true
         flow.callRetry(M.MEMBERSHIP_MODULE, "get_memberships", [registryId], function (r) {
-            if (r.error) { card.error = M.errorText(r.error); card.refreshing = false; return }
+            if (r.error) {
+                // Transient hiccup: keep the card as-is, retry next tick.
+                if (!M.isTransientError(r.error.kind)) card.error = M.errorText(r.error)
+                card.refreshing = false
+                return
+            }
             card.error = ""
             var rows = r.memberships || []
             var row = null

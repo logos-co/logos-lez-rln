@@ -41,7 +41,7 @@ Item {
     readonly property var nullStep: ({ ready: false, entered: function () {} })
 
     function stepItem(i) {
-        var items = [welcomeStep, passwordStep, progressStep]
+        var items = [welcomeStep, passwordStep, workStep]
         return (i >= 0 && i < items.length) ? items[i] : nullStep
     }
 
@@ -152,9 +152,22 @@ Item {
 
             StepWelcome { id: welcomeStep; flow: flow }
             StepPassword { id: passwordStep; flow: flow }
-            StepProgress {
-                id: progressStep
-                flow: flow
+            // The work step swaps on registrationMode: the wallet path's
+            // unattended bar, or the gifter path's card-tap screen. entered()
+            // dispatches to whichever is showing so the shell's kickoff is
+            // mode-agnostic; ready is unused (step 2 hides the shared CTA).
+            StackLayout {
+                id: workStep
+                currentIndex: flow.registrationMode === "gifter" ? 1 : 0
+                readonly property bool ready: true
+                function entered() {
+                    if (flow.registrationMode === "gifter")
+                        gifterStep.entered()
+                    else
+                        progressStep.entered()
+                }
+                StepProgress { id: progressStep; flow: flow }
+                StepGifter { id: gifterStep; flow: flow }
             }
         }
 
@@ -185,6 +198,20 @@ Item {
         // in-progress wallet/sync/claim/register work. restart() ("New
         // membership" from the card) resets currentStep to 0, so this
         // covers re-entry too.
+        // The alternative path: register via a gifter node + Keycard instead of
+        // a funded wallet. Sets the mode, then advances the same way Get started
+        // does (through the password/keystore step, which the gifter path still
+        // needs to persist the grant) — landing on StepGifter at the work step.
+        LinkText {
+            Layout.alignment: Qt.AlignHCenter
+            visible: view.currentStep === 0 && welcomeStep.ready
+            text: "Register with a Keycard gift"
+            onClicked: {
+                flow.registrationMode = "gifter"
+                view.advance()
+            }
+        }
+
         LinkText {
             Layout.alignment: Qt.AlignHCenter
             visible: view.currentStep === 0

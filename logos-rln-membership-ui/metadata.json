@@ -1,7 +1,7 @@
 {
   "name": "rln_membership_ui",
   "display_name": "RLN Membership",
-  "version": "0.3.1",
+  "version": "0.6.0",
   "type": "ui_qml",
   "category": "blockchain",
   "description": "RLN membership GUI: guided onboarding wizard, membership status card, and an advanced expert view (drives liblogos_rln_membership_module)",
@@ -11,7 +11,10 @@
   "dependencies": [
     "logos_execution_zone",
     "liblogos_rln_membership_module",
-    "liblogos_rln_module"
+    "liblogos_rln_module",
+    "libp2p_module",
+    "rln_gifter_module",
+    "keycard_capture_module"
   ],
   "nix": {
     "packages": {

@@ -276,6 +276,19 @@ fn register_impl(
     let pm = prov.get_membership(&registry, &credential.identity_commitment)?;
     if pm.registered {
         let mismatch = pm.rate_limit != rate_limit;
+        // A gifter-registered membership was submitted by the gifter, not us, so
+        // there's no register_member reply to record. If the caller passes the
+        // gifter's tx hash (options_json.gifter_tx_hash), synthesize the same
+        // tx_result envelope public_membership_json expects so the detail view
+        // shows the transaction like a wallet-path registration.
+        let gifter_tx_result: Option<String> = serde_json::from_str::<serde_json::Value>(options_json)
+            .ok()
+            .and_then(|o| o.get("gifter_tx_hash").and_then(|x| x.as_str()).map(String::from))
+            .filter(|s| !s.is_empty())
+            .map(|tx| {
+                let inner = serde_json::json!({"error": "", "secrets": [], "success": true, "tx_hash": tx}).to_string();
+                serde_json::json!({"tx_result": inner}).to_string()
+            });
         store::with_store(|s| {
             if s.get(&hash).is_some() {
                 s.update(&hash, |m| {
@@ -283,6 +296,9 @@ fn register_impl(
                     m.leaf_index = pm.leaf_index;
                     m.rate_limit = pm.rate_limit;
                     m.failed_reason = None;
+                    if m.tx_result.is_none() {
+                        m.tx_result = gifter_tx_result.clone();
+                    }
                 })
             } else {
                 let meta = store::MembershipMeta {
@@ -294,7 +310,7 @@ fn register_impl(
                     state: pm.state.clone(),
                     state_history: vec![],
                     submitted_at: now_unix(),
-                    tx_result: None,
+                    tx_result: gifter_tx_result.clone(),
                 };
                 s.insert(&hash, meta, &credential)
             }
