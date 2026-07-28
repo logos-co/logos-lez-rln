@@ -173,7 +173,8 @@ namespace (its registry keeps no recoverable deposit).
   "proof": "<canonical hex — the authoritative bytes>",
   "root": "<32B hex>", "external_nullifier": "<32B hex>",
   "share_x": "<32B hex>", "share_y": "<32B hex>", "nullifier": "<32B hex>",
-  "message_id": N, "epoch": N, "membership_hash": "<hex>"
+  "message_id": N, "epoch": N, "membership_hash": "<hex>",
+  "proof_cbor": "<hex — the CBOR wire form below>"
 }
 ```
 
@@ -182,14 +183,53 @@ namespace (its registry keeps no recoverable deposit).
   y ‖ nullifier (all 32-byte LE) — 290 bytes total. The spec struct's
   `proof[128]` is bytes `1..129`; its `share_x` is the circuit's signal hash
   `x`, `share_y` is `y`.
-- `verify_proof` accepts **either** shape: the object above (canonical bytes
-  trusted, decoded fields ignored), or the spec's decomposed struct — `proof`
+- `verify_proof` accepts **three** shapes: the object above (canonical bytes
+  trusted, decoded fields ignored); the spec's decomposed struct — `proof`
   as the bare 128-byte Groth16 hex plus the five field values — which is what
-  a shim reassembles from fields carried in its own network message format.
-  Both land in the identical verified representation.
+  a shim reassembles from fields carried in its own network message format;
+  or a **hex-encoded CBOR `rate-limit-proof`** (any input that is not a JSON
+  object is treated as this). All land in the identical verified
+  representation.
 - Frozen byte-exact vectors (identity derivation, external nullifier, signal
   hash, public values, layout): `rust-lib/src/proof.rs`,
   `proof::tests::frozen_interop_vectors`.
+
+### CBOR wire form (`rate-limit-proof`)
+
+The self-contained encoding a shim can put in its own network message
+verbatim — `generate_proof` emits it as `proof_cbor`, `verify_proof` accepts
+it back. CDDL (RFC 8610):
+
+```cddl
+rate-limit-proof = {
+  root: bstr .size 32,            ; field elements: 32-byte little-endian
+  epoch: bstr .size 32,           ; epoch index as 32-byte LE integer,
+                                  ; padding bytes 8..32 MUST be zero
+  proof: bstr .size 128,          ; compressed Groth16 over BN254
+  share_x: bstr .size 32,
+  share_y: bstr .size 32,
+  nullifier: bstr .size 32,
+  rln_identifier: bstr .size 32,
+}
+```
+
+- `external_nullifier` is deliberately **not** a wire field: it is derived
+  state the verifier MUST recompute from the carried `epoch` +
+  `rln_identifier` — a carried value would be attacker-controlled. A proof
+  that lies about either fails zk verification (the witness committed to the
+  real one).
+- The carried `epoch`/`rln_identifier` make the proof self-contained:
+  `verify_proof` checks the carried `rln_identifier` against the scope and
+  the carried epoch index against now ± 1 directly — no
+  nullifier-recompute loop.
+- Emitted form is deterministic (RFC 8949: definite lengths, keys in
+  bytewise order — `root, epoch, proof, share_x, share_y, nullifier,
+  rln_identifier`; 393 bytes). Decoding tolerates any key order but is
+  otherwise strict: exactly these seven keys, exact sizes, no trailing
+  bytes, canonical epoch padding (garbage padding would mint unlimited
+  nullifier buckets per epoch).
+- It rides this wire hex-encoded because module args/replies are strings
+  today; on a CBOR-native transport the bytes go raw.
 
 ## Epoch semantics
 

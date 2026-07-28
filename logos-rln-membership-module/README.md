@@ -62,7 +62,9 @@ budgets, option keys — is [`docs/wire-binding.md`](docs/wire-binding.md).
   register/proof orchestration, start/stop lifecycle.
 - `rust-lib/src/proof.rs` — the RLN proof engine over zerokit (stateless):
   in-module identity generation, witness assembly, generate/verify, the
-  canonical `RateLimitProof` serialization, and the frozen interop vectors.
+  canonical `RateLimitProof` serialization, its CBOR wire form
+  (`rate-limit-proof` CDDL, deterministic encoding), and the frozen
+  interop vectors.
 - `rust-lib/src/rate_limit.rs` — epoch derivation + per-(rln_identifier,
   epoch) `message_id` allocation. The store persists an allocation BEFORE
   the proof is returned, so a crash can waste a slot but never reissue one

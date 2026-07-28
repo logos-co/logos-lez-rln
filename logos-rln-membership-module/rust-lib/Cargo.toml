@@ -38,6 +38,11 @@ getrandom = "0.2"
 # identity secret stays in this module — it never crosses to the sibling.
 rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
 
+# The spec's CBOR wire form of RateLimitProof (rate-limit-proof CDDL) —
+# emitted deterministically (RFC 8949) by generate_proof, accepted by
+# verify_proof. Core crate only: no_std, zero transitive deps.
+minicbor = { version = "2.3.0", default-features = false, features = ["alloc"] }
+
 # The runtime SDK, staged by the module builder (codegen.rust) at this
 # path from the same logos-rust-sdk rev its generator came from. Keep the
 # stage-sources.sh pin identical to ../../logos-rln-module's.

@@ -451,6 +451,18 @@ done
 [ "$VALID" = "yes" ] || die "verify_proof never left not_ready (root window warm-up)"
 log "verify_proof: valid"
 
+# The CBOR lane: the reply's proof_cbor (the spec rate-limit-proof wire form,
+# carried epoch + rln_identifier, no external nullifier) verifies as-is.
+PROOF_CBOR=$(printf '%s' "$PROOF_JSON" | jfield proof_cbor)
+[ -n "$PROOF_CBOR" ] || die "generate_proof reply carried no proof_cbor"
+CVERIFY=$(call_json liblogos_rln_membership_module verify_proof \
+    "$REGISTRY_ID" "$(argfile rlnid6 "$RLN_ID")" "$(argfile sig4 "$SIGNAL_HEX")" \
+    "$(argfile proofc "$PROOF_CBOR")" | jres | jval) || CVERIFY=""
+case "$CVERIFY" in
+    *'"verdict":"valid"'*) log "verify_proof (CBOR wire form): valid" ;;
+    *) die "CBOR proof rejected: ${CVERIFY:-<empty>}" ;;
+esac
+
 # A different signal against the same proof MUST be invalid — not an error.
 TAMPER_HEX=$(printf 'tampered signal' | to_hex)
 TVERIFY=$(call_json liblogos_rln_membership_module verify_proof \

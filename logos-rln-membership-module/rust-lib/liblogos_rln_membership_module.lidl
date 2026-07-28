@@ -211,8 +211,9 @@ module liblogos_rln_membership_module {
   ; reserves and durably persists the next message_id, fetches the Merkle path,
   ; and proves. Returns the RateLimitProof — {"proof":<canonical hex>,"root",
   ; "external_nullifier","share_x","share_y","nullifier"} (all hex) — plus the
-  ; spent "message_id", the "epoch" (u64 index), and the "membership_hash".
-  ; Errors:
+  ; spent "message_id", the "epoch" (u64 index), the "membership_hash", and
+  ; "proof_cbor" (hex CBOR rate-limit-proof — the self-contained wire form a
+  ; consumer forwards verbatim; see docs/wire-binding.md). Errors:
   ; no_usable_membership, ambiguous_selection (multiple; select first), locked,
   ; budget_exhausted (epoch rate limit spent), invalid_argument, transient.
   method generate_proof(registry_id: tstr, rln_identifier_hex: tstr, signal_hex: tstr) -> result
@@ -220,11 +221,12 @@ module liblogos_rln_membership_module {
   ; Spec verify_proof(scope, signal, proof). The message hot path: served
   ; entirely from the locally maintained valid-root window, NEVER reading the
   ; registry. Needs no membership or unlocked keystore — a pure validator never
-  ; registers. proof_json accepts EITHER shape: the object generate_proof
-  ; returns (canonical "proof" bytes trusted, other fields ignored) OR the
-  ; spec's decomposed RateLimitProof struct — "proof" as the bare 128-byte
-  ; Groth16 hex plus root/external_nullifier/share_x/share_y/nullifier —
-  ; the shape a consumer reassembles from its own network message. Checks,
+  ; registers. proof_json accepts the object generate_proof returns
+  ; (canonical "proof" bytes trusted, other fields ignored), the spec's
+  ; decomposed RateLimitProof struct — "proof" as the bare 128-byte Groth16
+  ; hex plus root/external_nullifier/share_x/share_y/nullifier — or, for
+  ; non-JSON input, hex CBOR rate-limit-proof (proof_cbor; carried epoch +
+  ; rln_identifier checked directly, external nullifier recomputed). Checks,
   ; in order: the proof's external nullifier equals the scope's expected
   ; poseidon(hash_to_field_le(epoch[32]), hash_to_field_le(rln_identifier)) —
   ; epoch[32] = the epoch index as 32-byte LE (logos-delivery's toEpoch) — for

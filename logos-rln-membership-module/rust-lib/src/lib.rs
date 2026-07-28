@@ -977,6 +977,13 @@ fn generate_proof_impl(
         obj.insert("message_id".to_string(), message_id.into());
         obj.insert("epoch".to_string(), epoch.into());
         obj.insert("membership_hash".to_string(), hash.into());
+        // The spec's CBOR wire form (rate-limit-proof), hex over this tstr
+        // wire — what a shim puts in its own network message and what
+        // verify_proof accepts back directly.
+        obj.insert(
+            "proof_cbor".to_string(),
+            registry_id::bytes_to_hex(&rlp.to_cbor(epoch, &rln_identifier)).into(),
+        );
     }
     Ok(out)
 }
@@ -1057,13 +1064,34 @@ fn verify_proof_impl(
     let now_epoch = rate_limit::current_epoch(now_unix(), epoch_size()?);
     let signal = registry_id::hex_to_vec(signal_hex)
         .ok_or_else(|| ApiError::new(ErrorKind::InvalidArgument, "signal must be hex"))?;
-    let proof_value: serde_json::Value = serde_json::from_str(proof_json)
-        .map_err(|e| ApiError::new(ErrorKind::InvalidArgument, &format!("proof_json: {e}")))?;
-    let rlp = proof::RateLimitProof::from_json(&proof_value).map_err(proof_error)?;
 
     // Application + epoch binding first — pure local computation, so a stale
     // or wrong-application proof rejects definitively even before the root
-    // window is consulted.
+    // window is consulted. Two wire shapes: a JSON object (canonical or
+    // decomposed), or hex-encoded CBOR (the spec's rate-limit-proof — its
+    // external nullifier is recomputed from the carried epoch +
+    // rln_identifier, never read from the wire). Both lanes land in the same
+    // RateLimitProof and resolve their binding epoch via resolve_key_epoch.
+    let rlp = if proof_json.trim_start().starts_with('{') {
+        let proof_value: serde_json::Value = serde_json::from_str(proof_json)
+            .map_err(|e| ApiError::new(ErrorKind::InvalidArgument, &format!("proof_json: {e}")))?;
+        proof::RateLimitProof::from_json(&proof_value).map_err(proof_error)?
+    } else {
+        let bytes = registry_id::hex_to_vec(proof_json.trim()).ok_or_else(|| {
+            ApiError::new(
+                ErrorKind::InvalidArgument,
+                "proof must be a JSON object or hex-encoded CBOR rate-limit-proof",
+            )
+        })?;
+        let cbor = proof::from_cbor(&bytes).map_err(proof_error)?;
+        // A foreign-application claim can never match the scope's expected
+        // external nullifier below — rejecting here is the same verdict,
+        // cheaper.
+        if cbor.rln_identifier != rln_identifier {
+            return Ok(serde_json::json!({ "verdict": "invalid" }));
+        }
+        cbor.proof
+    };
     let bound = rlp.external_nullifier();
     let matched_epoch = match resolve_key_epoch(rlp.epoch(), &bound, &rln_identifier, now_epoch) {
         Some(e) => e,
@@ -1681,6 +1709,49 @@ mod tests {
         let correct = registry_id::bytes_to_hex(b"correct-sig");
         let ok = verify_proof_impl(&registry, &rln_id_hex, &correct, &proof_json).unwrap();
         assert_eq!(ok, serde_json::json!({ "verdict": "valid" }));
+
+        start_impl(r#"{"epoch_size_sec": 600}"#).unwrap();
+    }
+
+    // The CBOR lane: verify_proof accepts the hex-encoded spec
+    // rate-limit-proof, binding on the CARRIED epoch + rln_identifier
+    // (recomputing the external nullifier rather than reading one).
+    #[test]
+    fn verify_proof_impl_accepts_cbor_wire_proof() {
+        let _serial = crate::lock(&store::TEST_STORE_LOCK);
+        nullifier_log::reset_for_test();
+        start_impl(r#"{"epoch_size_sec": 600}"#).unwrap();
+        let registry = format!("logos:local:{}", "cd".repeat(32));
+        let rln_id = [9u8; 32];
+        let rln_id_hex = registry_id::bytes_to_hex(&rln_id);
+        let signal = b"cbor-lane";
+        let signal_hex = registry_id::bytes_to_hex(signal);
+
+        let epoch = rate_limit::current_epoch(now_unix(), epoch_size().unwrap());
+        let rlp = proof::generate_for_test(&[7u8; 32], signal, epoch, &rln_id);
+        roots::set_window_for_test(&registry, vec![rlp.root()], now_unix());
+
+        let cbor_hex = registry_id::bytes_to_hex(&rlp.to_cbor(epoch, &rln_id));
+        let ok = verify_proof_impl(&registry, &rln_id_hex, &signal_hex, &cbor_hex).unwrap();
+        assert_eq!(ok, serde_json::json!({ "verdict": "valid" }));
+
+        // Carried-binding checks reject before any crypto: a foreign
+        // application claim and a stale epoch claim are both invalid.
+        let foreign_hex = registry_id::bytes_to_hex(&rlp.to_cbor(epoch, &[8u8; 32]));
+        let out = verify_proof_impl(&registry, &rln_id_hex, &signal_hex, &foreign_hex).unwrap();
+        assert_eq!(out, serde_json::json!({ "verdict": "invalid" }));
+        let stale_hex = registry_id::bytes_to_hex(&rlp.to_cbor(1, &rln_id));
+        let out = verify_proof_impl(&registry, &rln_id_hex, &signal_hex, &stale_hex).unwrap();
+        assert_eq!(out, serde_json::json!({ "verdict": "invalid" }));
+
+        // A CBOR retransmission of the already-accepted proof is a duplicate,
+        // exactly like the JSON lane — one log serves both wire shapes.
+        let dup = verify_proof_impl(&registry, &rln_id_hex, &signal_hex, &cbor_hex).unwrap();
+        assert_eq!(dup, serde_json::json!({ "verdict": "duplicate" }));
+
+        // Neither a JSON object nor hex → invalid_argument, not a verdict.
+        let err = verify_proof_impl(&registry, &rln_id_hex, &signal_hex, "zz-not-hex").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidArgument);
 
         start_impl(r#"{"epoch_size_sec": 600}"#).unwrap();
     }

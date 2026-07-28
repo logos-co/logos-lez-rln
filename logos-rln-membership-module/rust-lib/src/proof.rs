@@ -187,7 +187,6 @@ impl RateLimitProof {
         let bytes = hex_to_vec(proof_hex)
             .ok_or_else(|| ProofError::BadInput("proof: not valid hex".into()))?;
 
-        const GROTH16_LEN: usize = 128;
         let canonical: Vec<u8> = if bytes.len() == GROTH16_LEN {
             // Spec-struct shape: reassemble the canonical form around the bare
             // Groth16 proof, in zerokit's exact SingleV1 field order.
@@ -267,12 +266,135 @@ impl RateLimitProof {
         self.epoch
     }
 
+    /// The bare 128-byte compressed Groth16 proof (the spec's `proof[128]`).
+    fn groth16(&self) -> &[u8] {
+        &self.canonical[1..1 + GROTH16_LEN]
+    }
+
+    /// The spec's CBOR wire form (`rate-limit-proof` CDDL): a definite-length
+    /// map of seven byte strings, keys emitted in RFC 8949 deterministic
+    /// (bytewise) order. `external_nullifier` is deliberately NOT a wire
+    /// field — it is derived state a verifier MUST recompute from the carried
+    /// `epoch` + `rln_identifier` (a carried value would be
+    /// attacker-controlled). `epoch`/`rln_identifier` are the proof's claimed
+    /// binding, passed in by the generator.
+    pub(crate) fn to_cbor(&self, epoch: u64, rln_identifier: &[u8; 32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(CBOR_PROOF_LEN);
+        let mut e = minicbor::Encoder::new(&mut out);
+        e.map(7)
+            .and_then(|e| e.str("root"))
+            .and_then(|e| e.bytes(&self.root))
+            .and_then(|e| e.str("epoch"))
+            .and_then(|e| e.bytes(&epoch_to_bytes(epoch)))
+            .and_then(|e| e.str("proof"))
+            .and_then(|e| e.bytes(self.groth16()))
+            .and_then(|e| e.str("share_x"))
+            .and_then(|e| e.bytes(&self.share_x))
+            .and_then(|e| e.str("share_y"))
+            .and_then(|e| e.bytes(&self.share_y))
+            .and_then(|e| e.str("nullifier"))
+            .and_then(|e| e.bytes(&self.nullifier))
+            .and_then(|e| e.str("rln_identifier"))
+            .and_then(|e| e.bytes(rln_identifier))
+            .expect("CBOR encoding into a Vec cannot fail");
+        out
+    }
+
     /// Reconstruct the zerokit proof + public values for verification.
     fn to_rln_proof(&self) -> Result<RLNProof, ProofError> {
         bytes_le_to_rln_proof(&self.canonical)
             .map(|(p, _)| p)
             .map_err(|e| ProofError::BadInput(format!("proof: decode: {e}")))
     }
+}
+
+const GROTH16_LEN: usize = 128;
+
+/// Byte length of the deterministic CBOR encoding: map header + seven
+/// text keys + six 32-byte and one 128-byte definite-length byte strings.
+pub(crate) const CBOR_PROOF_LEN: usize = 393;
+
+/// A proof decoded from the CBOR wire form: the verified representation plus
+/// the carried `rln_identifier` claim the verifier binds against. The carried
+/// epoch is validated at decode (canonical padding) and lives on `proof`
+/// (`proof.epoch()`), so it is not surfaced separately here.
+pub(crate) struct CborProof {
+    pub(crate) proof: RateLimitProof,
+    /// The application the proof claims to be bound to; the verifier checks
+    /// it against the scope before trusting anything else.
+    pub(crate) rln_identifier: [u8; 32],
+}
+
+/// Decode the spec's CBOR `rate-limit-proof`. Strict on structure (definite
+/// lengths, exactly the seven known keys, exact field sizes, no trailing
+/// bytes, canonical epoch padding) but tolerant of key ORDER — nothing hashes
+/// these bytes, so ordering is not security-relevant on input. The external
+/// nullifier is recomputed from the carried epoch + rln_identifier; a proof
+/// that lied about either fails zk verification (the witness committed to the
+/// real one).
+pub(crate) fn from_cbor(bytes: &[u8]) -> Result<CborProof, ProofError> {
+    let bad = |msg: &str| ProofError::BadInput(format!("proof_cbor: {msg}"));
+    let mut d = minicbor::Decoder::new(bytes);
+    let entries = d
+        .map()
+        .map_err(|e| bad(&format!("not a CBOR map: {e}")))?
+        .ok_or_else(|| bad("indefinite-length map rejected"))?;
+    if entries != 7 {
+        return Err(bad(&format!("expected 7 fields, got {entries}")));
+    }
+
+    let mut fields: [Option<Vec<u8>>; 7] = Default::default();
+    const KEYS: [(&str, usize); 7] = [
+        ("root", 32),
+        ("epoch", 32),
+        ("proof", GROTH16_LEN),
+        ("share_x", 32),
+        ("share_y", 32),
+        ("nullifier", 32),
+        ("rln_identifier", 32),
+    ];
+    for _ in 0..7 {
+        let key = d.str().map_err(|e| bad(&format!("map key: {e}")))?.to_string();
+        let idx = KEYS
+            .iter()
+            .position(|(k, _)| *k == key)
+            .ok_or_else(|| bad(&format!("unknown field {key:?}")))?;
+        let value = d.bytes().map_err(|e| bad(&format!("{key}: {e}")))?;
+        if value.len() != KEYS[idx].1 {
+            return Err(bad(&format!("{key}: expected {} bytes, got {}", KEYS[idx].1, value.len())));
+        }
+        if fields[idx].replace(value.to_vec()).is_some() {
+            return Err(bad(&format!("duplicate field {key:?}")));
+        }
+    }
+    if d.position() != bytes.len() {
+        return Err(bad("trailing bytes after the map"));
+    }
+    let field = |idx: usize| fields[idx].as_deref().expect("all 7 slots filled above");
+
+    let epoch_bytes: [u8; 32] = field(1).try_into().expect("size checked above");
+    let epoch = epoch_from_bytes(&epoch_bytes)
+        .ok_or_else(|| bad("epoch: non-canonical padding (bytes 8..32 must be zero)"))?;
+    let rln_identifier: [u8; 32] = field(6).try_into().expect("size checked above");
+
+    let external = fr_to_32(&external_nullifier(epoch, &rln_identifier));
+    let mut canonical = Vec::with_capacity(2 + GROTH16_LEN + 5 * 32);
+    canonical.push(0x00);
+    canonical.extend_from_slice(field(2));
+    canonical.push(0x00);
+    canonical.extend_from_slice(field(0));
+    canonical.extend_from_slice(&external);
+    canonical.extend_from_slice(field(3));
+    canonical.extend_from_slice(field(4));
+    canonical.extend_from_slice(field(5));
+    let (rln_proof, _) = bytes_le_to_rln_proof(&canonical)
+        .map_err(|e| bad(&format!("not a valid RLN proof: {e}")))?;
+    let mut proof = RateLimitProof::from_parts(rln_proof.proof, rln_proof.proof_values)?;
+    proof.epoch = Some(epoch);
+    Ok(CborProof {
+        proof,
+        rln_identifier,
+    })
 }
 
 /// The spec's `epoch[32]` wire encoding: the epoch index as a 32-byte
@@ -561,9 +683,8 @@ mod tests {
 
         // Public values of a proof over the fixed witness.
         let material = material_from_seed(&[7u8; 32], 100, 0);
-        let j = generate(&material, b"Hello, RLN!", 1231028105, &rln_id)
-            .expect("generate")
-            .to_json();
+        let p = generate(&material, b"Hello, RLN!", 1231028105, &rln_id).expect("generate");
+        let j = p.to_json();
         assert_eq!(
             j["root"].as_str().unwrap(),
             "e6b1124d580df28efdb5a009ee7eb485cc33625df6b98fc058054217160d8a07"
@@ -600,6 +721,119 @@ mod tests {
         let canonical = hex_to_vec(j["proof"].as_str().unwrap()).unwrap();
         assert_eq!(canonical.len(), 290);
         assert_eq!(canonical[0], 0x00);
+
+        // The spec CBOR wire form (rate-limit-proof): a 393-byte
+        // definite-length map(7), keys in RFC 8949 deterministic order,
+        // external_nullifier deliberately absent (verifiers recompute it).
+        let cbor = p.to_cbor(1231028105, &rln_id);
+        assert_eq!(cbor.len(), CBOR_PROOF_LEN);
+        assert_eq!(cbor[0], 0xa7);
+        let mut d = minicbor::Decoder::new(&cbor);
+        d.map().unwrap();
+        let mut keys = Vec::new();
+        for _ in 0..7 {
+            keys.push(d.str().unwrap().to_string());
+            d.skip().unwrap();
+        }
+        assert_eq!(
+            keys,
+            ["root", "epoch", "proof", "share_x", "share_y", "nullifier", "rln_identifier"]
+        );
+    }
+
+    #[test]
+    fn cbor_roundtrip_preserves_binding_and_verifies() {
+        let material = material_from_seed(&[7u8; 32], 100, 0);
+        let rln_id = [9u8; 32];
+        let p = generate(&material, b"hello", 1231028105, &rln_id).expect("generate");
+        let root = p.root();
+
+        let restored = from_cbor(&p.to_cbor(1231028105, &rln_id)).expect("from_cbor");
+        assert_eq!(restored.proof.epoch(), Some(1231028105));
+        assert_eq!(restored.rln_identifier, rln_id);
+        assert_eq!(restored.proof.root(), root);
+        assert_eq!(
+            restored.proof.to_json()["proof"],
+            p.to_json()["proof"],
+            "recomputed external nullifier must reassemble the identical canonical bytes"
+        );
+        assert!(verify(&restored.proof, b"hello", &[root]).expect("verify"));
+    }
+
+    // A well-formed CBOR proof that LIES about its binding decodes fine but
+    // fails zk verification: the recomputed external nullifier diverges from
+    // the one the witness committed to.
+    #[test]
+    fn cbor_lying_about_binding_fails_verification() {
+        let material = material_from_seed(&[7u8; 32], 100, 0);
+        let rln_id = [9u8; 32];
+        let p = generate(&material, b"hello", 1231028105, &rln_id).expect("generate");
+        let root = p.root();
+
+        // Claim a different application (last field's last byte).
+        let mut lied_app = p.to_cbor(1231028105, &rln_id);
+        let last = lied_app.len() - 1;
+        lied_app[last] ^= 0x01;
+        let restored = from_cbor(&lied_app).expect("well-formed");
+        assert!(!verify(&restored.proof, b"hello", &[root]).expect("verify"));
+
+        // Claim a different epoch (same index bits flipped via re-encode).
+        let lied_epoch = from_cbor(&p.to_cbor(1231028104, &rln_id)).expect("well-formed");
+        assert!(!verify(&lied_epoch.proof, b"hello", &[root]).expect("verify"));
+    }
+
+    #[test]
+    fn cbor_strictness_rejects_malformed_input() {
+        fn cbor_map(entries: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut e = minicbor::Encoder::new(&mut out);
+            e.map(entries.len() as u64).unwrap();
+            for (k, v) in entries {
+                e.str(k).unwrap().bytes(v).unwrap();
+            }
+            out
+        }
+        let z32 = [0u8; 32];
+        let z128 = [0u8; 128];
+        let full: [(&str, &[u8]); 7] = [
+            ("root", &z32),
+            ("epoch", &z32),
+            ("proof", &z128),
+            ("share_x", &z32),
+            ("share_y", &z32),
+            ("nullifier", &z32),
+            ("rln_identifier", &z32),
+        ];
+
+        // Wrong entry count, duplicate keys, unknown keys, wrong field size.
+        assert!(matches!(from_cbor(&cbor_map(&full[..6])), Err(ProofError::BadInput(_))));
+        let mut dup = full;
+        dup[1] = ("root", &z32);
+        assert!(matches!(from_cbor(&cbor_map(&dup)), Err(ProofError::BadInput(_))));
+        let mut unknown = full;
+        unknown[3] = ("shard_x", &z32);
+        assert!(matches!(from_cbor(&cbor_map(&unknown)), Err(ProofError::BadInput(_))));
+        let short = [0u8; 31];
+        let mut sized = full;
+        sized[0] = ("root", &short);
+        assert!(matches!(from_cbor(&cbor_map(&sized)), Err(ProofError::BadInput(_))));
+
+        // A real encoding, corrupted: trailing byte; non-canonical epoch
+        // padding (accepting it would mint fresh nullifier buckets per
+        // padding variant and defeat the rate limit).
+        let p = generate(&material_from_seed(&[7u8; 32], 100, 0), b"x", 7, &[9u8; 32])
+            .expect("generate");
+        let good = p.to_cbor(7, &[9u8; 32]);
+        assert!(from_cbor(&good).is_ok());
+        let mut trailing = good.clone();
+        trailing.push(0x00);
+        assert!(matches!(from_cbor(&trailing), Err(ProofError::BadInput(_))));
+        // Epoch value sits at bytes 48..80 in the deterministic layout
+        // (map hdr 1 + "root" key 5 + root bstr 34 + "epoch" key 6 + bstr hdr 2);
+        // bytes 8..32 of it are the padding that MUST be zero.
+        let mut padded = good;
+        padded[48 + 20] = 0xff;
+        assert!(matches!(from_cbor(&padded), Err(ProofError::BadInput(_))));
     }
 
     #[test]
