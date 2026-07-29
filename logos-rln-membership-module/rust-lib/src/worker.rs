@@ -90,15 +90,6 @@ pub(crate) fn wait_tick(my_gen: u64, dur: Duration) -> bool {
     timeout.timed_out() && sup.generation == my_gen && sup.state != WorkerState::Stopped
 }
 
-/// Whether a worker's run is still the current one. The loops get this
-/// check for free from `wait_tick` (its wait condition re-evaluates before
-/// every sleep), so at runtime it exists for the detach test's assertions.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn is_current(my_gen: u64) -> bool {
-    let sup = crate::lock(&SUP);
-    sup.generation == my_gen && sup.state != WorkerState::Stopped
-}
-
 /// Spawn `body(generation)` into `slot` if permitted and not already alive.
 /// A slot whose previous worker has returned is reaped (instant join) and
 /// respawned; a live worker makes this a no-op.
@@ -115,13 +106,21 @@ fn ensure(slot: fn(&mut Supervisor) -> &mut Slot, name: &'static str, body: fn(u
         let _ = handle.join();
     }
     let gen = sup.generation;
-    *slot(&mut sup) = Some(spawn_into(name, move || body(gen)));
+    *slot(&mut sup) = Some(spawn_into(name, gen, move || body(gen)));
     sup.running += 1;
 }
 
-/// Spawn a named worker wrapped in the exit epilogue (done flag + running
-/// decrement + wake), returning the slot pair.
-fn spawn_into(name: &'static str, body: impl FnOnce() + Send + 'static) -> (JoinHandle<()>, Arc<AtomicBool>) {
+/// Spawn a named worker of generation `gen`, wrapped in the exit epilogue
+/// (done flag + generation-scoped `running` decrement + wake). The decrement
+/// is skipped for a worker whose generation is no longer current: a
+/// `stop()`/reset bumps the generation only once its workers are already
+/// accounted for, so a superseded straggler exiting later must not disturb
+/// the count a fresh run is now keeping.
+fn spawn_into(
+    name: &'static str,
+    gen: u64,
+    body: impl FnOnce() + Send + 'static,
+) -> (JoinHandle<()>, Arc<AtomicBool>) {
     let done = Arc::new(AtomicBool::new(false));
     let done_in = done.clone();
     let handle = std::thread::Builder::new()
@@ -130,7 +129,9 @@ fn spawn_into(name: &'static str, body: impl FnOnce() + Send + 'static) -> (Join
             body();
             done_in.store(true, Ordering::SeqCst);
             let mut sup = crate::lock(&SUP);
-            sup.running = sup.running.saturating_sub(1);
+            if sup.generation == gen {
+                sup.running = sup.running.saturating_sub(1);
+            }
             drop(sup);
             CVAR.notify_all();
         })
@@ -172,18 +173,25 @@ pub(crate) fn start(warm: impl FnOnce() + Send + 'static) {
             let _ = handle.join();
         }
     }
-    sup.warm = Some(spawn_into("rln-warm", warm));
+    let gen = sup.generation;
+    sup.warm = Some(spawn_into("rln-warm", gen, warm));
     sup.running += 1;
 }
 
 /// stop(): forbid spawning, wake every sleeping worker, wait up to [`GRACE`]
 /// for voluntary exits, then join the exited and detach the rest (a worker
 /// blocked in one in-flight registry read; it self-exits after it).
+///
+/// The generation is bumped and `running` zeroed only AFTER the detach loop:
+/// during the grace wait the workers are still the current generation, so a
+/// woken sleeper decrements `running` (letting the wait return early on the
+/// fast path); closing the generation afterwards makes every remaining
+/// straggler superseded, so it self-exits without touching the count the
+/// next run keeps — no leak, no double-count on restart.
 pub(crate) fn stop() {
     {
         let mut sup = crate::lock(&SUP);
         sup.state = WorkerState::Stopped;
-        sup.generation += 1;
         STOPPED.store(true, Ordering::SeqCst);
     }
     CVAR.notify_all();
@@ -197,10 +205,12 @@ pub(crate) fn stop() {
             if done.load(Ordering::SeqCst) {
                 let _ = handle.join();
             }
-            // else: detached by dropping the handle; the generation bump
-            // above makes it exit after its in-flight read.
+            // else: detached by dropping the handle; the generation close
+            // below makes it exit (superseded) after its in-flight read.
         }
     }
+    sup.generation += 1;
+    sup.running = 0;
 }
 
 #[cfg(test)]
@@ -232,20 +242,22 @@ pub(crate) fn reset_for_test() {
 
 /// Occupy the poller slot with a worker that ignores ticks and parks on
 /// `gate` — a stand-in for a worker stuck in a long provider read, for the
-/// stop()-detaches test.
+/// stop()-detaches test. `exited` is set when the worker finally returns, so
+/// the test observes its self-exit directly (a detached straggler is
+/// superseded and never touches `running`).
 #[cfg(test)]
-pub(crate) fn spawn_blocking_for_test(gate: Arc<(Mutex<bool>, Condvar)>) -> u64 {
+pub(crate) fn spawn_blocking_for_test(gate: Arc<(Mutex<bool>, Condvar)>, exited: Arc<AtomicBool>) {
     let mut sup = crate::lock(&SUP);
     let gen = sup.generation;
-    sup.poller = Some(spawn_into("rln-test-blocker", move || {
+    sup.poller = Some(spawn_into("rln-test-blocker", gen, move || {
         let (m, cv) = &*gate;
         let mut released = m.lock().unwrap_or_else(|p| p.into_inner());
         while !*released {
             released = cv.wait(released).unwrap_or_else(|p| p.into_inner());
         }
+        exited.store(true, Ordering::SeqCst);
     }));
     sup.running += 1;
-    gen
 }
 
 #[cfg(test)]
@@ -324,31 +336,32 @@ mod tests {
         let _serial = crate::lock(&crate::store::TEST_STORE_LOCK);
         reset_for_test();
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let old_gen = spawn_blocking_for_test(gate.clone());
-        assert_eq!(live_worker_count(), 1);
+        let exited = Arc::new(AtomicBool::new(false));
+        spawn_blocking_for_test(gate.clone(), exited.clone());
 
+        // stop() must NOT wait for the blocked worker's ~80s read — it
+        // detaches after the grace and returns promptly.
         let began = Instant::now();
         stop();
         assert!(began.elapsed() < Duration::from_secs(2), "stop took {:?}", began.elapsed());
-        // The blocked worker could not exit inside the grace: detached, still
-        // counted live, its slot surrendered.
-        assert_eq!(live_worker_count(), 1);
-        assert!(!is_current(old_gen), "the straggler's run is superseded");
+        assert!(!exited.load(Ordering::SeqCst), "the blocked worker is still parked, i.e. detached");
 
-        // Release the "provider read"; the straggler exits on its own.
+        // Release the "provider read"; the detached straggler self-exits
+        // (observed via its own flag — superseded, it never touches `running`).
         {
             let (m, cv) = &*gate;
             *m.lock().unwrap() = true;
             cv.notify_all();
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        while live_worker_count() > 0 && Instant::now() < deadline {
+        while !exited.load(Ordering::SeqCst) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(live_worker_count(), 0, "released straggler must self-exit");
+        assert!(exited.load(Ordering::SeqCst), "released straggler must self-exit");
 
-        // A restart spawns exactly the fresh set — the detached slot was
-        // surrendered, so nothing doubles up.
+        // A restart spawns exactly the fresh set — stop() closed the
+        // generation and zeroed the count, so the detached straggler never
+        // double-counts against the new run.
         start(|| {});
         assert_eq!(live_worker_count(), 3);
         stop();
