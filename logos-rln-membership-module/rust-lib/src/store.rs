@@ -478,6 +478,32 @@ pub(crate) fn merge_state(
     }
 }
 
+/// The `membership_state_changed` event's args (module docs: LIDL events
+/// section), if `new_state` is an actual transition — `None` for a mere
+/// re-observation of the same state, which the poller and the
+/// self-healing read path (`get_membership_state_impl`) both hit on every
+/// tick/read and must NOT emit for. `meta` is the PRE-transition record —
+/// callers snapshot it before applying the write, so `previous` is always
+/// the state that held immediately before this change. `rln_identifier`
+/// carries through empty for a pre-scope legacy record, matching the
+/// event's documented contract.
+pub(crate) fn transition_event(
+    hash: &str,
+    meta: &MembershipMeta,
+    new_state: &str,
+) -> Option<(String, String, String, String, String)> {
+    if new_state == meta.state {
+        return None;
+    }
+    Some((
+        meta.registry_id.clone(),
+        meta.rln_identifier.clone(),
+        hash.to_string(),
+        new_state.to_string(),
+        meta.state.clone(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +550,30 @@ mod tests {
             state: ST_EXPIRED.to_string(),
         });
         assert_eq!(merge_state(Some(&expired_history), None, now), ST_ERASED);
+    }
+
+    #[test]
+    fn transition_event_gates_on_actual_state_change() {
+        // A mere re-observation of the same state must not emit.
+        let active = meta(ST_ACTIVE, 0);
+        assert!(transition_event("h", &active, ST_ACTIVE).is_none());
+
+        // pending -> active: previous carries the pre-transition state.
+        let pending = meta(ST_PENDING, 0);
+        let (registry_id, rln_identifier, hash, state, previous) =
+            transition_event("h1", &pending, ST_ACTIVE).expect("real transition");
+        assert_eq!(registry_id, pending.registry_id);
+        assert_eq!(rln_identifier, "");
+        assert_eq!(hash, "h1");
+        assert_eq!(state, ST_ACTIVE);
+        assert_eq!(previous, ST_PENDING);
+
+        // A legacy record's empty rln_identifier is preserved verbatim.
+        let mut scoped = meta(ST_PENDING, 0);
+        scoped.rln_identifier = "ab".repeat(32);
+        let (_, rln_identifier, ..) =
+            transition_event("h2", &scoped, ST_FAILED).expect("real transition");
+        assert_eq!(rln_identifier, scoped.rln_identifier);
     }
 
     fn test_store(tag: &str) -> PathBuf {

@@ -123,6 +123,26 @@ fn apply_observed(
     })
 }
 
+/// Fire `membership_state_changed` (module docs: LIDL events section) after
+/// a successful, change-gated store write — called OUTSIDE any
+/// `store::with_store` closure, holding no locks. `meta` is the
+/// pre-transition snapshot the caller already had in hand from
+/// `pending_records`/`refreshable_records`; `store::transition_event`
+/// no-ops when `new_state` didn't actually change anything.
+fn emit_transition(hash: &str, meta: &MembershipMeta, new_state: &str) {
+    if let Some((registry_id, rln_identifier, membership_hash, state, previous)) =
+        store::transition_event(hash, meta, new_state)
+    {
+        crate::emit_membership_state_changed(
+            &registry_id,
+            &rln_identifier,
+            &membership_hash,
+            &state,
+            &previous,
+        );
+    }
+}
+
 fn tick(refresh_states: bool) {
     if crate::worker::is_stopped() {
         return;
@@ -143,9 +163,10 @@ fn tick(refresh_states: bool) {
                 Err(e) => {
                     eprintln!("membership poller: confirm update failed: {}", e.message)
                 }
-                Ok(()) => eprintln!(
-                    "membership poller: {hash} confirmed {state} at leaf {leaf_index}"
-                ),
+                Ok(()) => {
+                    emit_transition(&hash, &meta, &state);
+                    eprintln!("membership poller: {hash} confirmed {state} at leaf {leaf_index}")
+                }
             },
             Some(RecordUpdate::Absent)
                 if now.saturating_sub(meta.submitted_at) > CONFIRMATION_WINDOW_SECS =>
@@ -162,6 +183,7 @@ fn tick(refresh_states: bool) {
                 if let Err(e) = result {
                     eprintln!("membership poller: fail update failed: {}", e.message);
                 } else {
+                    emit_transition(&hash, &meta, ST_FAILED);
                     eprintln!("membership poller: {hash} failed (window elapsed)");
                 }
             }
@@ -179,17 +201,23 @@ fn tick(refresh_states: bool) {
     for (hash, meta) in refreshable {
         match observe(&meta) {
             Some(RecordUpdate::Observed { state, leaf_index, rate_limit }) => {
-                let _ = apply_observed(&hash, &state, leaf_index, rate_limit);
+                if apply_observed(&hash, &state, leaf_index, rate_limit).is_ok() {
+                    emit_transition(&hash, &meta, &state);
+                }
             }
             Some(RecordUpdate::Absent) => {
                 // Was on the registry (state ∈ active/grace/expired), now
                 // gone: erased/slashed. Consumers MUST stop using it.
-                let _ = store::with_store(|s| {
+                let updated = store::with_store(|s| {
                     s.update(&hash, |m| {
                         m.state = ST_ERASED.to_string();
                         m.failed_reason = Some("removed_from_registry".to_string());
                     })
-                });
+                })
+                .is_ok();
+                if updated {
+                    emit_transition(&hash, &meta, ST_ERASED);
+                }
                 eprintln!("membership poller: {hash} vanished from registry — erased");
             }
             None => {}

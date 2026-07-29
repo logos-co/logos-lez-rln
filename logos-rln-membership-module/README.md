@@ -32,6 +32,7 @@ JSON replies; `scope` = the `registry_id` + `rln_identifier_hex` arg pair):
 | `verify_proof(scope, signal, proof)` | `verify_proof(registry_id, rln_identifier_hex, signal_hex, proof_json)` |
 | `get_epoch_quota(scope)` | `get_epoch_quota(registry_id, rln_identifier_hex)` |
 | registry parameters read (optional ext.) | `get_registry_parameters(registry_id, rln_identifier_hex)` |
+| membership state subscriptions (optional ext.) | `event membership_state_changed(registry_id, rln_identifier, membership_hash, state, previous)` — see `docs/wire-binding.md` |
 | `RlnErrorKind` | the `class` field of every typed error object: `not_ready` \| `transient` \| `budget_exhausted` \| `permanent` |
 
 A validator that only checks messages calls `start` + `verify_proof` and

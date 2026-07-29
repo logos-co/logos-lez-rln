@@ -690,6 +690,18 @@ fn get_membership_state_impl(
         });
         if let Err(e) = persist {
             eprintln!("membership state persist: {}", e.message);
+        } else if let Some((registry_id, rln_identifier, membership_hash, state, previous)) =
+            store::transition_event(hash, meta, &merged)
+        {
+            // Outside with_store: the self-healing write above already
+            // released the store lock (module docs: LIDL events section).
+            emit_membership_state_changed(
+                &registry_id,
+                &rln_identifier,
+                &membership_hash,
+                &state,
+                &previous,
+            );
         }
     }
 

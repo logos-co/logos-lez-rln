@@ -38,6 +38,8 @@
 ; rln_identifier_hex fails invalid_argument like any other malformed input.
 ; Hex args accept an optional 0x prefix; 0x-prefixed is the CLI-safe
 ; spelling (the CLI coerces digit-leading strings to numbers).
+; Events are a third channel, pushed over the lp event stream rather than
+; returned from a call — see the events section below.
 module liblogos_rln_membership_module {
   version "0.3.0"
   description "RLN Membership Management Module"
@@ -256,4 +258,15 @@ module liblogos_rln_membership_module {
   ; scheduling further work. Nothing spawns again until the next start(),
   ; which respawns fresh workers. {"stopped":true}.
   method stop() -> result
+
+  ; --- events ---
+  ; Membership lifecycle transitions observed by the confirmation poller (the
+  ; spec's optional "membership state subscriptions" extension): emitted when
+  ; a membership's registry-observed state CHANGES (pending->active,
+  ; pending->failed, active->grace_period/expired, observed->erased) — never
+  ; for a mere re-observation of the same state. rln_identifier is the
+  ; registering scope's (empty for a pre-scope legacy record); consumers
+  ; filter on (registry_id, membership_hash). previous is the state the
+  ; record held before the transition.
+  event membership_state_changed(registry_id: tstr, rln_identifier: tstr, membership_hash: tstr, state: tstr, previous: tstr)
 }

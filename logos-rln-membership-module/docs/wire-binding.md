@@ -115,6 +115,40 @@ lp timeouts for (the logos-core default is ~20 s):
 | `verify_proof` | 5 s | pure local computation |
 | `get_epoch_quota` | 5 s | pure local state |
 
+## Events
+
+A third channel, pushed over the lp event stream rather than returned by any
+method call — no `result`/`tstr` envelope, no class/kind, just positional
+args.
+
+| Event | Args (positional order) | Fires when |
+|---|---|---|
+| `membership_state_changed` | `registry_id, rln_identifier, membership_hash, state, previous` | a membership's registry-observed state actually CHANGES — `pending`→`active`, `pending`→`failed`, `active`→`grace_period`/`expired`, observed→`erased` — never for a mere re-observation of the same state |
+
+- `rln_identifier` is the registering scope's `rln_identifier_hex`, empty for
+  a pre-scope legacy record; consumers filter on `(registry_id,
+  membership_hash)`.
+- `previous` is the state the record held immediately before this
+  transition — one of the `MembershipStatus` wire strings below.
+- Emitted from the confirmation poller's background tick (module docs point
+  1/2) and from `get_membership_state`'s self-healing merge write, for
+  whichever side observes the transition first.
+
+**Consumer surface**: the module's proxy exposes the standard logos-core
+event mechanism — `logos.<module>.on("membership_state_changed", [](const
+QVariantList& args) { … })` in C++ (backed by the `eventResponse(QString,
+QVariantList)` Qt signal every provider forwards through), `args` positional
+in the table order above. From QML (`LogosQmlBridge`,
+logos-view-module-runtime): arm with
+`logos.onModuleEvent("<module>", "membership_state_changed")`, receive via
+the `moduleEventReceived(moduleName, eventName, data)` signal — `data` is
+the positional args as a native JS array, and unlike the call-reply path it
+does NOT pass through the LogosResult-nulling serializer.
+This implements the spec's optional "membership state subscriptions"
+extension (RLN-MEMBERSHIP-MANAGEMENT) — **additive, not required**: a
+consumer MUST NOT depend on it being wired up. Polling `get_membership_state`
+remains the portable path every consumer can rely on.
+
 ## MembershipStatus wire strings
 
 | Wire string | Spec enum |
