@@ -168,6 +168,40 @@ function call(bridge, module, method, args, cb, timeoutMs) {
     }, timeoutMs === undefined ? 30000 : timeoutMs);
 }
 
+// --- events (push channel; see module docs/wire-binding.md "Events") ------
+// membership_state_changed fires whenever a membership's registry-observed
+// state actually changes; positional args
+// [registry_id, rln_identifier, membership_hash, state, previous]. It rides
+// LogosQmlBridge's moduleEventReceived signal, NOT callModuleAsync's
+// LogosResult-nulling serializer — decode it directly, never through
+// parseReply. Additive/optional per the spec: a host predating
+// onModuleEvent simply never fires it, so every caller keeps its poll
+// fallback regardless of whether arming succeeds.
+var MEMBERSHIP_STATE_CHANGED = "membership_state_changed";
+
+// Arm a module-event subscription on the bridge. Returns true when armed;
+// false when this host's bridge predates onModuleEvent — callers keep their
+// fallback polling either way, events only tighten the latency.
+function armModuleEvent(bridge, module, eventName) {
+    if (!bridge || typeof bridge.onModuleEvent !== "function")
+        return false;
+    return bridge.onModuleEvent(module, eventName) === true;
+}
+
+// Decode a membership_state_changed payload (positional array) into a named
+// object, null when the shape is not as documented.
+function decodeMembershipStateChanged(data) {
+    if (!Array.isArray(data) || data.length < 5)
+        return null;
+    return {
+        registry_id: String(data[0]),
+        rln_identifier: String(data[1]),
+        membership_hash: String(data[2]),
+        state: String(data[3]),
+        previous: String(data[4])
+    };
+}
+
 // One-line hints for the error kinds a user can act on (the lidl's kinds
 // plus the local ones minted by parseReply/call above).
 var ERROR_HINTS = {

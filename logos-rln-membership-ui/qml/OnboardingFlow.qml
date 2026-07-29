@@ -92,6 +92,14 @@ Item {
     property int transientRetryMs: 1500
     property int transientRetryMax: 4
 
+    // True once the module's push channel is armed on this bridge (see
+    // M.armModuleEvent) — set once at startup below. false on a host
+    // predating onModuleEvent; regTimer then just keeps its normal cadence,
+    // polling being the one channel. MembershipCard reads this flag too
+    // (via its `flow` reference) rather than arming a second subscription
+    // for the same (module, event) pair.
+    property bool eventsArmed: false
+
     // Phase D — faucet claim into a fresh holding.
     property string fundPhase: "idle"
     property string fundError: ""
@@ -143,6 +151,15 @@ Item {
     // 300s pending confirmation window.
     property int cardWaitPolls: 0
     property int cardWaitBudget: 40
+
+    // Arm the push channel as soon as the flow exists — bridge is a
+    // required property, already resolved (possibly to null under a bare
+    // preview) by the time Component.onCompleted runs.
+    Component.onCompleted: {
+        flow.eventsArmed = M.armModuleEvent(flow.bridge, M.MEMBERSHIP_MODULE, M.MEMBERSHIP_STATE_CHANGED)
+        if (!flow.eventsArmed)
+            console.log("membership_state_changed: events not armed on this bridge — falling back to poll-only cadence")
+    }
 
     // Fired by finish() when the user leaves the completed wizard.
     signal completed(string commitment)
@@ -860,7 +877,11 @@ Item {
 
     Timer {
         id: regTimer
-        interval: flow.statePollMs
+        // Events only tighten latency, never replace the poll: when armed
+        // the interval widens to 60s (a slow-poll safety net behind the
+        // push channel); statePollMs keeps the normal cadence — and its
+        // full test-tunability — when this bridge has no event support.
+        interval: flow.eventsArmed ? 60000 : flow.statePollMs
         repeat: true
         onTriggered: flow.pollRegistration()
     }
@@ -870,5 +891,27 @@ Item {
     Component {
         id: retryTimerComponent
         Timer { repeat: false }
+    }
+
+    // Wake-up only, never a data source: get_membership_state (via
+    // pollRegistration, the same call regTimer already makes every tick)
+    // stays the sole authority on state. This flow tracks no
+    // membership_hash to narrow the filter further (register()'s reply is
+    // never captured), so any state change on OUR registry — even one
+    // belonging to a different registrant on this shared-faucet testnet
+    // registry — wakes the poll early; that costs one extra idempotent
+    // read, never a missed one. Gated on regTimer.running so an event
+    // arriving outside an active confirmation wait (before registration
+    // starts, or after it already settled) is a no-op.
+    Connections {
+        target: flow.bridge
+        enabled: flow.eventsArmed
+        function onModuleEventReceived(moduleName, eventName, data) {
+            if (moduleName !== M.MEMBERSHIP_MODULE || eventName !== M.MEMBERSHIP_STATE_CHANGED)
+                return
+            var evt = M.decodeMembershipStateChanged(data)
+            if (evt && evt.registry_id === flow.registryId && regTimer.running)
+                flow.pollRegistration()
+        }
     }
 }

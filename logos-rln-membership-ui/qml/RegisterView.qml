@@ -33,6 +33,20 @@ LogosScrollView {
     property bool statusIsError: false
     property string liveState: ""
 
+    // True once the module's push channel is armed on this bridge (see
+    // M.armModuleEvent). AdvancedView wires this view with only bridge +
+    // registryId (no OnboardingFlow reference — the two implementations
+    // stay deliberately separate, see the file header), so unlike
+    // MembershipCard this view arms its own subscription rather than
+    // sharing OnboardingFlow's.
+    property bool eventsArmed: false
+
+    Component.onCompleted: {
+        view.eventsArmed = M.armModuleEvent(view.bridge, M.MEMBERSHIP_MODULE, M.MEMBERSHIP_STATE_CHANGED)
+        if (!view.eventsArmed)
+            console.log("membership_state_changed: events not armed on this bridge — falling back to poll-only cadence")
+    }
+
     function report(text, isError) {
         status = text
         statusIsError = isError === true
@@ -108,12 +122,33 @@ LogosScrollView {
     }
 
     // The pending confirmation window is bounded (300s) module-side, so the
-    // poll always reaches a settled state and stops itself.
+    // poll always reaches a settled state and stops itself. 60s once
+    // eventsArmed (a slow-poll safety net behind the Connections below);
+    // 10s otherwise, unchanged.
     Timer {
         id: pollTimer
-        interval: 10000
+        interval: view.eventsArmed ? 60000 : 10000
         repeat: true
         onTriggered: view.pollState()
+    }
+
+    // Wake-up only, mirroring OnboardingFlow.pollRegistration's Connections
+    // — pollState() re-reads authoritatively over the same
+    // (registryId, DEFAULT_RLN_ID) scope get_membership_state already
+    // polls. No membership_hash is tracked here to filter tighter, so any
+    // state change on this registry re-triggers while a registration is
+    // pending; gated on pollTimer.running so an event outside an active
+    // confirmation wait is a no-op.
+    Connections {
+        target: view.bridge
+        enabled: view.eventsArmed
+        function onModuleEventReceived(moduleName, eventName, data) {
+            if (moduleName !== M.MEMBERSHIP_MODULE || eventName !== M.MEMBERSHIP_STATE_CHANGED)
+                return
+            var evt = M.decodeMembershipStateChanged(data)
+            if (evt && evt.registry_id === view.registryId && pollTimer.running)
+                view.pollState()
+        }
     }
 
     ColumnLayout {

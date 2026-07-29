@@ -66,6 +66,14 @@ reference implementation `logos-package-manager-ui`):
 | Faucet claim | `create_account_public()` → `liblogos_rln_module.get_token_balance` until `exists:false` → `claim_tokens(config_hex, holding_hex, amount)` → balance-polled until the credit lands (hard timeout) |
 | Claim sizing | `liblogos_rln_module.get_registry_bounds(config_hex)` → suggested amount = default rate × `price_per_unit` × 1.2 (editable) |
 
+State changes also push via the module's `membership_state_changed` event when
+the host bridge supports `LogosQmlBridge.onModuleEvent`/`moduleEventReceived`
+(see the module's `docs/wire-binding.md` "Events" section); a received event
+only wakes an immediate re-read through the same `get_membership_state` call
+above (advisory, never a data source on its own). Polling remains the
+portable fallback every host can rely on — its cadence widens to 60s once
+events are armed, staying at 10s otherwise.
+
 The registry field is prefilled with the shared-faucet testnet registry
 (descriptor under `../deployments/shared-faucet/`); the registry id's 64-hex
 segment doubles as the config account id for faucet calls (the rln module's
