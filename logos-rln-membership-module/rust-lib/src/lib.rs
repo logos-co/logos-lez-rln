@@ -50,6 +50,7 @@ mod registry_id;
 mod roots;
 mod select;
 mod store;
+mod views;
 mod wallet_home;
 mod worker;
 
@@ -158,13 +159,17 @@ impl ApiError {
         ApiError::new(ErrorKind::Internal, message)
     }
 
-    /// The typed error object itself: {"class":…,"kind":…,"message":…}.
+    /// The typed error object itself: {"class":…,"kind":…,"message":…} —
+    /// via [`views::ErrorBody`], converted through `serde_json::to_value`
+    /// so the alphabetical wire order holds regardless of struct field
+    /// order (see `views.rs`).
     fn body(&self) -> serde_json::Value {
-        serde_json::json!({
-            "class": self.kind.class(),
-            "kind": self.kind.as_str(),
-            "message": self.message
-        })
+        serde_json::to_value(views::ErrorBody::new(
+            self.kind.class(),
+            self.kind.as_str(),
+            self.message.clone(),
+        ))
+        .unwrap_or(serde_json::Value::Null)
     }
 
     pub(crate) fn to_json(&self) -> String {
@@ -227,44 +232,17 @@ fn parse_hex32(field: &str, hex: &str) -> Result<([u8; 32], String), ApiError> {
 /// The public Membership view (spec Membership minus secrets): the
 /// `credential` object exposes only the commitment. No method releases the
 /// identity secret across this interface — proof generation is internal.
+/// Via [`views::MembershipView`], converted through `serde_json::to_value`
+/// so the alphabetical wire order holds regardless of struct field order
+/// (see `views.rs`).
 fn public_membership_json(
     hash: &str,
     meta: &store::MembershipMeta,
     quarantined: bool,
     rate_limit_mismatch: bool,
 ) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "credential".to_string(),
-        serde_json::json!({ "identity_commitment": meta.identity_commitment }),
-    );
-    if quarantined {
-        obj.insert("failed_reason".to_string(), "metadata_tamper".into());
-    } else if let Some(reason) = &meta.failed_reason {
-        obj.insert("failed_reason".to_string(), reason.as_str().into());
-        if let Some(retryable) = meta.retryable {
-            obj.insert("retryable".to_string(), retryable.into());
-        }
-    }
-    obj.insert("leaf_index".to_string(), meta.leaf_index.into());
-    obj.insert("membership_hash".to_string(), hash.into());
-    obj.insert("rate_limit".to_string(), meta.rate_limit.into());
-    if !meta.rln_identifier.is_empty() {
-        obj.insert("rln_identifier".to_string(), meta.rln_identifier.as_str().into());
-    }
-    if rate_limit_mismatch {
-        obj.insert("rate_limit_mismatch".to_string(), true.into());
-    }
-    obj.insert("registry_id".to_string(), meta.registry_id.as_str().into());
-    obj.insert(
-        "state".to_string(),
-        if quarantined { store::ST_FAILED } else { &meta.state }.into(),
-    );
-    obj.insert("submitted_at".to_string(), meta.submitted_at.into());
-    if let Some(tx) = &meta.tx_result {
-        obj.insert("tx_result".to_string(), tx.as_str().into());
-    }
-    serde_json::Value::Object(obj)
+    serde_json::to_value(views::MembershipView::new(hash, meta, quarantined, rate_limit_mismatch))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn parse_registry(raw: &str) -> Result<registry_id::CanonicalRegistryId, ApiError> {
@@ -648,10 +626,8 @@ fn get_membership_state_impl(
         .filter(|(_, _, q)| !*q)
         .collect();
     if candidates.is_empty() {
-        return Ok(serde_json::json!({
-            "registry_id": registry.canonical,
-            "state": store::ST_UNKNOWN,
-        }));
+        return Ok(serde_json::to_value(views::MembershipStateView::unknown(&registry.canonical))
+            .unwrap_or(serde_json::Value::Null));
     }
     if candidates.len() > 1 {
         return Err(ApiError::new(
@@ -705,18 +681,16 @@ fn get_membership_state_impl(
         }
     }
 
-    let mut obj = serde_json::Map::new();
-    if pm.registered {
-        obj.insert("leaf_index".to_string(), pm.leaf_index.into());
-        obj.insert("rate_limit".to_string(), pm.rate_limit.into());
-    } else {
-        obj.insert("leaf_index".to_string(), meta.leaf_index.into());
-        obj.insert("rate_limit".to_string(), meta.rate_limit.into());
-    }
-    obj.insert("membership_hash".to_string(), hash.clone().into());
-    obj.insert("registry_id".to_string(), registry.canonical.as_str().into());
-    obj.insert("state".to_string(), merged.into());
-    Ok(serde_json::Value::Object(obj))
+    let (leaf_index, rate_limit) =
+        if pm.registered { (pm.leaf_index, pm.rate_limit) } else { (meta.leaf_index, meta.rate_limit) };
+    let view = views::MembershipStateView::resolved(
+        hash,
+        &registry.canonical,
+        &merged,
+        leaf_index,
+        rate_limit,
+    );
+    Ok(serde_json::to_value(view).unwrap_or(serde_json::Value::Null))
 }
 
 /// Spec select(): resolve WHICH membership an application should prove with,
@@ -865,12 +839,8 @@ fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
         }
     });
 
-    Ok(serde_json::json!({
-        "started": true,
-        "epoch_size_sec": epoch_size_sec,
-        "max_epoch_gap": max_epoch_gap,
-        "registries": tracked,
-    }))
+    Ok(serde_json::to_value(views::StartReply::new(epoch_size_sec, max_epoch_gap, tracked))
+        .unwrap_or(serde_json::Value::Null))
 }
 
 /// Spec stop(): halt the maintenance tasks for real. Sleeping workers wake
@@ -882,7 +852,7 @@ fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
 /// counter keeps a detached straggler from ever duplicating one).
 fn stop_impl() -> Result<serde_json::Value, ApiError> {
     worker::stop();
-    Ok(serde_json::json!({ "stopped": true }))
+    Ok(serde_json::to_value(views::StopReply::new()).unwrap_or(serde_json::Value::Null))
 }
 
 fn proof_error(e: proof::ProofError) -> ApiError {
@@ -1079,7 +1049,10 @@ fn verify_proof_impl(
     let bound = rlp.external_nullifier();
     let matched_epoch = match resolve_key_epoch(rlp.epoch(), &bound, &rln_identifier, now_epoch) {
         Some(e) => e,
-        None => return Ok(serde_json::json!({ "verdict": "invalid" })),
+        None => {
+            return Ok(serde_json::to_value(views::VerdictReply::verdict("invalid"))
+                .unwrap_or(serde_json::Value::Null))
+        }
     };
 
     // Root window BEFORE any log touch: a cold/stale window is NOT_READY, never
@@ -1090,30 +1063,30 @@ fn verify_proof_impl(
     })?;
     if !proof::verify(&rlp, &signal, &window).map_err(proof_error)? {
         // Invalid proofs are NOT logged — only a validated nullifier counts.
-        return Ok(serde_json::json!({ "verdict": "invalid" }));
+        return Ok(serde_json::to_value(views::VerdictReply::verdict("invalid"))
+            .unwrap_or(serde_json::Value::Null));
     }
 
     let retain_floor = now_epoch.saturating_sub(epoch_gap());
-    match nullifier_log::record_verified(
+    let view = match nullifier_log::record_verified(
         matched_epoch,
         rlp.nullifier(),
         rlp.share_x(),
         rlp.share_y(),
         retain_floor,
     ) {
-        nullifier_log::RecordOutcome::Fresh => Ok(serde_json::json!({ "verdict": "valid" })),
-        nullifier_log::RecordOutcome::Duplicate => {
-            Ok(serde_json::json!({ "verdict": "duplicate" }))
-        }
-        nullifier_log::RecordOutcome::Collision { prior_x, prior_y } => Ok(serde_json::json!({
-            "verdict": "rate_limit_violation",
-            "recovered_secret": proof::recover_identity_secret_hex(
+        nullifier_log::RecordOutcome::Fresh => views::VerdictReply::verdict("valid"),
+        nullifier_log::RecordOutcome::Duplicate => views::VerdictReply::verdict("duplicate"),
+        nullifier_log::RecordOutcome::Collision { prior_x, prior_y } => {
+            let recovered_secret = proof::recover_identity_secret_hex(
                 (prior_x, prior_y),
                 (rlp.share_x(), rlp.share_y()),
             )
-            .map_err(proof_error)?,
-        })),
-    }
+            .map_err(proof_error)?;
+            views::VerdictReply::rate_limit_violation(recovered_secret)
+        }
+    };
+    Ok(serde_json::to_value(view).unwrap_or(serde_json::Value::Null))
 }
 
 /// Spec get_epoch_quota(scope): the scope's current epoch index, its
@@ -1159,11 +1132,10 @@ fn get_epoch_quota_impl(
     let remaining = store::with_store(|s| {
         Ok(s.remaining_budget(hash, &rln_id_hex, epoch_index, meta.rate_limit))
     })?;
-    Ok(serde_json::json!({
-        "epoch_index": epoch_index,
-        "rate_limit": meta.rate_limit,
-        "remaining": remaining,
-    }))
+    Ok(
+        serde_json::to_value(views::EpochQuotaView::new(epoch_index, meta.rate_limit, remaining))
+            .unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// Registry parameters read (spec's optional extension): the
@@ -1184,17 +1156,8 @@ fn get_registry_parameters_impl(
     let prov = provider_of(&registry)?;
 
     let bounds = prov.get_registry_bounds(&registry)?;
-    let mut out = serde_json::Map::new();
-    out.insert("epoch_size_sec".to_string(), epoch_size()?.into());
-    for key in ["max_rate_limit", "min_rate_limit", "max_total_rate_limit"] {
-        if let Some(v) = bounds.get(key).and_then(|x| x.as_u64()) {
-            out.insert(key.to_string(), v.into());
-        }
-    }
-    if let Some(price) = bounds.get("price_per_unit") {
-        out.insert("price_per_unit".to_string(), price.clone());
-    }
-    Ok(serde_json::Value::Object(out))
+    let view = views::RegistryParametersView::from_bounds(epoch_size()?, &bounds);
+    Ok(serde_json::to_value(view).unwrap_or(serde_json::Value::Null))
 }
 
 // -------------------------------------------------------------------- module
@@ -1228,7 +1191,8 @@ impl LiblogosRlnMembershipModule for LogosRlnMembershipModuleImpl {
 
     fn unlock_keystore(&mut self, mut password: String) -> String {
         let result = store::with_store(|s| s.unlock(&password)).map(|count| {
-            serde_json::json!({ "membership_count": count, "unlocked": true })
+            serde_json::to_value(views::UnlockKeystoreReply::new(count as u64))
+                .unwrap_or(serde_json::Value::Null)
         });
         password.zeroize();
         reply(result)
@@ -2285,5 +2249,54 @@ mod tests {
 
         store::reset_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Pins views::MembershipView's exact wire shape (alphabetical keys) with
+    // every optional field populated — the format pin for the crate's most-
+    // shared reply (register / select_membership / get_memberships). A
+    // struct's field DECLARATION order doesn't drive this (no
+    // preserve_order — see views.rs), but the byte shape itself is still
+    // load-bearing, so it gets the same byte-for-byte pin as the error
+    // envelope.
+    #[test]
+    fn membership_view_serializes_alphabetical_keys() {
+        let commitment = "11".repeat(32);
+        let registry = format!("logos:local:{}", "ab".repeat(32));
+        let rln_identifier = "ef".repeat(32);
+        let meta = store::MembershipMeta {
+            allocations: Vec::new(),
+            failed_reason: Some("submit_failed: boom".to_string()),
+            identity_commitment: commitment.clone(),
+            leaf_index: 7,
+            rate_limit: 300,
+            registry_id: registry.clone(),
+            retryable: Some(true),
+            rln_identifier: rln_identifier.clone(),
+            state: store::ST_FAILED.to_string(),
+            state_history: vec![],
+            submitted_at: 1_234_567_890,
+            tx_result: Some("tx-result-blob".to_string()),
+        };
+        let out = public_membership_json("fixture-hash", &meta, false, true);
+        assert_eq!(
+            out.to_string(),
+            format!(
+                r#"{{"credential":{{"identity_commitment":"{commitment}"}},"failed_reason":"submit_failed: boom","leaf_index":7,"membership_hash":"fixture-hash","rate_limit":300,"rate_limit_mismatch":true,"registry_id":"{registry}","retryable":true,"rln_identifier":"{rln_identifier}","state":"failed","submitted_at":1234567890,"tx_result":"tx-result-blob"}}"#
+            )
+        );
+
+        // Quarantined forces state:"failed"/failed_reason:"metadata_tamper"
+        // and SUPPRESSES retryable even though meta.retryable is Some —
+        // never "just retry" a tamper verdict. rate_limit_mismatch is
+        // omitted here because the caller passed false, not because of
+        // quarantine (it's independent) — never inserted false, only ever
+        // true or absent.
+        let quarantined = public_membership_json("fixture-hash", &meta, true, false);
+        assert_eq!(
+            quarantined.to_string(),
+            format!(
+                r#"{{"credential":{{"identity_commitment":"{commitment}"}},"failed_reason":"metadata_tamper","leaf_index":7,"membership_hash":"fixture-hash","rate_limit":300,"registry_id":"{registry}","rln_identifier":"{rln_identifier}","state":"failed","submitted_at":1234567890,"tx_result":"tx-result-blob"}}"#
+            )
+        );
     }
 }

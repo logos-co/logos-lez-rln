@@ -2,12 +2,16 @@
 //! namespace → provider routing, and the lez-rln provider — a raw `lp_*`
 //! wire client of the sibling `liblogos_rln_module`.
 //!
-//! The raw C ABI (not the SDK's generated typed client) is deliberate, for
-//! the same reason as the sibling's wallet path: `PluginProxy` hardcodes
-//! `timeout_ms = 0` (the 20s protocol default), while the sibling's reads
-//! can run up to 60s against the wallet and `register_member` submits with
-//! a 180s tx timeout — every hop here needs an explicit per-call margin
-//! above the sibling's own budget.
+//! Why raw `lp_*` rather than the SDK's generated typed client
+//! (`LiblogosRlnModuleClient`, from `deps/liblogos_rln_module.lidl`): the
+//! generated `PluginProxy` hardcodes `timeout_ms = 0` (the ~20s protocol
+//! default) at EVERY call site, with no per-call override — while this
+//! module's reads need up to [`READ_TIMEOUT_MS`] (70s, the sibling's own
+//! wallet-backed reads run up to 60s; add hop margin) and the gifter path
+//! needs [`GIFTER_REQUEST_TIMEOUT_MS`] (340s: in-module keycard capture
+//! plus the dial). So this module binds the consumer C ABI directly, giving
+//! every call an explicit, per-call timeout instead of the generated
+//! client's one-size-fits-all default.
 //!
 //! Threading contract (mirrors the sibling): the lp client is created once
 //! on the host's main Qt thread (`init_client` from `on_context_ready`) and

@@ -46,6 +46,81 @@ module liblogos_rln_membership_module {
   category "blockchain"
   depends [liblogos_rln_module]
 
+  ; --- data shapes ---
+  ; Contract documentation, not code generation: no method here declares a
+  ; `-> Type` return (every method below is `tstr` or `result`, per the
+  ; dialect split above), so today's --provider codegen never references
+  ; these records and materializes nothing from them (no struct, no
+  ; QVariant glue — verified: they simply do not appear in
+  ; generated/provider_gen.rs). They are the source of truth the
+  ; hand-written `#[derive(Serialize)]` mirrors in rust-lib/src/views.rs are
+  ; kept in sync with by hand, the way chat_module.lidl's records document
+  ; chat_module's actions.rs. A generated typed consumer client (`--client`,
+  ; unused by this module today) WOULD render a referenced `type` as a
+  ; `serde_json::Value` parameter/return — still no struct — if one of the
+  ; methods below ever adopted `-> Membership` in place of `-> tstr`.
+  ; RateLimitProof (generate_proof's/verify_proof's proof object) is
+  ; documented on `RateLimitProof::to_json` in proof.rs, not restated as a
+  ; record here — its canonical hex bytes have no meaningful LIDL primitive
+  ; breakdown, and it is mutated post-construction by generate_proof_impl
+  ; (message_id/epoch/membership_hash spliced in), unlike the records below.
+  type Credential {
+    identity_commitment: tstr
+  }
+  ; The public Membership view (spec Membership minus secrets) — register,
+  ; select_membership, and get_memberships all return this shape (get_memberships
+  ; wraps it in {"memberships":[…]}). failed_reason/retryable/rln_identifier/
+  ; tx_result/rate_limit_mismatch are present only when the method comments
+  ; above describe them as such; retryable never appears without failed_reason.
+  type Membership {
+    credential: Credential
+    ? failed_reason: tstr
+    leaf_index: int
+    membership_hash: tstr
+    rate_limit: int
+    ? rate_limit_mismatch: bool
+    registry_id: tstr
+    ? retryable: bool
+    ? rln_identifier: tstr
+    state: tstr
+    submitted_at: int
+    ? tx_result: tstr
+  }
+  ; get_membership_state's reply. registry_id/state are always present;
+  ; membership_hash/leaf_index/rate_limit are present only once a single
+  ; membership resolves for the scope (state:"unknown" -> none of the three;
+  ; more than one candidate is an ambiguous_selection ERROR, not this shape).
+  type MembershipState {
+    ? leaf_index: int
+    ? membership_hash: tstr
+    ? rate_limit: int
+    registry_id: tstr
+    state: tstr
+  }
+  type EpochQuota {
+    epoch_index: int
+    rate_limit: int
+    remaining: int
+  }
+  ; get_registry_parameters' reply. epoch_size_sec is always present (the
+  ; module's own start()-configured value); the registry-declared bounds are
+  ; present only when the registry read returned them. price_per_unit is
+  ; passed through opaquely (the sibling documents it as a decimal STRING;
+  ; this contract makes no assumption about its shape).
+  type RegistryParameters {
+    epoch_size_sec: int
+    ? max_rate_limit: int
+    ? max_total_rate_limit: int
+    ? min_rate_limit: int
+    ? price_per_unit: any
+  }
+  ; verify_proof's reply. recovered_secret is present only for the
+  ; "rate_limit_violation" verdict.
+  type VerificationResult {
+    ? recovered_secret: tstr
+    verdict: tstr
+  }
+
   ; Open (create-if-absent) the keystore at the instance persistence path
   ; and hold the session password in memory (needed to write credentials on
   ; register and decrypt them on select). {"membership_count":N,
