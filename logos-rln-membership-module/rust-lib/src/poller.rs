@@ -1,5 +1,5 @@
-//! Confirmation + lifecycle poller: one detached thread (the sibling
-//! module's broadcast-thread pattern — no SDK timer exists) that
+//! Confirmation + lifecycle poller: one supervisor-owned worker (see
+//! `worker.rs`; no SDK timer exists) that
 //!
 //! 1. every tick (15s), re-reads each `pending` membership from its
 //!    registry: observed ⇒ pending→active with the AUTHORITATIVE
@@ -22,40 +22,46 @@
 //!
 //! Runs whether or not the keystore is unlocked: everything here touches
 //! only plaintext-safe sidecar metadata. All provider calls from this
-//! thread take `provider_call`'s async+channel path automatically (owner
-//! -thread contract). The thread never dies: each tick body runs under
-//! `catch_unwind` (pure Rust, no FFI frames — safe to catch).
+//! worker take `provider_call`'s async+channel path automatically (owner
+//! -thread contract). A transient failure never kills the worker: each tick
+//! body runs under `catch_unwind` (pure Rust, no FFI frames — safe to
+//! catch); only the supervisor retires it (`stop()`, or a restart's
+//! generation bump).
 
-use std::sync::Once;
 use std::time::Duration;
 
 use crate::path_cache;
 use crate::provider::provider_for;
 use crate::registry_id;
 use crate::store::{self, MembershipMeta, CONFIRMATION_WINDOW_SECS, ST_ERASED, ST_FAILED};
+use crate::worker;
 
 const TICK: Duration = Duration::from_secs(15);
 const REFRESH_EVERY: u32 = 4;
 
-static POLLER: Once = Once::new();
-
 /// Idempotent: the first call (register's Pending write, or
 /// `on_context_ready` when persisted pending records exist) spawns the
-/// thread; later calls are no-ops.
+/// worker; later calls are no-ops. Spawn permission lives in the supervisor
+/// — nothing spawns after `stop()`.
 pub(crate) fn ensure_running() {
-    POLLER.call_once(|| {
-        std::thread::spawn(|| {
-            let mut tick_no: u32 = 0;
-            loop {
-                std::thread::sleep(TICK);
-                tick_no = tick_no.wrapping_add(1);
-                let refresh = tick_no.is_multiple_of(REFRESH_EVERY);
-                if let Err(payload) = std::panic::catch_unwind(|| tick(refresh)) {
-                    eprintln!("membership poller: tick panicked: {payload:?}");
-                }
-            }
-        });
-    });
+    worker::ensure_poller();
+}
+
+/// The poller worker body, owned by the supervisor: an interruptible tick
+/// loop that exits when its run is superseded (`stop()`, or a restart's
+/// generation bump).
+pub(crate) fn run_loop(my_gen: u64) {
+    let mut tick_no: u32 = 0;
+    loop {
+        if !worker::wait_tick(my_gen, TICK) {
+            return;
+        }
+        tick_no = tick_no.wrapping_add(1);
+        let refresh = tick_no.is_multiple_of(REFRESH_EVERY);
+        if let Err(payload) = std::panic::catch_unwind(|| tick(refresh)) {
+            eprintln!("membership poller: tick panicked: {payload:?}");
+        }
+    }
 }
 
 /// One registry read for one record; returns the update to apply, or None
@@ -118,8 +124,7 @@ fn apply_observed(
 }
 
 fn tick(refresh_states: bool) {
-    // stop() pauses maintenance; the thread stays alive and resumes on start().
-    if crate::is_paused() {
+    if crate::worker::is_stopped() {
         return;
     }
     let pending = match store::with_store(|s| Ok(s.pending_records())) {
@@ -198,11 +203,11 @@ fn tick(refresh_states: bool) {
 /// membership — the poller's third maintenance job (module docs point 3).
 /// Shared by the refresh tick and `start`'s warm-up, so both feed
 /// `path_cache.rs` through the identical fetch+decode
-/// (`path_cache::fill_path_cache`). Self-contained pause check (mirrors
+/// (`path_cache::fill_path_cache`). Self-contained stopped check (mirrors
 /// `roots::refresh_all`) so it is safe to call directly off the warm thread,
 /// not just from `tick`.
 pub(crate) fn refresh_paths() {
-    if crate::is_paused() {
+    if crate::worker::is_stopped() {
         return;
     }
     let usable = match store::with_store(|s| Ok(s.refreshable_records())) {
@@ -223,6 +228,11 @@ pub(crate) fn refresh_paths() {
             // verifiable path beats none, the same trade-off the root window
             // makes (module docs point 3).
             eprintln!("membership poller: {hash} path refresh failed: {}", e.message);
+        }
+        // Re-checked after every record's read so a worker abandoned by
+        // stop() does at most one more read before exiting.
+        if crate::worker::is_stopped() {
+            return;
         }
     }
 }

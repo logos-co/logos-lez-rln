@@ -250,8 +250,10 @@ module liblogos_rln_membership_module {
   ; {"started":true,"epoch_size_sec":N,"registries":[…]}.
   method start(config_json: tstr) -> result
 
-  ; Spec stop(). Halt the maintenance tasks (poller + root refresher pause; the
-  ; threads stay alive and resume on the next start()). In-flight registry reads
-  ; run to completion. {"stopped":true}.
+  ; Spec stop(). Halt the maintenance tasks for real: sleeping workers wake
+  ; and are joined within a short grace; a worker blocked in one in-flight
+  ; registry read is detached and self-exits after that single read, never
+  ; scheduling further work. Nothing spawns again until the next start(),
+  ; which respawns fresh workers. {"stopped":true}.
   method stop() -> result
 }

@@ -16,7 +16,7 @@
 //!   lp_* wire client of the sibling liblogos_rln_module; also the lazy
 //!   gifter client for delegated registration)
 //! - Pending confirmation window + involuntary-removal detection →
-//!   `poller.rs` (detached thread, sibling broadcast-thread pattern)
+//!   `poller.rs` (a `worker.rs`-supervised worker)
 //! - selection (per-scope RoundRobin etc.; public view only) → `select.rs`
 //! - proof engine (zerokit, witness assembly, canonical RateLimitProof,
 //!   in-module identity generation) → `proof.rs`
@@ -34,7 +34,6 @@
 //! (lp_invoke_async), so no handler blocks on a sequencer submit; the
 //! poller thread does the slow reads off the dispatch thread.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,6 +51,7 @@ mod roots;
 mod select;
 mod store;
 mod wallet_home;
+mod worker;
 
 mod generated {
     #![allow(warnings)]
@@ -760,12 +760,6 @@ struct ModuleConfig {
 
 static CONFIG: Mutex<Option<ModuleConfig>> = Mutex::new(None);
 
-/// Set by `stop`: the background maintenance tasks (poller, root refresher)
-/// skip their work while paused. The threads stay alive — the framework has no
-/// teardown hook and the Once-guarded threads cannot be restarted — so `start`
-/// simply resumes them.
-static PAUSED: AtomicBool = AtomicBool::new(false);
-
 /// The configured epoch length. The spec's rate-limit epoch is an APPLICATION
 /// parameter every proof generator and verifier of a deployment must share —
 /// there is deliberately NO default: before `start()` configures it, the
@@ -785,11 +779,6 @@ fn epoch_size() -> Result<u64, ApiError> {
 #[cfg(test)]
 pub(crate) fn reset_config_for_test() {
     *lock(&CONFIG) = None;
-}
-
-/// Whether background maintenance is paused (`stop` with no later `start`).
-pub(crate) fn is_paused() -> bool {
-    PAUSED.load(Ordering::SeqCst)
 }
 
 /// Spec start(): apply configuration (the registries served, the epoch
@@ -846,17 +835,14 @@ fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
     }
 
     *lock(&CONFIG) = Some(ModuleConfig { epoch_size_sec, max_epoch_gap });
-    PAUSED.store(false, Ordering::SeqCst);
-    poller::ensure_running();
-    roots::ensure_refresher();
-    // Warm this start()'s maintenance state now (fire-and-forget, off the
-    // dispatch thread — the async lp path applies) instead of waiting for the
-    // next background tick: the tracked registries' root windows (so
-    // verify_proof isn't NOT_READY for long) and every already-usable
-    // membership's Merkle path (so generate_proof doesn't pay the first-call
-    // fetch). Must not block start() itself.
+    // Permit + (re)spawn the maintenance workers, and warm this start()'s
+    // state in the background (off the dispatch thread — the async lp path
+    // applies) instead of waiting for the next tick: the tracked registries'
+    // root windows (so verify_proof isn't NOT_READY for long) and every
+    // already-usable membership's Merkle path (so generate_proof doesn't pay
+    // the first-call fetch). Must not block start() itself.
     let warm_roots = !tracked.is_empty();
-    std::thread::spawn(move || {
+    worker::start(move || {
         if warm_roots {
             if let Err(payload) = std::panic::catch_unwind(roots::refresh_all) {
                 eprintln!("membership start: root warm-up panicked: {payload:?}");
@@ -875,12 +861,15 @@ fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
     }))
 }
 
-/// Spec stop(): halt the maintenance tasks. In-flight registry reads run to
-/// completion (the async provider path cannot be cancelled cleanly in this
-/// thread model), but no NEW background work is scheduled until the next
-/// start().
+/// Spec stop(): halt the maintenance tasks for real. Sleeping workers wake
+/// and are joined within a short grace; a worker blocked in a single
+/// in-flight registry read (the provider's un-sliced async wait, ≤80s) is
+/// DETACHED — it performs at most that one read, observes it is superseded,
+/// and exits without scheduling further work. Nothing spawns again until the
+/// next start(), which respawns fresh workers (the supervisor's generation
+/// counter keeps a detached straggler from ever duplicating one).
 fn stop_impl() -> Result<serde_json::Value, ApiError> {
-    PAUSED.store(true, Ordering::SeqCst);
+    worker::stop();
     Ok(serde_json::json!({ "stopped": true }))
 }
 
@@ -1396,8 +1385,8 @@ mod tests {
     // otherwise untyped error field.
     #[test]
     fn result_dialect_error_carries_typed_body() {
-        // stop() flips the global PAUSED flag; serialize with the other
-        // global-state tests.
+        // stop() tears down the global worker supervisor; serialize with the
+        // other global-state tests and reset it after.
         let _serial = crate::lock(&store::TEST_STORE_LOCK);
         let mut imp = LogosRlnMembershipModuleImpl;
         let err = imp
@@ -1407,15 +1396,14 @@ mod tests {
             err,
             r#"{"class":"permanent","kind":"invalid_argument","message":"registry_id must be namespace:reference:account_address (CAIP-10), got 1 segment(s)"}"#
         );
-        // And the success side is a plain JSON value (stop is stateful but
-        // side-effect-safe here: it only sets the pause flag).
+        // And the success side is a plain JSON value.
         let ok = imp.stop().unwrap();
         assert_eq!(ok, serde_json::json!({ "stopped": true }));
-        PAUSED.store(false, Ordering::SeqCst);
+        worker::reset_for_test();
     }
 
     #[test]
-    fn start_configures_epoch_and_stop_pauses() {
+    fn start_configures_epoch_and_stop_tears_down() {
         // CONFIG is process-global; serialize with the other tests that read
         // or write it (the store lock is the crate's global-state lock).
         let _serial = crate::lock(&store::TEST_STORE_LOCK);
@@ -1427,17 +1415,17 @@ mod tests {
         assert_eq!(out["max_epoch_gap"], serde_json::json!(3));
         assert_eq!(epoch_size().unwrap(), 600);
         assert_eq!(epoch_gap(), 3);
-        assert!(!is_paused());
+        assert!(!worker::is_stopped());
 
         // stop pauses the background maintenance.
         let out = stop_impl().unwrap();
         assert_eq!(out["stopped"], serde_json::json!(true));
-        assert!(is_paused());
+        assert!(worker::is_stopped());
 
         // start resumes; the gap defaults when omitted, but the epoch size is
         // REQUIRED — it has no safe default (validators must share it).
         let out = start_impl(r#"{"epoch_size_sec": 600}"#).unwrap();
-        assert!(!is_paused());
+        assert!(!worker::is_stopped());
         assert_eq!(out["epoch_size_sec"], serde_json::json!(600));
         assert_eq!(out["max_epoch_gap"], serde_json::json!(DEFAULT_MAX_EPOCH_GAP));
         let err = start_impl(r#"{"max_epoch_gap": 2}"#).unwrap_err();

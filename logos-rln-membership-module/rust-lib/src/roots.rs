@@ -17,7 +17,7 @@
 //! refresher runs every `REFRESH_INTERVAL`, so staleness means it stalled).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::registry_id::{hex_to_bytes32, CanonicalRegistryId};
@@ -40,11 +40,12 @@ struct Window {
 
 static WINDOWS: Mutex<Option<HashMap<String, Window>>> = Mutex::new(None);
 static TRACKED: Mutex<Option<HashMap<String, CanonicalRegistryId>>> = Mutex::new(None);
-static REFRESHER: Once = Once::new();
 
 /// Track a registry's roots and make sure the background refresher is running.
 /// Non-blocking and hot-path-safe: it registers interest and returns, never
-/// performing a registry read itself. Warming happens on the refresher thread.
+/// performing a registry read itself. Warming happens on the refresher worker.
+/// After `stop()` the ensure is a no-op — interest is still recorded, and the
+/// next `start()`'s respawn + warm pass picks the registry up.
 pub(crate) fn track(registry: &CanonicalRegistryId) {
     {
         let mut guard = lock(&TRACKED);
@@ -67,33 +68,50 @@ pub(crate) fn window(canonical: &str) -> Option<Vec<[u8; 32]>> {
     Some(w.roots.clone())
 }
 
-/// Spawn the single background refresher (idempotent). Runs off the owner
-/// thread, so its provider calls take the async lp path (the poller's model);
-/// each tick is wrapped so a transient failure never kills the thread.
+/// Idempotently spawn the background refresher; spawn permission lives in
+/// the supervisor, so nothing spawns after `stop()`. Runs off the owner
+/// thread, so its provider calls take the async lp path (the poller's model).
 pub(crate) fn ensure_refresher() {
-    REFRESHER.call_once(|| {
-        std::thread::spawn(|| loop {
-            std::thread::sleep(REFRESH_INTERVAL);
-            if let Err(payload) = std::panic::catch_unwind(refresh_all) {
-                eprintln!("roots refresher: refresh panicked: {payload:?}");
-            }
-        });
-    });
+    crate::worker::ensure_refresher();
+}
+
+/// The refresher worker body, owned by the supervisor: an interruptible tick
+/// loop that exits when its run is superseded (`stop()`, or a restart's
+/// generation bump); each tick is wrapped so a transient failure never kills
+/// the worker.
+pub(crate) fn run_loop(my_gen: u64) {
+    loop {
+        if !crate::worker::wait_tick(my_gen, REFRESH_INTERVAL) {
+            return;
+        }
+        if let Err(payload) = std::panic::catch_unwind(refresh_all) {
+            eprintln!("roots refresher: refresh panicked: {payload:?}");
+        }
+    }
 }
 
 /// Refresh every tracked registry once (the refresher tick body). Also
 /// reachable synchronously from a non-hot path (e.g. `start`) to warm the
 /// cache before the first verify.
 pub(crate) fn refresh_all() {
-    // stop() pauses maintenance; the thread stays alive and resumes on start().
-    if crate::is_paused() {
+    if crate::worker::is_stopped() {
         return;
     }
     for registry in tracked_snapshot() {
         if let Err(e) = refresh_one(&registry) {
             eprintln!("roots: refresh {} failed: {}", registry.canonical, e.message);
         }
+        // Re-checked after every registry read so a worker abandoned by
+        // stop() does at most one more read before exiting.
+        if crate::worker::is_stopped() {
+            return;
+        }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn tracked_contains(canonical: &str) -> bool {
+    lock(&TRACKED).as_ref().is_some_and(|m| m.contains_key(canonical))
 }
 
 fn tracked_snapshot() -> Vec<CanonicalRegistryId> {

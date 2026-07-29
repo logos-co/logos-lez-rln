@@ -220,8 +220,12 @@ The spec's flat `{key, value}` options translate to a JSON object:
 }
 ```
 
-All keys optional. Listed registries get their valid-root windows warmed
-immediately. There is no default-scope key: every other method takes its
-`(registry_id, rln_identifier_hex)` scope explicitly. `stop()`
-pauses the maintenance tasks (in-flight registry reads run to completion);
-`start()` resumes and reconfigures — both idempotent.
+Listed registries get their valid-root windows warmed immediately
+(`epoch_size_sec` is required — see Epoch semantics). There is no
+default-scope key: every other method takes its
+`(registry_id, rln_identifier_hex)` scope explicitly. `stop()` tears the
+maintenance workers down: sleeping workers join within a ~200 ms grace; a
+worker blocked in one in-flight registry read (≤80 s) is detached and
+self-exits after that single read without scheduling further work — the
+one bounded deviation from the spec's "cancelled cleanly". `start()`
+respawns and reconfigures — both idempotent.
