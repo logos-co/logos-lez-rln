@@ -36,5 +36,47 @@
         in m // {
           liblogos_rln_membership_module = m.default;
         });
+
+      # `nix run .#generate` materialises the two gitignored inputs `rust-lib/`
+      # references into the working tree: the provider scaffold
+      # (logos-lidl-gen over liblogos_rln_membership_module.lidl, with the
+      # hand-maintained liblogos_rln_module dep contract) at
+      # rust-lib/generated/, and the SDK source the crate path-deps as
+      # `../logos-rust-sdk-src`. After it, bare `cargo build/test/clippy`
+      # works in rust-lib/ directly, with no staged copy.
+      #
+      # Unlike logos-chat-module (where the module IS the repo toplevel),
+      # this module is a subdirectory of logos-lez-rln — `git rev-parse
+      # --show-toplevel` returns the repo root, so the script anchors one
+      # level below it. That makes the app runnable from anywhere in the
+      # repo, not just from within this directory.
+      apps = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          lidlGen = logos-module-builder.inputs.logos-rust-sdk.packages.${system}.lidl-gen;
+          sdkSrc = logos-module-builder.packages.${system}.rust-sdk-src;
+          generate = pkgs.writeShellApplication {
+            name = "rln-membership-module-generate";
+            runtimeInputs = [ lidlGen pkgs.git ];
+            text = ''
+              root="$(git rev-parse --show-toplevel)/logos-rln-membership-module"
+              echo "generating rust-lib/generated/provider_gen.rs ..."
+              mkdir -p "$root/rust-lib/generated"
+              logos-lidl-gen "$root/rust-lib/liblogos_rln_membership_module.lidl" --provider \
+                --dep liblogos_rln_module="$root/rust-lib/deps/liblogos_rln_module.lidl" \
+                -o "$root/rust-lib/generated/provider_gen.rs"
+              echo "staging the SDK source at logos-rust-sdk-src/ ..."
+              rm -rf "''${root:?}/logos-rust-sdk-src"
+              cp -RL "${sdkSrc}" "$root/logos-rust-sdk-src"
+              chmod -R u+w "$root/logos-rust-sdk-src"
+              echo "done. bare 'cargo build' now works in rust-lib/"
+            '';
+          };
+        in {
+          generate = {
+            type = "app";
+            program = "${generate}/bin/rln-membership-module-generate";
+          };
+        });
     };
 }

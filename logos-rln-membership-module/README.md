@@ -106,11 +106,10 @@ budgets, option keys — is [`docs/wire-binding.md`](docs/wire-binding.md).
   the `security` CLI (stdin batch writes — the secret never hits argv;
   a missing item over existing credentials never invents a secret).
   Injectable backend seam; cargo tests never touch the live keychain.
-- `rust-lib/generated/provider_gen.rs` — checked-in scaffold for local
-  `cargo check`/tests; the nix build regenerates it. Regenerate manually with:
-  `logos-lidl-gen rust-lib/liblogos_rln_membership_module.lidl --provider \
-   --dep liblogos_rln_module=rust-lib/deps/liblogos_rln_module.lidl \
-   -o rust-lib/generated/provider_gen.rs`
+- `rust-lib/generated/provider_gen.rs` — gitignored scaffold the nix build
+  regenerates; for local `cargo check`/tests, materialise it (plus the
+  staged SDK source) with:
+  `nix run .#generate`
 
 ## Design constraints
 
@@ -149,14 +148,15 @@ budgets, option keys — is [`docs/wire-binding.md`](docs/wire-binding.md).
 mkLogosModule's `rustCrateSrc` stages only the crate dir plus
 `logos-rust-sdk-src` into the nix sandbox:
 
-- `logos-rust-sdk-src/` — logos-co/logos-rust-sdk at the rev pinned in
-  `stage-sources.sh`. Keep the pin identical to
-  `../logos-rln-module/stage-sources.sh`.
+- `logos-rust-sdk-src/` — logos-co/logos-rust-sdk at the rev this flake's
+  `logos-module-builder` input pins (`flake.lock`), not a local variable.
+  Bare `cargo build/test/clippy` in `rust-lib/` need it materialised too —
+  see below.
 
-Refresh with:
+Refresh (also regenerates `rust-lib/generated/provider_gen.rs`) with:
 
 ```sh
-./stage-sources.sh
+nix run .#generate
 ```
 
 ## Build

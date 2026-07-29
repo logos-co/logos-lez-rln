@@ -35,10 +35,16 @@ pub(crate) enum RecordOutcome {
 }
 
 /// epoch → nullifier → the `(share_x, share_y)` of the first proof accepted for
+/// One accepted proof's `(share_x, share_y)` — the Shamir point a later
+/// collision reconstructs the secret against.
+type Shares = ([u8; 32], [u8; 32]);
+/// One epoch's bucket: nullifier → the first accepted proof's shares.
+type EpochBucket = HashMap<[u8; 32], Shares>;
+
 /// it. `Option` so the map is `const`-initializable (the crate's `Mutex<Option<
 /// HashMap>>` + `get_or_insert_with` pattern; `HashMap::new` is not `const`),
 /// reached only through the poison-recovering [`crate::lock`].
-static LOG: Mutex<Option<HashMap<u64, HashMap<[u8; 32], ([u8; 32], [u8; 32])>>>> = Mutex::new(None);
+static LOG: Mutex<Option<HashMap<u64, EpochBucket>>> = Mutex::new(None);
 
 /// Record a proof that has ALREADY passed validity + root-window checks, and
 /// judge its nullifier against the epoch's log in one atomic step under the

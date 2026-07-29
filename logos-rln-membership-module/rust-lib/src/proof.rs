@@ -134,7 +134,10 @@ impl RateLimitProof {
     }
 
     /// The root the proof was generated against — the value `verify_proof`
-    /// checks against its valid-root window.
+    /// checks against its valid-root window. Production verification reads
+    /// the root out of the canonical bytes inside zerokit; this decoded view
+    /// serves the tests that build root windows around synthetic proofs.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn root(&self) -> [u8; 32] {
         self.root
     }
@@ -463,7 +466,7 @@ pub(crate) fn recover_identity_secret_hex(
     // rather than assume the invariant away.
     let secret = compute_id_secret(share1, share2)
         .map_err(|e| ProofError::Engine(format!("recover id secret: {e}")))?;
-    Ok(bytes_to_hex(&fr_to_bytes_le(&*secret)))
+    Ok(bytes_to_hex(&fr_to_bytes_le(&secret)))
 }
 
 /// Build a proof from a seed over a synthetic zero-sibling depth-20 path — for

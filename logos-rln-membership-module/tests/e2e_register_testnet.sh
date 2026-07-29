@@ -109,13 +109,19 @@ LOGOSCORE="${LOGOSCORE:-$(nix build github:logos-co/logos-logoscore-cli --no-lin
 [ -x "$LOGOSCORE" ] || die "logoscore not executable: $LOGOSCORE"
 
 # Staged sources are gitignored; both module builds need them present, and
-# the --override-input path: trees make them visible to nix.
-for mod in logos-rln-module logos-rln-membership-module; do
-    if [ ! -d "$ROOT/$mod/logos-rust-sdk-src" ]; then
-        log "staging SDK sources for $mod"
-        (cd "$ROOT/$mod" && ./stage-sources.sh >/dev/null) || die "$mod/stage-sources.sh failed"
-    fi
-done
+# the --override-input path: trees make them visible to nix. The membership
+# module materialises its SDK copy (and the provider scaffold) via its flake
+# generate app; the sibling still uses its stage-sources.sh.
+if [ ! -d "$ROOT/logos-rln-module/logos-rust-sdk-src" ]; then
+    log "staging SDK sources for logos-rln-module"
+    (cd "$ROOT/logos-rln-module" && ./stage-sources.sh >/dev/null) \
+        || die "logos-rln-module/stage-sources.sh failed"
+fi
+if [ ! -d "$ROOT/logos-rln-membership-module/logos-rust-sdk-src" ]; then
+    log "generating membership module inputs (SDK source + provider scaffold)"
+    nix run "path:$ROOT/logos-rln-membership-module#generate" >/dev/null \
+        || die "nix run logos-rln-membership-module#generate failed"
+fi
 
 lgx_of() {
     local out; out=$(find "$1/" -maxdepth 1 -name '*.lgx' | head -1)

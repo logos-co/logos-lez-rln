@@ -41,6 +41,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod keychain;
 mod keystore;
 mod nullifier_log;
+mod panic_hook;
 mod path_cache;
 mod poller;
 mod proof;
@@ -89,6 +90,10 @@ pub(crate) enum ErrorKind {
     /// The epoch's rate-limit budget is spent — retry next epoch.
     BudgetExhausted,
     /// Invalid input or unsupported operation — retrying cannot succeed.
+    /// Declared for the wire contract's kind list (the class quartet's
+    /// catch-all); current failures carry a more specific kind, so nothing
+    /// constructs it directly today.
+    #[allow(dead_code)]
     Permanent,
 }
 
@@ -796,6 +801,7 @@ pub(crate) fn is_paused() -> bool {
 /// its own scope explicitly (spec: the Module holds no default) — there is
 /// no default-scope config here.
 fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
+    panic_hook::install_once();
     let cfg: serde_json::Value = if config_json.trim().is_empty() {
         serde_json::json!({})
     } else {
@@ -1197,6 +1203,7 @@ struct LogosRlnMembershipModuleImpl;
 
 impl LiblogosRlnMembershipModule for LogosRlnMembershipModuleImpl {
     fn on_context_ready(&mut self, ctx: &RustModuleContext) {
+        panic_hook::install_once();
         // The lp client to the sibling RLN module must be created on this
         // (the host's main Qt) thread — see provider.rs.
         provider::init_client();
