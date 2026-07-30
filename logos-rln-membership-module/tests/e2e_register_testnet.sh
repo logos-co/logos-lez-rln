@@ -7,9 +7,11 @@
 # RegisterFree path:
 #
 #   open wallet -> sync -> derive fresh holding -> claim_tokens (faucet)
-#   -> generate_identity -> unlock_keystore -> register (membership module)
-#   -> poll get_membership_state to "active" -> select_membership
+#   -> unlock_keystore -> register (membership module GENERATES the credential
+#      in-module) -> poll get_membership_state to "active" -> select_membership
 #   -> get_merkle_proof -> cross-check via liblogos_rln_module.get_membership
+#   -> start (warm root window) -> generate_proof -> verify_proof (verdict valid)
+#   -> verify_proof with a tampered signal (verdict invalid)
 #
 # Besides the registration itself this is the acceptance for two open
 # architecture risks:
@@ -107,13 +109,19 @@ LOGOSCORE="${LOGOSCORE:-$(nix build github:logos-co/logos-logoscore-cli --no-lin
 [ -x "$LOGOSCORE" ] || die "logoscore not executable: $LOGOSCORE"
 
 # Staged sources are gitignored; both module builds need them present, and
-# the --override-input path: trees make them visible to nix.
-for mod in logos-rln-module logos-rln-membership-module; do
-    if [ ! -d "$ROOT/$mod/logos-rust-sdk-src" ]; then
-        log "staging SDK sources for $mod"
-        (cd "$ROOT/$mod" && ./stage-sources.sh >/dev/null) || die "$mod/stage-sources.sh failed"
-    fi
-done
+# the --override-input path: trees make them visible to nix. The membership
+# module materialises its SDK copy (and the provider scaffold) via its flake
+# generate app; the sibling still uses its stage-sources.sh.
+if [ ! -d "$ROOT/logos-rln-module/logos-rust-sdk-src" ]; then
+    log "staging SDK sources for logos-rln-module"
+    (cd "$ROOT/logos-rln-module" && ./stage-sources.sh >/dev/null) \
+        || die "logos-rln-module/stage-sources.sh failed"
+fi
+if [ ! -d "$ROOT/logos-rln-membership-module/logos-rust-sdk-src" ]; then
+    log "generating membership module inputs (SDK source + provider scaffold)"
+    nix run "path:$ROOT/logos-rln-membership-module#generate" >/dev/null \
+        || die "nix run logos-rln-membership-module#generate failed"
+fi
 
 lgx_of() {
     local out; out=$(find "$1/" -maxdepth 1 -name '*.lgx' | head -1)
@@ -236,6 +244,31 @@ except Exception:
     print('')
 "; }
 
+# Unwrap a LogosResult envelope {success,value,error} (the -> result methods:
+# start/stop/generate_proof/verify_proof/get_registry_parameters) to its value
+# on success or its error string on failure; passes anything else through
+# unchanged (tolerates a double-encoded envelope, like the lp clients do).
+to_hex() { python3 -c 'import sys; print(sys.stdin.buffer.read().hex())'; }
+
+jval() { python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+try:
+    d = json.loads(raw)
+except Exception:
+    print(raw); sys.exit()
+if isinstance(d, str):
+    try:
+        d = json.loads(d)
+    except Exception:
+        print(d); sys.exit()
+if isinstance(d, dict) and "success" in d and ("value" in d or "error" in d):
+    out = d.get("value") if d.get("success") else d.get("error")
+    print(out if isinstance(out, str) else json.dumps(out))
+else:
+    print(raw)
+'; }
+
 # ---------- wallet: open + sync ---------------------------------------------
 log "opening wallet"
 call_json logos_execution_zone open "$WALLET_HOME/wallet_config.json" "$WALLET_HOME/storage.json" \
@@ -282,13 +315,11 @@ for _t in $(seq 1 36); do
 done
 [ "$BAL" -ge "$CLAIM" ] 2>/dev/null || die "faucet credit never landed (balance=$BAL want $CLAIM)"
 
-# ---------- identity (consumer-side, per spec) -------------------------------
-SEED=$(openssl rand -hex 32)
-ID_JSON=$(call_json liblogos_rln_module generate_identity "$(argfile seed "$SEED")" | jres) || ID_JSON=""
-COMMITMENT=$(printf '%s' "$ID_JSON" | jfield id_commitment)
-SECRET=$(printf '%s' "$ID_JSON" | jfield id_secret_hash)
-[ -n "$COMMITMENT" ] && [ -n "$SECRET" ] || die "generate_identity failed: $ID_JSON"
-log "identity commitment: ${COMMITMENT:0:16}…"
+# ---------- scope (the identity is generated INSIDE the module) --------------
+# The consumer supplies only the scope (registry_id + rln_identifier) and the
+# rate limit; register mints and persists the credential in-module and the
+# secret never crosses the wire.
+RLN_ID=$(openssl rand -hex 32)
 
 # ---------- the registration, through the membership module -----------------
 UNLOCK=$(call_json liblogos_rln_membership_module unlock_keystore e2e-test-password | jres) || UNLOCK=""
@@ -299,11 +330,10 @@ case "$UNLOCK" in
     *) die "unlock_keystore failed: ${UNLOCK:-<empty>}" ;;
 esac
 
-CRED_JSON="{\"identity_commitment\":\"$COMMITMENT\",\"identity_secret_hash\":\"$SECRET\"}"
 OPTIONS_JSON="{\"funding_holding_account_id\":\"$HOLDING\"}"
 log "register($REGISTRY_ID, rate $RATE_LIMIT) via membership module"
 REG=$(call_json liblogos_rln_membership_module register \
-    "$REGISTRY_ID" "$CRED_JSON" "$RATE_LIMIT" "$OPTIONS_JSON" | jres) || REG=""
+    "$REGISTRY_ID" "$(argfile rlnid "$RLN_ID")" "$RATE_LIMIT" "$OPTIONS_JSON" | jres) || REG=""
 case "$REG" in
     *'"state":"pending"'*) ;;
     *'provider_failure'*)
@@ -311,13 +341,17 @@ case "$REG" in
     *) die "register failed: ${REG:-<empty>}" ;;
 esac
 MEMBERSHIP_HASH=$(printf '%s' "$REG" | jfield membership_hash)
-log "pending membership: $MEMBERSHIP_HASH"
+# The commitment is public — the module surfaces it in the Membership view (no
+# secret). Used only for the sibling cross-check below.
+COMMITMENT=$(printf '%s' "$REG" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("credential",{}).get("identity_commitment",""))' 2>/dev/null || true)
+log "pending membership: $MEMBERSHIP_HASH (commitment ${COMMITMENT:0:16}…)"
 
 log "polling get_membership_state to active (testnet confirmation 60-90s)…"
 STATE=""
 for _t in $(seq 1 60); do
     STATE_JSON=$(call_json liblogos_rln_membership_module get_membership_state \
-        "$REGISTRY_ID" "$(argfile commit "$COMMITMENT")" | jres) || STATE_JSON=""
+        "$REGISTRY_ID" "$(argfile rlnid "$RLN_ID")" | jres) || STATE_JSON=""
     STATE=$(printf '%s' "$STATE_JSON" | jfield state)
     log "  state poll $_t: ${STATE:-<none>}"
     case "$STATE" in
@@ -332,12 +366,13 @@ LEAF=$(printf '%s' "$STATE_JSON" | jfield leaf_index)
 log "ACTIVE at leaf $LEAF"
 
 # ---------- post-registration surface ----------------------------------------
-RLN_ID=$(openssl rand -hex 32)
+# select_membership returns the PUBLIC view only (the secret never leaves the
+# module); assert the membership_hash rather than a released credential.
 SELECTED=$(call_json liblogos_rln_membership_module select_membership \
     "$REGISTRY_ID" "$(argfile rlnid "$RLN_ID")" "" | jres) || SELECTED=""
 case "$SELECTED" in
-    *"$SECRET"*) log "select_membership released the credential" ;;
-    *) die "select_membership did not return the registered credential: ${SELECTED:-<empty>}" ;;
+    *"$MEMBERSHIP_HASH"*) log "select_membership returned the public membership" ;;
+    *) die "select_membership did not return the membership: ${SELECTED:-<empty>}" ;;
 esac
 
 PROOF=$(call_json liblogos_rln_membership_module get_merkle_proof "$REGISTRY_ID" "$LEAF" | jres) || PROOF=""
@@ -351,6 +386,79 @@ CROSS=$(call_json liblogos_rln_module get_membership \
 case "$CROSS" in
     *'"registered":true'*) log "cross-check: rln module sees the membership ($(printf '%s' "$CROSS" | jfield state))" ;;
     *) die "cross-check get_membership failed: ${CROSS:-<empty>}" ;;
+esac
+
+# ---------- rate-limit proofs (the spec's rate-limiting portion) --------------
+# start() warms the registry's valid-root window; generate_proof spends a
+# message_id slot and proves in-module (the secret never crosses the wire);
+# verify_proof serves from the local window only — it is expected to answer
+# not_ready until the warm-up read lands, so poll that away first.
+log "start(registries=[$REGISTRY_ID]) to warm the root window"
+# epoch_size 600: verify_proof binds proofs to the current epoch (±1), and the
+# window warm-up polling below can span tens of seconds — a 1s default epoch
+# would expire the proof before verification.
+START=$(call_json liblogos_rln_membership_module start \
+    "{\"epoch_size_sec\":600,\"registries\":[\"$REGISTRY_ID\"]}" | jres | jval) || START=""
+case "$START" in
+    *'"started":true'*) ;;
+    *) die "start failed: ${START:-<empty>}" ;;
+esac
+
+SIGNAL_HEX=$(printf 'logos e2e signal' | to_hex)
+log "generate_proof over the registered membership"
+PROOF_JSON=$(call_json liblogos_rln_membership_module generate_proof \
+    "$REGISTRY_ID" "$(argfile rlnid2 "$RLN_ID")" "$(argfile sig "$SIGNAL_HEX")" | jres | jval) || PROOF_JSON=""
+case "$PROOF_JSON" in
+    *'"proof"'*'"nullifier"'*|*'"nullifier"'*'"proof"'*) ;;
+    *) die "generate_proof failed: ${PROOF_JSON:-<empty>}" ;;
+esac
+MESSAGE_ID=$(printf '%s' "$PROOF_JSON" | jfield message_id)
+log "proof issued (message_id ${MESSAGE_ID:-?}, epoch $(printf '%s' "$PROOF_JSON" | jfield epoch))"
+
+# The quota snapshot (logos-delivery's QuotaProvider shape): numeric
+# epoch_index + rate_limit + remaining, decremented by the proof above —
+# asserted strictly only when the epoch didn't roll in between.
+QUOTA=$(call_json liblogos_rln_membership_module get_epoch_quota \
+    "$REGISTRY_ID" "$(argfile rlnid5 "$RLN_ID")" | jres | jval) || QUOTA=""
+case "$QUOTA" in
+    *'"epoch_index"'*'"remaining"'*) ;;
+    *) die "get_epoch_quota failed: ${QUOTA:-<empty>}" ;;
+esac
+REMAINING=$(printf '%s' "$QUOTA" | jfield remaining)
+Q_EPOCH=$(printf '%s' "$QUOTA" | jfield epoch_index)
+PROOF_EPOCH=$(printf '%s' "$PROOF_JSON" | jfield epoch)
+if [ "$Q_EPOCH" = "$PROOF_EPOCH" ]; then
+    [ "$REMAINING" = "$((RATE_LIMIT - 1))" ] \
+        || die "quota remaining $REMAINING != $((RATE_LIMIT - 1)) after one proof"
+    log "epoch quota: remaining $REMAINING/$RATE_LIMIT in epoch $Q_EPOCH"
+else
+    log "epoch rolled between proof and quota (proof $PROOF_EPOCH, quota $Q_EPOCH) — remaining $REMAINING"
+fi
+
+log "verify_proof from the local root window (polling not_ready away)…"
+VALID=""
+for _t in $(seq 1 12); do
+    VERIFY=$(call_json liblogos_rln_membership_module verify_proof \
+        "$REGISTRY_ID" "$(argfile rlnid3 "$RLN_ID")" "$(argfile sig2 "$SIGNAL_HEX")" \
+        "$(argfile proof "$PROOF_JSON")" | jres | jval) || VERIFY=""
+    case "$VERIFY" in
+        *'"verdict":"valid"'*)   VALID=yes; break ;;
+        *'"verdict":"invalid"'*) die "verify_proof rejected our own fresh proof: $VERIFY" ;;
+        *'not_ready'*)     log "  root window still cold ($_t)"; sleep 5 ;;
+        *) die "verify_proof failed: ${VERIFY:-<empty>}" ;;
+    esac
+done
+[ "$VALID" = "yes" ] || die "verify_proof never left not_ready (root window warm-up)"
+log "verify_proof: valid"
+
+# A different signal against the same proof MUST be invalid — not an error.
+TAMPER_HEX=$(printf 'tampered signal' | to_hex)
+TVERIFY=$(call_json liblogos_rln_membership_module verify_proof \
+    "$REGISTRY_ID" "$(argfile rlnid4 "$RLN_ID")" "$(argfile sig3 "$TAMPER_HEX")" \
+    "$(argfile proof2 "$PROOF_JSON")" | jres | jval) || TVERIFY=""
+case "$TVERIFY" in
+    *'"verdict":"invalid"'*) log "tampered signal correctly invalid" ;;
+    *) die "tampered signal was not rejected: ${TVERIFY:-<empty>}" ;;
 esac
 
 echo

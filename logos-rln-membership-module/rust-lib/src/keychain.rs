@@ -312,12 +312,15 @@ mod tests {
         store::with_store(|s| {
             s.unlock(password)?;
             let meta = store::MembershipMeta {
+                allocations: Vec::new(),
                 failed_reason: None,
                 identity_commitment: "11".repeat(32),
                 leaf_index: 7,
                 rate_limit: 300,
                 registry_id: format!("logos:local:{}", "ab".repeat(32)),
-                state: "active".to_string(),
+                retryable: None,
+                rln_identifier: String::new(),
+                state: store::MembershipState::Active,
                 state_history: vec![],
                 submitted_at: 1,
                 tx_result: None,
