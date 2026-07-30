@@ -136,11 +136,14 @@ mod tests {
         (
             hash.to_string(),
             MembershipMeta {
+                allocations: Vec::new(),
                 failed_reason: None,
                 identity_commitment: "11".repeat(32),
                 leaf_index: 0,
                 rate_limit: rate,
                 registry_id: "logos:local:aa".to_string(),
+                retryable: None,
+                rln_identifier: String::new(),
                 state: state.to_string(),
                 state_history: vec![],
                 submitted_at: 0,

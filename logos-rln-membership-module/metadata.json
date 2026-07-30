@@ -39,7 +39,11 @@
       "packages": {
         "build": [
           "pkg-config",
-          "perl"
+          "perl",
+          "protobuf",
+          "cmake",
+          "python3",
+          "clang"
         ],
         "runtime": []
       }

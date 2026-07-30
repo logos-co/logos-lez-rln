@@ -20,9 +20,10 @@
       # blocks on a sequencer submit.
       #
       # No path-deps beyond the staged SDK: the membership logic is pure Rust
-      # (CAIP-10 routing, keystore crypto, lifecycle state machine) and all
-      # lez-rln knowledge lives behind the sibling module's wire — no
-      # rln-layouts / risc0 / zerokit in this crate.
+      # (CAIP-10 routing, keystore crypto, lifecycle state machine, and the
+      # RLN proof engine — zerokit `rln`, stateless, from crates.io) and all
+      # lez-rln REGISTRY knowledge lives behind the sibling module's wire —
+      # no rln-layouts / risc0 in this crate.
       module = logos-module-builder.lib.mkLogosModule {
         src = ./.;
         configFile = ./metadata.json;

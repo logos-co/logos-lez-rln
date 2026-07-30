@@ -54,6 +54,20 @@ pub(crate) const ST_EXPIRED: &str = "expired";
 pub(crate) const ST_ERASED: &str = "erased";
 pub(crate) const ST_UNKNOWN: &str = "unknown";
 
+/// The usable ("selectable") states: a membership that can currently back a
+/// proof — the one predicate selection, scope resolution, and the quota read
+/// all share.
+pub(crate) fn is_usable(state: &str) -> bool {
+    state == ST_ACTIVE || state == ST_GRACE
+}
+
+/// The live states (spec): a membership that blocks a new registration for
+/// its scope — usable, or still awaiting confirmation. Terminal states
+/// (failed, expired, erased, unknown) never block a fresh registration.
+pub(crate) fn is_live(state: &str) -> bool {
+    state == ST_PENDING || is_usable(state)
+}
+
 /// Pending→Failed bound. Testnet confirmation is 60–90s; 300s keeps a
 /// comfortable margin while still bounding Pending per the spec MUST.
 pub(crate) const CONFIRMATION_WINDOW_SECS: u64 = 300;
@@ -67,6 +81,12 @@ const STATE_HISTORY_CAP: usize = 20;
 /// ciphertext; the rest are self-healing caches of registry state.
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct MembershipMeta {
+    /// Per-application `message_id` allocation, one row per active
+    /// `(rln_identifier, current epoch)`. Plaintext-safe counters; persisted
+    /// with the sidecar so a restart never reissues a spent slot.
+    /// Omitted from older files (serde default = empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) allocations: Vec<crate::rate_limit::EpochAllocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) failed_reason: Option<String>,
     pub(crate) identity_commitment: String,
@@ -75,11 +95,35 @@ pub(crate) struct MembershipMeta {
     pub(crate) leaf_index: u64,
     pub(crate) rate_limit: u64,
     pub(crate) registry_id: String,
+    /// Whether a `failed` state is worth retrying (spec: a failed submission
+    /// SHALL report whether it is retryable). `None` outside the failed
+    /// state (never set, or cleared on the next successful observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retryable: Option<bool>,
+    /// The rln_identifier of the scope that REGISTERED this membership —
+    /// register's per-scope idempotency key (spec: "idempotent for a scope").
+    /// Local bookkeeping only: the membership itself carries no application
+    /// association and its hash excludes this (Appendix B). Empty on records
+    /// from before this field existed — treated as matching ANY scope, so a
+    /// legacy membership keeps backing every application on its registry.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) rln_identifier: String,
     pub(crate) state: String,
     pub(crate) state_history: Vec<StateChange>,
     pub(crate) submitted_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tx_result: Option<String>,
+}
+
+impl MembershipMeta {
+    /// The one place a failed submission is recorded: the state transition,
+    /// the "submit_failed: " failure-reason prefix consumers key on, and the
+    /// spec's retryable flag (mirrors the submission error's class).
+    pub(crate) fn mark_submit_failed(&mut self, message: &str, retryable: bool) {
+        self.state = ST_FAILED.to_string();
+        self.failed_reason = Some(format!("submit_failed: {message}"));
+        self.retryable = Some(retryable);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -334,6 +378,60 @@ impl Store {
         self.persist()
     }
 
+    /// Reserve the next `message_id` for `(membership, rln_identifier, epoch)`
+    /// and DURABLY PERSIST it before returning — the caller uses the slot only
+    /// after this call succeeds, so a crash can waste a slot but never reissue
+    /// one. No unlock needed: allocations live in the plaintext
+    /// sidecar. `BudgetExhausted` when the epoch's `rate_limit` is spent.
+    pub(crate) fn reserve_message_id(
+        &mut self,
+        hash: &str,
+        rln_identifier_hex: &str,
+        epoch: u64,
+        rate_limit: u64,
+    ) -> Result<u64, ApiError> {
+        let entry = self.file.credentials.get_mut(hash).ok_or_else(|| {
+            ApiError::new(ErrorKind::UnknownMembership, "no such membership_hash")
+        })?;
+        let slot = crate::rate_limit::reserve_slot(
+            &mut entry.membership.allocations,
+            rln_identifier_hex,
+            epoch,
+            rate_limit,
+        )
+        .map_err(|_| {
+            ApiError::new(
+                ErrorKind::BudgetExhausted,
+                "epoch rate-limit budget exhausted; retry next epoch",
+            )
+        })?;
+        self.persist()?;
+        Ok(slot)
+    }
+
+    /// Remaining slots for `(membership, rln_identifier, epoch)` — the quota
+    /// read's current-epoch budget. Read-only.
+    pub(crate) fn remaining_budget(
+        &self,
+        hash: &str,
+        rln_identifier_hex: &str,
+        epoch: u64,
+        rate_limit: u64,
+    ) -> u64 {
+        self.file
+            .credentials
+            .get(hash)
+            .map(|e| {
+                crate::rate_limit::remaining(
+                    &e.membership.allocations,
+                    rln_identifier_hex,
+                    epoch,
+                    rate_limit,
+                )
+            })
+            .unwrap_or(0)
+    }
+
     fn persist(&self) -> Result<(), ApiError> {
         keystore::save_atomic(&self.dir, &self.file)
             .map_err(|e| ApiError::internal(&format!("keystore save: {e}")))
@@ -386,11 +484,14 @@ mod tests {
 
     fn meta(state: &str, submitted_at: u64) -> MembershipMeta {
         MembershipMeta {
+            allocations: Vec::new(),
             failed_reason: None,
             identity_commitment: "11".repeat(32),
             leaf_index: 7,
             rate_limit: 300,
             registry_id: format!("logos:local:{}", "ab".repeat(32)),
+            retryable: None,
+            rln_identifier: String::new(),
             state: state.to_string(),
             state_history: vec![],
             submitted_at,

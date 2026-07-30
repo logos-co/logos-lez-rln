@@ -32,6 +32,12 @@ hmac = "0.12"
 zeroize = { version = "1", features = ["derive"] }
 getrandom = "0.2"
 
+# RLN zk proof generation & verification (spec generate_proof / verify_proof).
+# The same zerokit pin the sibling liblogos_rln_module and lez-rln build; here
+# we use the full stateless proving API (keygen+poseidon is not enough), so the
+# identity secret stays in this module — it never crosses to the sibling.
+rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
+
 # The runtime SDK, staged by the module builder (codegen.rust) at this
 # path from the same logos-rust-sdk rev its generator came from. Keep the
 # stage-sources.sh pin identical to ../../logos-rln-module's.

@@ -13,6 +13,12 @@
 //!    (active/grace_period/expired transitions come from the registry's
 //!    chain clock; a previously-observed record the registry no longer has
 //!    ⇒ erased — the involuntary-removal signal consumers must see).
+//! 3. on that same 60s cadence, refreshes each USABLE (active/grace_period)
+//!    membership's Merkle proof path into `path_cache.rs`, so `generate_proof`
+//!    normally serves it with zero registry I/O (spec start(): "maintain …
+//!    each membership's Merkle proof path"). A failed refresh is logged and
+//!    the previous cache entry is kept — slightly stale but still verifiable
+//!    beats nothing.
 //!
 //! Runs whether or not the keystore is unlocked: everything here touches
 //! only plaintext-safe sidecar metadata. All provider calls from this
@@ -23,6 +29,7 @@
 use std::sync::Once;
 use std::time::Duration;
 
+use crate::path_cache;
 use crate::provider::provider_for;
 use crate::registry_id;
 use crate::store::{self, MembershipMeta, CONFIRMATION_WINDOW_SECS, ST_ERASED, ST_FAILED};
@@ -90,8 +97,9 @@ enum RecordUpdate {
 
 /// Confirm/refresh write shared by both Observed branches: record the
 /// registry's authoritative state/leaf_index/rate_limit and clear any
-/// failed_reason. On the refresh path failed_reason is already None (records
-/// there are active/grace/expired), so clearing it is behavior-neutral.
+/// failed_reason/retryable. On the refresh path both are already None
+/// (records there are active/grace/expired), so clearing them is
+/// behavior-neutral.
 fn apply_observed(
     hash: &str,
     state: &str,
@@ -104,11 +112,16 @@ fn apply_observed(
             m.leaf_index = leaf_index;
             m.rate_limit = rate_limit;
             m.failed_reason = None;
+            m.retryable = None;
         })
     })
 }
 
 fn tick(refresh_states: bool) {
+    // stop() pauses maintenance; the thread stays alive and resumes on start().
+    if crate::is_paused() {
+        return;
+    }
     let pending = match store::with_store(|s| Ok(s.pending_records())) {
         Ok(records) => records,
         // Store not initialized (no persistence path) — nothing to poll.
@@ -136,6 +149,9 @@ fn tick(refresh_states: bool) {
                     s.update(&hash, |m| {
                         m.state = ST_FAILED.to_string();
                         m.failed_reason = Some("confirmation_window_elapsed".to_string());
+                        // Re-registration can be attempted (spec: a failed
+                        // submission SHALL report whether it is retryable).
+                        m.retryable = Some(true);
                     })
                 });
                 if let Err(e) = result {
@@ -172,6 +188,41 @@ fn tick(refresh_states: bool) {
                 eprintln!("membership poller: {hash} vanished from registry — erased");
             }
             None => {}
+        }
+    }
+
+    refresh_paths();
+}
+
+/// One Merkle-path refresh pass over every USABLE (active/grace_period)
+/// membership — the poller's third maintenance job (module docs point 3).
+/// Shared by the refresh tick and `start`'s warm-up, so both feed
+/// `path_cache.rs` through the identical fetch+decode
+/// (`path_cache::fill_path_cache`). Self-contained pause check (mirrors
+/// `roots::refresh_all`) so it is safe to call directly off the warm thread,
+/// not just from `tick`.
+pub(crate) fn refresh_paths() {
+    if crate::is_paused() {
+        return;
+    }
+    let usable = match store::with_store(|s| Ok(s.refreshable_records())) {
+        Ok(records) => records,
+        Err(_) => return,
+    };
+    for (hash, meta) in usable.into_iter().filter(|(_, m)| store::is_usable(&m.state)) {
+        let registry = match registry_id::parse(&meta.registry_id) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("membership poller: bad stored registry_id {}: {e}", meta.registry_id);
+                continue;
+            }
+        };
+        let Some(provider) = provider_for(&registry.namespace) else { continue };
+        if let Err(e) = path_cache::fill_path_cache(&registry, &hash, meta.leaf_index, provider) {
+            // Keep the previous cache entry — a slightly-stale but still
+            // verifiable path beats none, the same trade-off the root window
+            // makes (module docs point 3).
+            eprintln!("membership poller: {hash} path refresh failed: {}", e.message);
         }
     }
 }
