@@ -104,7 +104,7 @@ Item {
         var cfg = M.registryConfigHex(registryId)
         card.pending = cfg === "" ? 1 : 2
         flow.callRetry(M.MEMBERSHIP_MODULE, "get_membership_state",
-               [registryId, commitment], function (r) {
+               [registryId, M.DEFAULT_RLN_ID], function (r) {
             if (!r.error) {
                 card.liveState = r.state || card.liveState
                 if (r.leaf_index !== undefined)
@@ -138,11 +138,32 @@ Item {
 
     // The periodic live refresh goes through the SAME guarded refresh(), so a
     // tick that lands mid-cycle is skipped rather than stacking a new chain.
+    // 60s once the flow's push channel is armed (a slow-poll safety net
+    // behind the events below); 10s otherwise, unchanged.
     Timer {
-        interval: 10000
+        interval: card.flow.eventsArmed ? 60000 : 10000
         repeat: true
         running: card.visible && card.found
         onTriggered: card.refresh()
+    }
+
+    // Wake-up only, exactly like OnboardingFlow's own Connections — refresh()
+    // re-reads authoritatively and does its own commitment lookup. Reuses
+    // flow.eventsArmed rather than arming a second subscription for the
+    // same (module, event) pair on the same bridge object flow already
+    // armed. No membership_hash is tracked here either, so any state change
+    // on this registry re-triggers while the card is visible; refresh()'s
+    // `refreshing` in-flight guard bounds the cost of an unrelated wake-up.
+    Connections {
+        target: card.flow.bridge
+        enabled: card.flow.eventsArmed
+        function onModuleEventReceived(moduleName, eventName, data) {
+            if (moduleName !== M.MEMBERSHIP_MODULE || eventName !== M.MEMBERSHIP_STATE_CHANGED)
+                return
+            var evt = M.decodeMembershipStateChanged(data)
+            if (evt && evt.registry_id === card.registryId && card.visible && card.found)
+                card.refresh()
+        }
     }
 
     CenteredScrollColumn {

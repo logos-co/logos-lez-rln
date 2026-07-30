@@ -57,15 +57,22 @@ reference implementation `logos-package-manager-ui`):
 | GUI action | call |
 |---|---|
 | Unlock / lock keystore | `liblogos_rln_membership_module.unlock_keystore(password)` / `lock_keystore()` |
-| Generate identity | `liblogos_rln_module.generate_identity(seed_hex)` (spec: generation is the consumer's job) |
-| Register | `liblogos_rln_membership_module.register(registry_id, credential_json, rate_limit, options_json)` with `options_json = {"funding_holding_account_id": …}` |
-| Confirmation poll | `liblogos_rln_membership_module.get_membership_state(registry_id, commitment_hex)` every 10s until the pending window settles |
+| Register (generates the identity in-module) | `liblogos_rln_membership_module.register(registry_id, rln_identifier_hex, rate_limit, options_json)` with `options_json = {"funding_holding_account_id": …}`; the credential never leaves the module |
+| Confirmation poll | `liblogos_rln_membership_module.get_membership_state(registry_id, rln_identifier_hex)` every 10s until the pending window settles |
 | Memberships list | `liblogos_rln_membership_module.get_memberships(registry_id)` (public view, works locked) |
 | One-click wallet | `liblogos_rln_membership_module.provision_wallet_home({"sequencer_addr":…})` → wallet-home under the module's basecamp data dir, then `open` when `storage_exists`, else `create_new` + `save` |
 | Open / create wallet | `logos_execution_zone.open(config_path, storage_path)` / `create_new(config_path, storage_path, password)` + `save()` (create shows the mnemonic ONCE) |
 | Sync | `get_current_block_height()` (head discovery) → `sync_to_block(head)` retried until it returns 0 **and** `get_last_synced_block()` reaches the head (progress-polled) |
 | Faucet claim | `create_account_public()` → `liblogos_rln_module.get_token_balance` until `exists:false` → `claim_tokens(config_hex, holding_hex, amount)` → balance-polled until the credit lands (hard timeout) |
 | Claim sizing | `liblogos_rln_module.get_registry_bounds(config_hex)` → suggested amount = default rate × `price_per_unit` × 1.2 (editable) |
+
+State changes also push via the module's `membership_state_changed` event when
+the host bridge supports `LogosQmlBridge.onModuleEvent`/`moduleEventReceived`
+(see the module's `docs/wire-binding.md` "Events" section); a received event
+only wakes an immediate re-read through the same `get_membership_state` call
+above (advisory, never a data source on its own). Polling remains the
+portable fallback every host can rely on — its cadence widens to 60s once
+events are armed, staying at 10s otherwise.
 
 The registry field is prefilled with the shared-faucet testnet registry
 (descriptor under `../deployments/shared-faucet/`); the registry id's 64-hex
@@ -139,5 +146,5 @@ nix run 'path:.' -- --modules-dir <dir with installed modules> \
 In basecamp: install this module's `.lgx` (plus the wallet, rln and
 membership `.lgx` bundles) through the package manager Modules view; the
 "RLN Membership" entry appears in the sidebar. Full flow: Wallet tab (open or
-create → sync → claim) → Register tab (unlock → generate identity →
+create → sync → claim) → Register tab (unlock →
 register; the funding field is pre-filled by the claim) → Memberships tab.

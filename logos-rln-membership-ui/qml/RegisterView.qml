@@ -1,5 +1,6 @@
-// Register flow: unlock keystore -> generate identity (sibling rln module)
-// -> register -> poll get_membership_state until the pending window settles.
+// Register flow: unlock keystore -> register (the membership module generates
+// the credential) -> poll get_membership_state until the pending window
+// settles.
 // Mirrors logos-rln-membership-module/tests/e2e_register_testnet.sh. The
 // funding holding account is either typed in or auto-filled by the Wallet
 // tab's faucet claim (Main.qml wires WalletView.funded to fundingAccount).
@@ -22,16 +23,27 @@ LogosScrollView {
     property bool unlocked: false
     property int membershipCount: -1
 
-    // Generated identity. The secret stays in QML memory only until register
-    // hands it to the module's encrypted keystore.
+    // The public commitment from register's reply. The identity secret is
+    // generated and kept inside the module and never reaches QML.
     property string commitment: ""
-    property string secretHash: ""
 
     // In-flight + registration status.
     property bool busy: false
     property string status: ""
     property bool statusIsError: false
     property string liveState: ""
+
+    // True once the module's push channel is armed on this bridge (see
+    // M.armModuleEvent). AdvancedView wires this view with only bridge +
+    // registryId (no OnboardingFlow reference — the two implementations
+    // stay deliberately separate, see the file header), so unlike
+    // MembershipCard this view arms its own subscription rather than
+    // sharing OnboardingFlow's.
+    property bool eventsArmed: false
+
+    Component.onCompleted: {
+        view.eventsArmed = M.armModuleEvent(view.bridge, M.MEMBERSHIP_MODULE, M.MEMBERSHIP_STATE_CHANGED)
+    }
 
     function report(text, isError) {
         status = text
@@ -63,38 +75,22 @@ LogosScrollView {
         })
     }
 
-    function doGenerate() {
-        busy = true
-        M.call(bridge, M.RLN_MODULE, "generate_identity", [seedField.text.trim()], function (r) {
-            view.busy = false
-            if (r.error) { view.report(M.errorText(r.error), true); return }
-            if (!r.id_commitment || !r.id_secret_hash) {
-                view.report("generate_identity returned no credential: " + JSON.stringify(r), true)
-                return
-            }
-            view.commitment = r.id_commitment
-            view.secretHash = r.id_secret_hash
-            view.liveState = ""
-            view.report("Identity ready — commitment " + M.truncateHex(view.commitment, 16, 8), false)
-        })
-    }
-
     function doRegister() {
-        // Spec credential JSON (LE hex); options carry the paying account for
-        // the logos namespace.
-        var credential = JSON.stringify({
-            identity_commitment: commitment,
-            identity_secret_hash: secretHash
-        })
+        // The credential is generated inside the module; the caller supplies
+        // only the scope (registry_id + rln_identifier) and, for the logos
+        // namespace, the paying account.
         var options = JSON.stringify({
             funding_holding_account_id: fundingField.text.trim()
         })
         busy = true
         liveState = ""
         M.call(bridge, M.MEMBERSHIP_MODULE, "register",
-               [registryId, credential, rateSpin.value, options], function (r) {
+               [registryId, M.DEFAULT_RLN_ID, rateSpin.value, options], function (r) {
             view.busy = false
             if (r.error) { view.report(M.errorText(r.error), true); return }
+            // register returns the public Membership view; the commitment is the
+            // only credential-derived value it exposes.
+            view.commitment = (r.credential && r.credential.identity_commitment) || ""
             view.liveState = r.state || "pending"
             var note = r.rate_limit_mismatch === true
                 ? " NOTE: already registered on-chain with a different rate limit." : ""
@@ -106,9 +102,9 @@ LogosScrollView {
     }
 
     function pollState() {
-        if (commitment === "" || registryId === "") { pollTimer.stop(); return }
+        if (registryId === "") { pollTimer.stop(); return }
         M.call(bridge, M.MEMBERSHIP_MODULE, "get_membership_state",
-               [registryId, commitment], function (r) {
+               [registryId, M.DEFAULT_RLN_ID], function (r) {
             if (r.error) { pollTimer.stop(); view.report(M.errorText(r.error), true); return }
             view.liveState = r.state || "unknown"
             if (view.liveState === "pending") return
@@ -124,12 +120,33 @@ LogosScrollView {
     }
 
     // The pending confirmation window is bounded (300s) module-side, so the
-    // poll always reaches a settled state and stops itself.
+    // poll always reaches a settled state and stops itself. 60s once
+    // eventsArmed (a slow-poll safety net behind the Connections below);
+    // 10s otherwise, unchanged.
     Timer {
         id: pollTimer
-        interval: 10000
+        interval: view.eventsArmed ? 60000 : 10000
         repeat: true
         onTriggered: view.pollState()
+    }
+
+    // Wake-up only, mirroring OnboardingFlow.pollRegistration's Connections
+    // — pollState() re-reads authoritatively over the same
+    // (registryId, DEFAULT_RLN_ID) scope get_membership_state already
+    // polls. No membership_hash is tracked here to filter tighter, so any
+    // state change on this registry re-triggers while a registration is
+    // pending; gated on pollTimer.running so an event outside an active
+    // confirmation wait is a no-op.
+    Connections {
+        target: view.bridge
+        enabled: view.eventsArmed
+        function onModuleEventReceived(moduleName, eventName, data) {
+            if (moduleName !== M.MEMBERSHIP_MODULE || eventName !== M.MEMBERSHIP_STATE_CHANGED)
+                return
+            var evt = M.decodeMembershipStateChanged(data)
+            if (evt && evt.registry_id === view.registryId && pollTimer.running)
+                view.pollState()
+        }
     }
 
     ColumnLayout {
@@ -192,40 +209,14 @@ LogosScrollView {
             ColumnLayout {
                 spacing: Theme.spacing.small
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.spacing.small
-
-                    LogosTextField {
-                        id: seedField
-                        Layout.fillWidth: true
-                        placeholderText: "32-byte hex seed"
-                        text: M.randomSeedHex()
-                    }
-                    LogosButton {
-                        implicitWidth: 110
-                        implicitHeight: 40
-                        text: "New seed"
-                        enabled: !view.busy
-                        onClicked: seedField.text = M.randomSeedHex()
-                    }
-                    LogosButton {
-                        implicitWidth: 150
-                        implicitHeight: 40
-                        text: "Generate identity"
-                        enabled: !view.busy && M.isHex32(seedField.text.trim())
-                        onClicked: view.doGenerate()
-                    }
-                }
-
                 LogosText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     font.pixelSize: Theme.typography.secondaryText
                     color: Theme.palette.textTertiary
-                    text: "The identity is derived deterministically from the seed by the rln "
-                        + "module. The prefilled seed is UI-grade randomness — paste your own "
-                        + "entropy (e.g. openssl rand -hex 32) for anything beyond testnet demos."
+                    text: "The identity credential is generated inside the membership module "
+                        + "when you register; its secret never leaves the module. The public "
+                        + "commitment appears below after registration."
                 }
 
                 RowLayout {
@@ -297,7 +288,7 @@ LogosScrollView {
                         implicitWidth: 180
                         implicitHeight: 40
                         text: "Register membership"
-                        enabled: !view.busy && view.unlocked && view.commitment !== ""
+                        enabled: !view.busy && view.unlocked
                                  && fundingField.text.trim() !== "" && view.registryId !== ""
                         onClicked: view.doRegister()
                     }
