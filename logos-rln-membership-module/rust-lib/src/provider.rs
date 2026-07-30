@@ -29,6 +29,7 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 use crate::registry_id::CanonicalRegistryId;
+use crate::store::MembershipState;
 use crate::{lock, ApiError, ErrorKind};
 
 const TARGET_MODULE: &str = "liblogos_rln_module";
@@ -465,8 +466,9 @@ pub(crate) fn gifter_request_async(
 /// `get_membership` return: state + authoritative leaf_index/rate_limit).
 pub(crate) struct ProviderMembership {
     pub(crate) registered: bool,
-    /// active | grace_period | expired (meaningful only when registered).
-    pub(crate) state: String,
+    /// active | grace_period | expired (meaningful only when registered;
+    /// `Unknown` placeholder otherwise, never read while `!registered`).
+    pub(crate) state: MembershipState,
     pub(crate) leaf_index: u64,
     pub(crate) rate_limit: u64,
 }
@@ -554,7 +556,7 @@ impl RegistryProvider for LezRlnProvider {
         if !registered {
             return Ok(ProviderMembership {
                 registered: false,
-                state: String::new(),
+                state: MembershipState::Unknown,
                 leaf_index: 0,
                 rate_limit: 0,
             });
@@ -574,16 +576,17 @@ impl RegistryProvider for LezRlnProvider {
         };
         Ok(ProviderMembership {
             registered: true,
-            state: v
-                .get("state")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| {
-                    ApiError::new(
-                        ErrorKind::ProviderFailure,
-                        "get_membership: registered member missing state",
-                    )
-                })?
-                .to_string(),
+            // Loud-fail on an unrecognized state string, matching the adjacent
+            // missing-field faults — no panic, no silent fallback.
+            state: serde_json::from_value::<MembershipState>(
+                v.get("state").cloned().unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|_| {
+                ApiError::new(
+                    ErrorKind::ProviderFailure,
+                    "get_membership: unrecognized state",
+                )
+            })?,
             leaf_index: required("leaf_index")?,
             rate_limit: required("rate_limit")?,
         })

@@ -23,7 +23,7 @@
 
 use serde::Serialize;
 
-use crate::store::{self, MembershipMeta};
+use crate::store::{MembershipMeta, MembershipState};
 
 /// The `credential` object inside [`MembershipView`] — mirrors the nested
 /// shape inside the `.lidl` `Membership` record. Exposes only the
@@ -52,7 +52,7 @@ pub(crate) struct MembershipView {
     retryable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rln_identifier: Option<String>,
-    state: String,
+    state: MembershipState,
     submitted_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_result: Option<String>,
@@ -60,9 +60,9 @@ pub(crate) struct MembershipView {
 
 impl MembershipView {
     /// `quarantined` (metadata tamper-check failed) forces `state:"failed"`
-    /// and `failed_reason:"metadata_tamper"` — and, matching the code this
-    /// replaces, SUPPRESSES `retryable` even if the underlying record has
-    /// one set, since a tamper verdict is never "just retry". Absent
+    /// and `failed_reason:"metadata_tamper"` — and SUPPRESSES `retryable`
+    /// even if the underlying record has one set, since a tamper verdict is
+    /// never "just retry". Absent
     /// quarantine, `failed_reason`/`retryable` come from the record as-is;
     /// `rate_limit_mismatch` is only ever emitted `true` (never `false`) —
     /// the caller passes it only when a mismatch was found.
@@ -87,7 +87,7 @@ impl MembershipView {
             registry_id: meta.registry_id.clone(),
             retryable,
             rln_identifier: (!meta.rln_identifier.is_empty()).then(|| meta.rln_identifier.clone()),
-            state: if quarantined { store::ST_FAILED.to_string() } else { meta.state.clone() },
+            state: if quarantined { MembershipState::Failed } else { meta.state },
             submitted_at: meta.submitted_at,
             tx_result: meta.tx_result.clone(),
         }
@@ -111,7 +111,7 @@ pub(crate) struct MembershipStateView {
     #[serde(skip_serializing_if = "Option::is_none")]
     rate_limit: Option<u64>,
     registry_id: String,
-    state: String,
+    state: MembershipState,
 }
 
 impl MembershipStateView {
@@ -121,14 +121,14 @@ impl MembershipStateView {
             membership_hash: None,
             rate_limit: None,
             registry_id: registry_id.to_string(),
-            state: store::ST_UNKNOWN.to_string(),
+            state: MembershipState::Unknown,
         }
     }
 
     pub(crate) fn resolved(
         hash: &str,
         registry_id: &str,
-        state: &str,
+        state: MembershipState,
         leaf_index: u64,
         rate_limit: u64,
     ) -> Self {
@@ -137,7 +137,7 @@ impl MembershipStateView {
             membership_hash: Some(hash.to_string()),
             rate_limit: Some(rate_limit),
             registry_id: registry_id.to_string(),
-            state: state.to_string(),
+            state,
         }
     }
 }
@@ -195,7 +195,7 @@ impl StopReply {
 /// are present only when the registry's `get_registry_bounds` reply carried
 /// them. `price_per_unit` is passed through opaquely (the sibling module
 /// documents it as a decimal STRING, but this view makes no assumption
-/// about its shape — same as the `serde_json::Map` code it replaces).
+/// about its shape).
 #[derive(Serialize)]
 pub(crate) struct RegistryParametersView {
     epoch_size_sec: u64,

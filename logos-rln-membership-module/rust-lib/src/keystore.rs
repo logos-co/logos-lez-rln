@@ -45,7 +45,6 @@ use sha3::{Digest, Keccak256};
 use zeroize::Zeroizing;
 
 use crate::registry_id::{bytes_to_hex, hex_to_vec};
-use crate::store::MembershipMeta;
 
 pub(crate) const KEYSTORE_FILE: &str = "rln_keystore.json";
 /// PBKDF2 rounds for envelopes THIS module writes — the nwaku ecosystem
@@ -102,6 +101,98 @@ impl Default for KeystoreFile {
 pub(crate) struct KeystoreEntry {
     pub(crate) crypto: CryptoEnvelope,
     pub(crate) membership: MembershipMeta,
+}
+
+/// The module-local lifecycle state, persisted as `MembershipMeta.state` and
+/// each `StateChange.state`. `#[serde(rename_all = "snake_case")]` makes each
+/// variant serialize to the EXACT wire string logos-rln-module
+/// `rln_core::membership_status` returns over the provider wire
+/// (`GracePeriod → "grace_period"`, the rest 1:1) — the same strings that
+/// travel through the reply views. The two crates are deliberately decoupled
+/// (no shared type — this crate has no rln-layouts dep); the
+/// `membership_state_wire_strings` test is the single tested anchor for the
+/// contract. Persistence is STRICT: there is no `#[serde(other)]`, so a stray
+/// persisted string loud-fails deserialize rather than silently degrading —
+/// every in-crate write goes through a known variant.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MembershipState {
+    Unknown,
+    Pending,
+    Failed,
+    Active,
+    GracePeriod,
+    Expired,
+    Erased,
+}
+
+impl MembershipState {
+    /// The usable ("selectable") states: a membership that can currently back
+    /// a proof — the one predicate selection, scope resolution, and the quota
+    /// read all share.
+    pub(crate) fn is_usable(self) -> bool {
+        matches!(self, Self::Active | Self::GracePeriod)
+    }
+
+    /// The live states (spec): a membership that blocks a new registration for
+    /// its scope — usable, or still awaiting confirmation. Terminal states
+    /// (failed, expired, erased, unknown) never block a fresh registration.
+    pub(crate) fn is_live(self) -> bool {
+        matches!(self, Self::Pending) || self.is_usable()
+    }
+
+    /// Ever observed on the registry — the "was Active, now gone → erased"
+    /// removal signal's building block (see `store::merge_state`). Called
+    /// cross-module from `store::has_been_active`, hence `pub(crate)`.
+    pub(crate) fn is_active_like(self) -> bool {
+        matches!(self, Self::Active | Self::GracePeriod | Self::Expired | Self::Erased)
+    }
+}
+
+/// Plaintext-safe sidecar metadata stored NEXT TO the crypto envelope.
+/// `registry_id` + `identity_commitment` are tamper-bound by the entry's
+/// membership_hash key (recomputed at load) and duplicated inside the
+/// ciphertext; the rest are self-healing caches of registry state.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct MembershipMeta {
+    /// Per-application `message_id` allocation, one row per active
+    /// `(rln_identifier, current epoch)`. Plaintext-safe counters; persisted
+    /// with the sidecar so a restart never reissues a spent slot.
+    /// Omitted from older files (serde default = empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) allocations: Vec<crate::rate_limit::EpochAllocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failed_reason: Option<String>,
+    pub(crate) identity_commitment: String,
+    /// Provisional while pending (pre-submit estimate); authoritative after
+    /// the pending→active re-read (spec MUST).
+    pub(crate) leaf_index: u64,
+    pub(crate) rate_limit: u64,
+    pub(crate) registry_id: String,
+    /// Whether a `failed` state is worth retrying (spec: a failed submission
+    /// SHALL report whether it is retryable). `None` outside the failed
+    /// state (never set, or cleared on the next successful observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retryable: Option<bool>,
+    /// The rln_identifier of the scope that REGISTERED this membership —
+    /// register's per-scope idempotency key (spec: "idempotent for a scope").
+    /// Local bookkeeping only: the membership itself carries no application
+    /// association and its hash excludes this (Appendix B). Empty on records
+    /// from before this field existed — treated as matching ANY scope, so a
+    /// legacy membership keeps backing every application on its registry.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) rln_identifier: String,
+    pub(crate) state: MembershipState,
+    pub(crate) state_history: Vec<StateChange>,
+    pub(crate) submitted_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tx_result: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct StateChange {
+    pub(crate) at: u64,
+    pub(crate) state: MembershipState,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -241,8 +332,10 @@ pub(crate) fn load(dir: &Path) -> KeystoreFile {
         Err(e) => {
             let ts = crate::now_unix();
             let bad = dir.join(format!("{KEYSTORE_FILE}.bad.{ts}"));
-            eprintln!("keystore: unparseable ({e}); moving aside to {}", bad.display());
-            let _ = fs::rename(&path, &bad);
+            eprintln!("keystore: unparseable ({e}); attempting to move aside to {}", bad.display());
+            if let Err(re) = fs::rename(&path, &bad) {
+                eprintln!("keystore: quarantine rename failed ({re}); bad file left in place");
+            }
             KeystoreFile::default()
         }
     }

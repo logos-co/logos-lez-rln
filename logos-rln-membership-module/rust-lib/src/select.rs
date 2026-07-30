@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::store::{MembershipMeta, ST_ACTIVE, ST_GRACE};
+use crate::store::MembershipRecord;
 use crate::{lock, ApiError, ErrorKind};
 
 pub(crate) enum Selector {
@@ -53,22 +53,18 @@ pub(crate) fn parse_selector(selector_json: &str) -> Result<Selector, ApiError> 
 /// need not survive a restart (any starting point is fair).
 static ROUND_ROBIN: Mutex<Option<HashMap<(String, String), String>>> = Mutex::new(None);
 
-fn usable(state: &str) -> bool {
-    state == ST_ACTIVE || state == ST_GRACE
-}
-
-/// Resolve the record to use. `records` is the registry's full local list
-/// (hash, meta, quarantined); `scope` = (canonical registry_id,
+/// Resolve the record to use. `records` is the registry's full local list of
+/// [`MembershipRecord`]s; `scope` = (canonical registry_id,
 /// lowercase rln_identifier hex).
 pub(crate) fn select_hash(
-    records: &[(String, MembershipMeta, bool)],
+    records: &[MembershipRecord],
     scope: (&str, &str),
     selector: &Selector,
 ) -> Result<String, ApiError> {
     let mut candidates: Vec<(&str, u64)> = records
         .iter()
-        .filter(|(_, meta, quarantined)| !quarantined && usable(&meta.state))
-        .map(|(hash, meta, _)| (hash.as_str(), meta.rate_limit))
+        .filter(|r| !r.quarantined && r.meta.state.is_usable())
+        .map(|r| (r.hash.as_str(), r.meta.rate_limit))
         .collect();
     // Hash order makes every strategy deterministic and churn-stable.
     candidates.sort_by(|a, b| a.0.cmp(b.0));
@@ -130,12 +126,12 @@ pub(crate) fn select_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{ST_EXPIRED, ST_FAILED, ST_PENDING};
+    use crate::store::{MembershipMeta, MembershipState};
 
-    fn record(hash: &str, state: &str, rate: u64, quarantined: bool) -> (String, MembershipMeta, bool) {
-        (
-            hash.to_string(),
-            MembershipMeta {
+    fn record(hash: &str, state: MembershipState, rate: u64, quarantined: bool) -> MembershipRecord {
+        MembershipRecord {
+            hash: hash.to_string(),
+            meta: MembershipMeta {
                 allocations: Vec::new(),
                 failed_reason: None,
                 identity_commitment: "11".repeat(32),
@@ -144,13 +140,13 @@ mod tests {
                 registry_id: "logos:local:aa".to_string(),
                 retryable: None,
                 rln_identifier: String::new(),
-                state: state.to_string(),
+                state,
                 state_history: vec![],
                 submitted_at: 0,
                 tx_result: None,
             },
             quarantined,
-        )
+        }
     }
 
     const SCOPE: (&str, &str) = ("logos:local:aa", "deadbeef");
@@ -158,10 +154,10 @@ mod tests {
     #[test]
     fn only_usable_states_are_candidates() {
         let records = vec![
-            record("a1", ST_PENDING, 300, false),
-            record("b2", ST_FAILED, 300, false),
-            record("c3", ST_EXPIRED, 300, false),
-            record("d4", ST_ACTIVE, 300, true), // quarantined
+            record("a1", MembershipState::Pending, 300, false),
+            record("b2", MembershipState::Failed, 300, false),
+            record("c3", MembershipState::Expired, 300, false),
+            record("d4", MembershipState::Active, 300, true), // quarantined
         ];
         let err = select_hash(&records, SCOPE, &Selector::None).unwrap_err();
         assert_eq!(err.kind, ErrorKind::NoUsableMembership);
@@ -169,12 +165,12 @@ mod tests {
 
     #[test]
     fn sole_candidate_is_returned_multiple_require_selector() {
-        let one = vec![record("a1", ST_ACTIVE, 300, false)];
+        let one = vec![record("a1", MembershipState::Active, 300, false)];
         assert_eq!(select_hash(&one, SCOPE, &Selector::None).unwrap(), "a1");
 
         let two = vec![
-            record("a1", ST_ACTIVE, 300, false),
-            record("b2", ST_GRACE, 300, false),
+            record("a1", MembershipState::Active, 300, false),
+            record("b2", MembershipState::GracePeriod, 300, false),
         ];
         let err = select_hash(&two, SCOPE, &Selector::None).unwrap_err();
         assert_eq!(err.kind, ErrorKind::AmbiguousSelection);
@@ -183,8 +179,8 @@ mod tests {
     #[test]
     fn by_hash_hits_usable_and_misses_everything_else() {
         let records = vec![
-            record("a1", ST_ACTIVE, 300, false),
-            record("b2", ST_FAILED, 300, false),
+            record("a1", MembershipState::Active, 300, false),
+            record("b2", MembershipState::Failed, 300, false),
         ];
         assert_eq!(
             select_hash(&records, SCOPE, &Selector::ByHash("a1".into())).unwrap(),
@@ -197,9 +193,9 @@ mod tests {
     #[test]
     fn highest_rate_limit_with_lowest_hash_tie_break() {
         let records = vec![
-            record("c3", ST_ACTIVE, 500, false),
-            record("a1", ST_ACTIVE, 500, false),
-            record("b2", ST_ACTIVE, 200, false),
+            record("c3", MembershipState::Active, 500, false),
+            record("a1", MembershipState::Active, 500, false),
+            record("b2", MembershipState::Active, 200, false),
         ];
         assert_eq!(
             select_hash(&records, SCOPE, &Selector::HighestRateLimit).unwrap(),
@@ -210,9 +206,9 @@ mod tests {
     #[test]
     fn round_robin_rotates_per_scope_and_survives_churn() {
         let records = vec![
-            record("a1", ST_ACTIVE, 300, false),
-            record("b2", ST_ACTIVE, 300, false),
-            record("c3", ST_ACTIVE, 300, false),
+            record("a1", MembershipState::Active, 300, false),
+            record("b2", MembershipState::Active, 300, false),
+            record("c3", MembershipState::Active, 300, false),
         ];
         let scope_x = ("logos:local:aa", "aaaa1111");
         let scope_y = ("logos:local:aa", "bbbb2222");
@@ -223,8 +219,8 @@ mod tests {
         assert_eq!(select_hash(&records, scope_y, &Selector::RoundRobin).unwrap(), "a1");
         // Candidate churn: b2 vanishes while the cursor sits on it.
         let churned = vec![
-            record("a1", ST_ACTIVE, 300, false),
-            record("c3", ST_ACTIVE, 300, false),
+            record("a1", MembershipState::Active, 300, false),
+            record("c3", MembershipState::Active, 300, false),
         ];
         assert_eq!(select_hash(&churned, scope_x, &Selector::RoundRobin).unwrap(), "c3");
         assert_eq!(select_hash(&churned, scope_x, &Selector::RoundRobin).unwrap(), "a1");

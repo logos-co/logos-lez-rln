@@ -12,6 +12,12 @@
 //! superseded run after that one read and exits without ever duplicating a
 //! respawned worker.
 //!
+//! Layering: this supervisor OWNS the maintenance loop bodies — `poller::
+//! run_loop` and `roots::run_loop` run under it — yet those modules call back
+//! into `wait_tick`/`is_stopped`/`ensure_*` here. That mutual reference is
+//! the deliberate shape (the supervisor owns the loops; each loop owns its
+//! work), not a layering bug to paper over with another indirection layer.
+//!
 //! Spawn permission: a worker may be spawned iff the supervisor is not
 //! `Stopped`. Registration polling and root tracking legitimately start
 //! workers before any `start()` (`NeverStarted` permits it), but nothing may

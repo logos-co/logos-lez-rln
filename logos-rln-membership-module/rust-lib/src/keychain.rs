@@ -320,7 +320,7 @@ mod tests {
                 registry_id: format!("logos:local:{}", "ab".repeat(32)),
                 retryable: None,
                 rln_identifier: String::new(),
-                state: "active".to_string(),
+                state: store::MembershipState::Active,
                 state_history: vec![],
                 submitted_at: 1,
                 tx_result: None,

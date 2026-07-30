@@ -197,6 +197,14 @@ pub(crate) fn reply_result(
     result.map_err(|e| e.body().to_string())
 }
 
+/// Serialize a typed reply view (`views.rs`) into its wire `Value`. These
+/// structs are infallible to serialize, but funnelling any failure into one
+/// `internal` error is clearer than repeating `.unwrap_or(Null)` at every
+/// reply site — a reply that failed to serialize is a bug, not a null value.
+fn ok_json<T: serde::Serialize>(v: T) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(v).map_err(|e| ApiError::internal(&format!("serialize reply: {e}")))
+}
+
 /// Poison-recovering lock (the sibling module's helper): a poisoned mutex
 /// here is a bug elsewhere, not a reason to wedge every future call.
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -249,6 +257,15 @@ fn parse_registry(raw: &str) -> Result<registry_id::CanonicalRegistryId, ApiErro
     registry_id::parse(raw).map_err(|e| ApiError::new(ErrorKind::InvalidArgument, &e))
 }
 
+/// The registry's local records — the store read every scope-taking handler
+/// opens with. Folds the `with_store` + `.canonical` deref the six call sites
+/// otherwise repeat verbatim.
+fn records_for_registry(
+    registry: &registry_id::CanonicalRegistryId,
+) -> Result<Vec<store::MembershipRecord>, ApiError> {
+    store::with_store(|s| Ok(s.records_for(&registry.canonical)))
+}
+
 /// The shared head of every scope-taking handler: canonicalize the
 /// registry_id and parse/normalize the 32-byte rln_identifier. Every call
 /// passes its scope explicitly (spec: the Module holds no default) — an
@@ -279,16 +296,16 @@ fn scope_matches(meta: &store::MembershipMeta, rln_id_hex: &str) -> bool {
 /// the registry's others for this application); otherwise every record backs
 /// it.
 fn scope_candidates(
-    records: &[(String, store::MembershipMeta, bool)],
+    records: &[store::MembershipRecord],
     rln_id_hex: &str,
-) -> Vec<(String, store::MembershipMeta, bool)> {
+) -> Vec<store::MembershipRecord> {
     let has_usable_match = records
         .iter()
-        .any(|(_, m, q)| !q && scope_matches(m, rln_id_hex) && store::is_usable(&m.state));
+        .any(|r| !r.quarantined && scope_matches(&r.meta, rln_id_hex) && r.meta.state.is_usable());
     if has_usable_match {
         records
             .iter()
-            .filter(|(_, m, _)| scope_matches(m, rln_id_hex))
+            .filter(|r| scope_matches(&r.meta, rln_id_hex))
             .cloned()
             .collect()
     } else {
@@ -405,7 +422,7 @@ fn delegated_submit_callback(hash: String) -> provider::RegisterCallback {
                 Ok(reply) => match serde_json::from_str::<serde_json::Value>(reply) {
                     Ok(v) => {
                         if let Some(e) = v.get("error") {
-                            m.state = store::ST_FAILED.to_string();
+                            m.state = store::MembershipState::Failed;
                             let msg =
                                 e.as_str().map(String::from).unwrap_or_else(|| e.to_string());
                             m.failed_reason = Some(format!("gifter_failed: {msg}"));
@@ -470,8 +487,12 @@ fn register_impl(
     // "attestation"?:"<hex>"}. "delegated" selects the path: "true" is
     // delegated, anything else (absent, "false", other) is the funded path.
     // Validated up front so a malformed request never mints a credential.
-    let opts =
-        serde_json::from_str::<serde_json::Value>(options_json).unwrap_or(serde_json::Value::Null);
+    let opts = if options_json.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str::<serde_json::Value>(options_json)
+            .map_err(|e| ApiError::new(ErrorKind::InvalidArgument, &format!("options_json: {e}")))?
+    };
     let delegated = if flat_bool_option(&opts, "delegated")? {
         Some(DelegatedOptions {
             gifter_peer_id: opts
@@ -514,13 +535,13 @@ fn register_impl(
     // gets its own membership (dedicated budget bookkeeping, isolated
     // slashing blast radius); one membership can still back many
     // applications at proof time (see scope_candidates).
-    let records = store::with_store(|s| Ok(s.records_for(&registry.canonical)))?;
-    if let Some((hash, meta, _)) = records
+    let records = records_for_registry(&registry)?;
+    if let Some(rec) = records
         .iter()
-        .find(|(_, m, q)| !q && store::is_live(&m.state) && scope_matches(m, &rln_id_hex))
+        .find(|r| !r.quarantined && r.meta.state.is_live() && scope_matches(&r.meta, &rln_id_hex))
     {
-        let mismatch = meta.rate_limit != rate_limit;
-        return Ok(public_membership_json(hash, meta, false, mismatch));
+        let mismatch = rec.meta.rate_limit != rate_limit;
+        return Ok(public_membership_json(&rec.hash, &rec.meta, false, mismatch));
     }
 
     // Fast-fail a rate_limit outside the registry's bounds BEFORE minting a
@@ -571,7 +592,7 @@ fn register_impl(
         registry_id: registry.canonical.clone(),
         retryable: None,
         rln_identifier: rln_id_hex.clone(),
-        state: store::ST_PENDING.to_string(),
+        state: store::MembershipState::Pending,
         state_history: vec![],
         submitted_at: now_unix(),
         tx_result: None,
@@ -619,15 +640,13 @@ fn get_membership_state_impl(
     let prov = provider_of(&registry)?;
 
     // A missing store (no persistence path) degrades to no local records.
-    let records =
-        store::with_store(|s| Ok(s.records_for(&registry.canonical))).unwrap_or_default();
+    let records = records_for_registry(&registry).unwrap_or_default();
     let candidates: Vec<_> = scope_candidates(&records, &rln_id_hex)
         .into_iter()
-        .filter(|(_, _, q)| !*q)
+        .filter(|r| !r.quarantined)
         .collect();
     if candidates.is_empty() {
-        return Ok(serde_json::to_value(views::MembershipStateView::unknown(&registry.canonical))
-            .unwrap_or(serde_json::Value::Null));
+        return ok_json(views::MembershipStateView::unknown(&registry.canonical));
     }
     if candidates.len() > 1 {
         return Err(ApiError::new(
@@ -635,10 +654,10 @@ fn get_membership_state_impl(
             "multiple memberships back this scope; use get_memberships / select_membership",
         ));
     }
-    let (hash, meta, _) = &candidates[0];
+    let store::MembershipRecord { hash, meta, .. } = &candidates[0];
 
     let pm = prov.get_membership(&registry, &meta.identity_commitment)?;
-    let registry_state = if pm.registered { Some(pm.state.as_str()) } else { None };
+    let registry_state = if pm.registered { Some(pm.state) } else { None };
     let merged = store::merge_state(Some(meta), registry_state, now_unix());
 
     if merged != meta.state {
@@ -647,19 +666,19 @@ fn get_membership_state_impl(
         // costs the next reader a recompute — log it and move on.
         let persist = store::with_store(|s| {
             s.update(hash, |m| {
-                m.state = merged.clone();
+                m.state = merged;
                 if pm.registered {
                     // The pending→active re-read (spec MUST).
                     m.leaf_index = pm.leaf_index;
                     m.rate_limit = pm.rate_limit;
                     m.failed_reason = None;
                     m.retryable = None;
-                } else if merged == store::ST_FAILED {
+                } else if merged == store::MembershipState::Failed {
                     m.failed_reason = Some("confirmation_window_elapsed".to_string());
                     // Re-registration can be attempted (spec: a failed
                     // submission SHALL report whether it is retryable).
                     m.retryable = Some(true);
-                } else if merged == store::ST_ERASED {
+                } else if merged == store::MembershipState::Erased {
                     m.failed_reason = Some("removed_from_registry".to_string());
                 }
             })
@@ -667,7 +686,7 @@ fn get_membership_state_impl(
         if let Err(e) = persist {
             eprintln!("membership state persist: {}", e.message);
         } else if let Some((registry_id, rln_identifier, membership_hash, state, previous)) =
-            store::transition_event(hash, meta, &merged)
+            store::transition_event(hash, meta, merged)
         {
             // Outside with_store: the self-healing write above already
             // released the store lock (module docs: LIDL events section).
@@ -686,11 +705,11 @@ fn get_membership_state_impl(
     let view = views::MembershipStateView::resolved(
         hash,
         &registry.canonical,
-        &merged,
+        merged,
         leaf_index,
         rate_limit,
     );
-    Ok(serde_json::to_value(view).unwrap_or(serde_json::Value::Null))
+    ok_json(view)
 }
 
 /// Spec select(): resolve WHICH membership an application should prove with,
@@ -706,7 +725,7 @@ fn select_membership_impl(
     let (registry, _, rln_identifier_hex) = parse_scope(registry_id_raw, rln_identifier_hex)?;
     let selector = select::parse_selector(selector_json)?;
 
-    let records = store::with_store(|s| Ok(s.records_for(&registry.canonical)))?;
+    let records = records_for_registry(&registry)?;
     let hash = select::select_hash(
         &records,
         (&registry.canonical, &rln_identifier_hex),
@@ -714,8 +733,8 @@ fn select_membership_impl(
     )?;
     let meta = records
         .iter()
-        .find(|(h, _, _)| h == &hash)
-        .map(|(_, m, _)| m.clone())
+        .find(|r| r.hash == hash)
+        .map(|r| r.meta.clone())
         .ok_or_else(|| ApiError::internal("selected record vanished"))?;
     Ok(public_membership_json(&hash, &meta, false, false))
 }
@@ -724,10 +743,10 @@ fn get_memberships_impl(registry_id_raw: &str) -> Result<serde_json::Value, ApiE
     let registry = parse_registry(registry_id_raw)?;
     // No provider needed: listing LOCAL records is meaningful even for a
     // namespace this build can't reach.
-    let records = store::with_store(|s| Ok(s.records_for(&registry.canonical)))?;
+    let records = records_for_registry(&registry)?;
     let memberships: Vec<serde_json::Value> = records
         .iter()
-        .map(|(hash, meta, quarantined)| public_membership_json(hash, meta, *quarantined, false))
+        .map(|r| public_membership_json(&r.hash, &r.meta, r.quarantined, false))
         .collect();
     Ok(serde_json::json!({ "memberships": memberships }))
 }
@@ -839,8 +858,7 @@ fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
         }
     });
 
-    Ok(serde_json::to_value(views::StartReply::new(epoch_size_sec, max_epoch_gap, tracked))
-        .unwrap_or(serde_json::Value::Null))
+    ok_json(views::StartReply::new(epoch_size_sec, max_epoch_gap, tracked))
 }
 
 /// Spec stop(): halt the maintenance tasks for real. Sleeping workers wake
@@ -852,7 +870,7 @@ fn start_impl(config_json: &str) -> Result<serde_json::Value, ApiError> {
 /// counter keeps a detached straggler from ever duplicating one).
 fn stop_impl() -> Result<serde_json::Value, ApiError> {
     worker::stop();
-    Ok(serde_json::to_value(views::StopReply::new()).unwrap_or(serde_json::Value::Null))
+    ok_json(views::StopReply::new())
 }
 
 fn proof_error(e: proof::ProofError) -> ApiError {
@@ -912,7 +930,7 @@ fn generate_proof_impl(
     // fallback. Multiple candidates is the optional extension needing an
     // explicit selector; base generate_proof requires a single one
     // (AmbiguousSelection otherwise).
-    let records = store::with_store(|s| Ok(s.records_for(&registry.canonical)))?;
+    let records = records_for_registry(&registry)?;
     let hash = select::select_hash(
         &scope_candidates(&records, &rln_id_hex),
         (&registry.canonical, &rln_id_hex),
@@ -1049,10 +1067,7 @@ fn verify_proof_impl(
     let bound = rlp.external_nullifier();
     let matched_epoch = match resolve_key_epoch(rlp.epoch(), &bound, &rln_identifier, now_epoch) {
         Some(e) => e,
-        None => {
-            return Ok(serde_json::to_value(views::VerdictReply::verdict("invalid"))
-                .unwrap_or(serde_json::Value::Null))
-        }
+        None => return ok_json(views::VerdictReply::verdict("invalid")),
     };
 
     // Root window BEFORE any log touch: a cold/stale window is NOT_READY, never
@@ -1063,8 +1078,7 @@ fn verify_proof_impl(
     })?;
     if !proof::verify(&rlp, &signal, &window).map_err(proof_error)? {
         // Invalid proofs are NOT logged — only a validated nullifier counts.
-        return Ok(serde_json::to_value(views::VerdictReply::verdict("invalid"))
-            .unwrap_or(serde_json::Value::Null));
+        return ok_json(views::VerdictReply::verdict("invalid"));
     }
 
     let retain_floor = now_epoch.saturating_sub(epoch_gap());
@@ -1086,7 +1100,7 @@ fn verify_proof_impl(
             views::VerdictReply::rate_limit_violation(recovered_secret)
         }
     };
-    Ok(serde_json::to_value(view).unwrap_or(serde_json::Value::Null))
+    ok_json(view)
 }
 
 /// Spec get_epoch_quota(scope): the scope's current epoch index, its
@@ -1110,10 +1124,10 @@ fn get_epoch_quota_impl(
     // mixture across a rollover.
     let epoch_index = rate_limit::current_epoch(now_unix(), epoch_size()?);
 
-    let records = store::with_store(|s| Ok(s.records_for(&registry.canonical)))?;
+    let records = records_for_registry(&registry)?;
     let usable: Vec<_> = scope_candidates(&records, &rln_id_hex)
         .into_iter()
-        .filter(|(_, m, q)| !*q && store::is_usable(&m.state))
+        .filter(|r| !r.quarantined && r.meta.state.is_usable())
         .collect();
     if usable.is_empty() {
         return Err(ApiError::new(
@@ -1127,15 +1141,12 @@ fn get_epoch_quota_impl(
             "multiple memberships back this scope; use select_membership",
         ));
     }
-    let (hash, meta, _) = &usable[0];
+    let store::MembershipRecord { hash, meta, .. } = &usable[0];
 
     let remaining = store::with_store(|s| {
         Ok(s.remaining_budget(hash, &rln_id_hex, epoch_index, meta.rate_limit))
     })?;
-    Ok(
-        serde_json::to_value(views::EpochQuotaView::new(epoch_index, meta.rate_limit, remaining))
-            .unwrap_or(serde_json::Value::Null),
-    )
+    ok_json(views::EpochQuotaView::new(epoch_index, meta.rate_limit, remaining))
 }
 
 /// Registry parameters read (spec's optional extension): the
@@ -1157,7 +1168,7 @@ fn get_registry_parameters_impl(
 
     let bounds = prov.get_registry_bounds(&registry)?;
     let view = views::RegistryParametersView::from_bounds(epoch_size()?, &bounds);
-    Ok(serde_json::to_value(view).unwrap_or(serde_json::Value::Null))
+    ok_json(view)
 }
 
 // -------------------------------------------------------------------- module
@@ -1190,10 +1201,8 @@ impl LiblogosRlnMembershipModule for LogosRlnMembershipModuleImpl {
     }
 
     fn unlock_keystore(&mut self, mut password: String) -> String {
-        let result = store::with_store(|s| s.unlock(&password)).map(|count| {
-            serde_json::to_value(views::UnlockKeystoreReply::new(count as u64))
-                .unwrap_or(serde_json::Value::Null)
-        });
+        let result = store::with_store(|s| s.unlock(&password))
+            .and_then(|count| ok_json(views::UnlockKeystoreReply::new(count as u64)));
         password.zeroize();
         reply(result)
     }
@@ -1709,7 +1718,7 @@ mod tests {
                 registry_id: registry.clone(),
                 retryable: None,
                 rln_identifier: rln_id.clone(),
-                state: store::ST_ACTIVE.to_string(),
+                state: store::MembershipState::Active,
                 state_history: vec![],
                 submitted_at: now_unix(),
                 tx_result: None,
@@ -1833,7 +1842,7 @@ mod tests {
                 registry_id: reg.clone(),
                 retryable: None,
                 rln_identifier: rln_id_hex.clone(),
-                state: store::ST_ACTIVE.to_string(),
+                state: store::MembershipState::Active,
                 state_history: vec![],
                 submitted_at: now_unix(),
                 tx_result: None,
@@ -1884,16 +1893,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Frozen cross-crate wire contract: the registry-state consts MUST equal
-    // the exact strings logos-rln-module rln_core::membership_status returns.
-    // The crates are decoupled (no shared type), so this is the single tested
-    // anchor — if the sibling ever renames a state, this pin fails and forces
-    // a coordinated bump on both sides.
+    // Frozen cross-crate wire contract: every MembershipState variant MUST
+    // serialize to the exact string logos-rln-module rln_core::membership_status
+    // returns (and that travels through every reply view). The crates are
+    // decoupled (no shared type), so this is the single tested anchor — if the
+    // sibling ever renames a state, or the `rename_all` drifts, this pin fails
+    // and forces a coordinated bump on both sides. Exhaustive over all 7.
     #[test]
     fn membership_state_wire_strings() {
-        assert_eq!(store::ST_ACTIVE, "active");
-        assert_eq!(store::ST_GRACE, "grace_period");
-        assert_eq!(store::ST_EXPIRED, "expired");
+        assert_eq!(serde_json::to_value(store::MembershipState::Unknown).unwrap(), serde_json::json!("unknown"));
+        assert_eq!(serde_json::to_value(store::MembershipState::Pending).unwrap(), serde_json::json!("pending"));
+        assert_eq!(serde_json::to_value(store::MembershipState::Failed).unwrap(), serde_json::json!("failed"));
+        assert_eq!(serde_json::to_value(store::MembershipState::Active).unwrap(), serde_json::json!("active"));
+        assert_eq!(serde_json::to_value(store::MembershipState::GracePeriod).unwrap(), serde_json::json!("grace_period"));
+        assert_eq!(serde_json::to_value(store::MembershipState::Expired).unwrap(), serde_json::json!("expired"));
+        assert_eq!(serde_json::to_value(store::MembershipState::Erased).unwrap(), serde_json::json!("erased"));
     }
 
     #[test]
@@ -1981,7 +1995,7 @@ mod tests {
                 registry_id: reg_b.clone(),
                 retryable: None,
                 rln_identifier: "ef".repeat(32),
-                state: store::ST_ACTIVE.to_string(),
+                state: store::MembershipState::Active,
                 state_history: vec![],
                 submitted_at: now_unix(),
                 tx_result: None,
@@ -2058,7 +2072,7 @@ mod tests {
                 registry_id: reg_expired.clone(),
                 retryable: None,
                 rln_identifier: rln_id.clone(),
-                state: store::ST_EXPIRED.to_string(),
+                state: store::MembershipState::Expired,
                 state_history: vec![],
                 submitted_at: now_unix(),
                 tx_result: None,
@@ -2080,14 +2094,14 @@ mod tests {
             "no short-circuit — the fresh submit hits the dead transport: {out}"
         );
         let records = store::with_store(|s| Ok(s.records_for(&reg_expired))).unwrap();
-        let hashes: Vec<&str> = records.iter().map(|(h, _, _)| h.as_str()).collect();
+        let hashes: Vec<&str> = records.iter().map(|r| r.hash.as_str()).collect();
         assert_eq!(
             records.len(),
             2,
             "the expired record is retained AND a fresh one was minted: {hashes:?}"
         );
         assert!(
-            records.iter().any(|(h, m, _)| h != &expired_hash && m.state == store::ST_FAILED),
+            records.iter().any(|r| r.hash != expired_hash && r.meta.state == store::MembershipState::Failed),
             "a NEW credential (different membership_hash) was minted, then failed at the \
              dead transport: {hashes:?}"
         );
@@ -2106,7 +2120,7 @@ mod tests {
                 registry_id: reg_erased.clone(),
                 retryable: None,
                 rln_identifier: rln_id.clone(),
-                state: store::ST_ERASED.to_string(),
+                state: store::MembershipState::Erased,
                 state_history: vec![],
                 submitted_at: now_unix(),
                 tx_result: None,
@@ -2126,7 +2140,7 @@ mod tests {
         assert!(out.contains(r#""kind":"provider_failure""#), "got: {out}");
         let records = store::with_store(|s| Ok(s.records_for(&reg_erased))).unwrap();
         assert_eq!(records.len(), 2, "the erased record is retained AND a fresh one was minted");
-        assert!(records.iter().any(|(h, m, _)| h != &erased_hash && m.state == store::ST_FAILED));
+        assert!(records.iter().any(|r| r.hash != erased_hash && r.meta.state == store::MembershipState::Failed));
 
         store::reset_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2219,7 +2233,7 @@ mod tests {
                 registry_id: registry.clone(),
                 retryable: None,
                 rln_identifier: String::new(),
-                state: store::ST_ACTIVE.to_string(),
+                state: store::MembershipState::Active,
                 state_history: vec![],
                 submitted_at: now_unix(),
                 tx_result: None,
@@ -2272,7 +2286,7 @@ mod tests {
             registry_id: registry.clone(),
             retryable: Some(true),
             rln_identifier: rln_identifier.clone(),
-            state: store::ST_FAILED.to_string(),
+            state: store::MembershipState::Failed,
             state_history: vec![],
             submitted_at: 1_234_567_890,
             tx_result: Some("tx-result-blob".to_string()),
