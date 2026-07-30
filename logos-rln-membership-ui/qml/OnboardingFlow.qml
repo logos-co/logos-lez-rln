@@ -157,8 +157,6 @@ Item {
     // preview) by the time Component.onCompleted runs.
     Component.onCompleted: {
         flow.eventsArmed = M.armModuleEvent(flow.bridge, M.MEMBERSHIP_MODULE, M.MEMBERSHIP_STATE_CHANGED)
-        if (!flow.eventsArmed)
-            console.log("membership_state_changed: events not armed on this bridge — falling back to poll-only cadence")
     }
 
     // Fired by finish() when the user leaves the completed wizard.

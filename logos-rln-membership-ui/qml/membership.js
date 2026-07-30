@@ -183,9 +183,11 @@ var MEMBERSHIP_STATE_CHANGED = "membership_state_changed";
 // false when this host's bridge predates onModuleEvent — callers keep their
 // fallback polling either way, events only tighten the latency.
 function armModuleEvent(bridge, module, eventName) {
-    if (!bridge || typeof bridge.onModuleEvent !== "function")
-        return false;
-    return bridge.onModuleEvent(module, eventName) === true;
+    var armed = !!bridge && typeof bridge.onModuleEvent === "function"
+        && bridge.onModuleEvent(module, eventName) === true;
+    if (!armed)
+        console.log(eventName + ": events not armed on this bridge — falling back to poll-only cadence");
+    return armed;
 }
 
 // Decode a membership_state_changed payload (positional array) into a named

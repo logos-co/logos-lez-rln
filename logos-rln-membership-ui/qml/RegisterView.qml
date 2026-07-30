@@ -43,8 +43,6 @@ LogosScrollView {
 
     Component.onCompleted: {
         view.eventsArmed = M.armModuleEvent(view.bridge, M.MEMBERSHIP_MODULE, M.MEMBERSHIP_STATE_CHANGED)
-        if (!view.eventsArmed)
-            console.log("membership_state_changed: events not armed on this bridge — falling back to poll-only cadence")
     }
 
     function report(text, isError) {
