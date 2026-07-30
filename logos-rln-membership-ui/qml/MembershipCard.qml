@@ -104,7 +104,7 @@ Item {
         var cfg = M.registryConfigHex(registryId)
         card.pending = cfg === "" ? 1 : 2
         flow.callRetry(M.MEMBERSHIP_MODULE, "get_membership_state",
-               [registryId, commitment], function (r) {
+               [registryId, M.DEFAULT_RLN_ID], function (r) {
             if (!r.error) {
                 card.liveState = r.state || card.liveState
                 if (r.leaf_index !== undefined)

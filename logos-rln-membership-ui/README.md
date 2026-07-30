@@ -57,9 +57,8 @@ reference implementation `logos-package-manager-ui`):
 | GUI action | call |
 |---|---|
 | Unlock / lock keystore | `liblogos_rln_membership_module.unlock_keystore(password)` / `lock_keystore()` |
-| Generate identity | `liblogos_rln_module.generate_identity(seed_hex)` (spec: generation is the consumer's job) |
-| Register | `liblogos_rln_membership_module.register(registry_id, credential_json, rate_limit, options_json)` with `options_json = {"funding_holding_account_id": …}` |
-| Confirmation poll | `liblogos_rln_membership_module.get_membership_state(registry_id, commitment_hex)` every 10s until the pending window settles |
+| Register (generates the identity in-module) | `liblogos_rln_membership_module.register(registry_id, rln_identifier_hex, rate_limit, options_json)` with `options_json = {"funding_holding_account_id": …}`; the credential never leaves the module |
+| Confirmation poll | `liblogos_rln_membership_module.get_membership_state(registry_id, rln_identifier_hex)` every 10s until the pending window settles |
 | Memberships list | `liblogos_rln_membership_module.get_memberships(registry_id)` (public view, works locked) |
 | One-click wallet | `liblogos_rln_membership_module.provision_wallet_home({"sequencer_addr":…})` → wallet-home under the module's basecamp data dir, then `open` when `storage_exists`, else `create_new` + `save` |
 | Open / create wallet | `logos_execution_zone.open(config_path, storage_path)` / `create_new(config_path, storage_path, password)` + `save()` (create shows the mnemonic ONCE) |
@@ -139,5 +138,5 @@ nix run 'path:.' -- --modules-dir <dir with installed modules> \
 In basecamp: install this module's `.lgx` (plus the wallet, rln and
 membership `.lgx` bundles) through the package manager Modules view; the
 "RLN Membership" entry appears in the sidebar. Full flow: Wallet tab (open or
-create → sync → claim) → Register tab (unlock → generate identity →
+create → sync → claim) → Register tab (unlock →
 register; the funding field is pre-filled by the claim) → Memberships tab.

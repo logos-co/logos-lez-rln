@@ -1,7 +1,7 @@
 // Shared plumbing for the RLN membership GUI: logos-bridge reply parsing,
 // error rendering, and small formatting helpers. Wire shapes come from
 // rust-lib/liblogos_rln_membership_module.lidl (compact JSON, alphabetical
-// keys; failures {"error":{"kind":…,"message":…}}) and the sibling
+// keys; failures {"error":{"class":…,"kind":…,"message":…}}) and the sibling
 // liblogos_rln_module (""-on-error convention).
 .pragma library
 
@@ -26,6 +26,15 @@ var TESTNET_REGISTRY_ID =
 var RATE_LIMIT_MIN = 100;
 var RATE_LIMIT_MAX = 600;
 var RATE_LIMIT_DEFAULT = 300;
+
+// register / get_membership_state / select_membership take a MembershipScope
+// (registry_id + rln_identifier). This GUI is a management tool, not a specific
+// RLN application, so it passes a fixed default rln_identifier (a real
+// application generating proofs would pass its own 32-byte scope key). The
+// credential is generated INSIDE the module by register, which the GUI drives
+// without a client-side generate_identity step.
+var DEFAULT_RLN_ID =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 // The single UI-scale knob. The whole onboarding/status/detail surface is
 // laid out from Theme tokens (font sizes, spacing, radii) plus a handful of
@@ -68,7 +77,7 @@ var LIBP2P_NODE_CONFIG = {
 
 // libp2p_module's C++ methods return a StdLogosResult that marshals to `null`
 // through the QML bridge, so every libp2p call is relayed through
-// keycard_rln_module.libp2p_call (a module-to-module SDK call). It hands back the
+// rln_gifter_module.libp2p_call (a module-to-module SDK call). It hands back the
 // real {success,value,error} as a JSON string (bridge-double-encoded like other
 // tstr replies). Parse it as-is — NOT through parseReply, whose empty-"error"
 // rule would flag a successful libp2p reply (error:"") as a failure.
@@ -181,28 +190,6 @@ function errorText(err) {
     return kind + ": " + msg + (hint ? "\n" + hint : "");
 }
 
-// The gifter surfaces auth/dial failures as free-text in the error message
-// (e.g. "authentication failed: card already used"). Map the exact substrings
-// the gifter protocol emits to plain-language guidance; fall back to errorText.
-var GIFTER_ERROR_HINTS = [
-    ["card already used", "This Keycard has already claimed a membership from this provider."],
-    ["attestation CA is not trusted", "This provider doesn't recognize your Keycard."],
-    ["challenge signature does not verify", "The captured attestation didn't match this identity — re-tap your Keycard."],
-    ["attestation parse failed", "Couldn't read the card attestation — re-tap your Keycard."],
-    ["unsupported authentication_type", "This provider doesn't accept Keycard registration."],
-    ["No libp2p context", "The peer-to-peer node isn't running yet — try again in a moment."]
-];
-
-function gifterErrorText(err) {
-    var msg = (typeof err === "string") ? err
-            : (err && err.message) ? err.message
-            : (err && err.kind ? err.kind : "");
-    for (var i = 0; i < GIFTER_ERROR_HINTS.length; i++) {
-        if (msg.indexOf(GIFTER_ERROR_HINTS[i][0]) !== -1)
-            return GIFTER_ERROR_HINTS[i][1] + "\n(" + msg + ")";
-    }
-    return (typeof err === "string") ? msg : errorText(err);
-}
 
 function truncateHex(hex, head, tail) {
     if (!hex) return "";
@@ -211,21 +198,6 @@ function truncateHex(hex, head, tail) {
     return h.slice(0, head) + "…" + h.slice(h.length - tail);
 }
 
-function isHex32(s) {
-    var h = s.indexOf("0x") === 0 ? s.slice(2) : s;
-    return /^[0-9a-fA-F]{64}$/.test(h);
-}
-
-// UI-grade entropy only — Math.random is NOT a CSPRNG and the QML sandbox
-// offers nothing better. Fine for testnet demo identities; paste externally
-// generated entropy (e.g. `openssl rand -hex 32`) into the seed field for
-// anything that matters.
-function randomSeedHex() {
-    var s = "";
-    for (var i = 0; i < 64; i++)
-        s += "0123456789abcdef"[Math.floor(Math.random() * 16)];
-    return s;
-}
 
 function formatTimestamp(secs) {
     if (!secs) return "";
