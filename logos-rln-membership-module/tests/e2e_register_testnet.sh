@@ -406,8 +406,11 @@ esac
 
 SIGNAL_HEX=$(printf 'logos e2e signal' | to_hex)
 log "generate_proof over the registered membership"
+# timestamp: the consumer's Unix-seconds clock — the module derives the proof's
+# epoch from it (not its own clock). `date +%s` == now, so the epoch lands in
+# the start()'d window.
 PROOF_JSON=$(call_json liblogos_rln_membership_module generate_proof \
-    "$REGISTRY_ID" "$(argfile rlnid2 "$RLN_ID")" "$(argfile sig "$SIGNAL_HEX")" | jres | jval) || PROOF_JSON=""
+    "$REGISTRY_ID" "$(argfile rlnid2 "$RLN_ID")" "$(argfile sig "$SIGNAL_HEX")" "$(date +%s)" | jres | jval) || PROOF_JSON=""
 case "$PROOF_JSON" in
     *'"proof"'*'"nullifier"'*|*'"nullifier"'*'"proof"'*) ;;
     *) die "generate_proof failed: ${PROOF_JSON:-<empty>}" ;;

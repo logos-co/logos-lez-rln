@@ -203,19 +203,25 @@ module liblogos_rln_membership_module {
   ; payload (which must carry registry_id).
   method get_valid_roots(registry_id: tstr) -> tstr
 
-  ; Spec generate_proof(scope, signal). Scope = (registry_id, rln_identifier_hex
-  ; — the application's 32-byte scope key). signal_hex: the raw signal bytes as
-  ; hex; the circuit binds x = hash_to_field_le(signal). Picks the scope's sole
-  ; usable (active|grace_period) membership, decrypts its credential IN-MODULE
-  ; (requires an unlocked keystore — the secret never crosses this wire),
-  ; reserves and durably persists the next message_id, fetches the Merkle path,
-  ; and proves. Returns the RateLimitProof — {"proof":<canonical hex>,"root",
-  ; "external_nullifier","share_x","share_y","nullifier"} (all hex) — plus the
-  ; spent "message_id", the "epoch" (u64 index), and the "membership_hash".
-  ; Errors:
-  ; no_usable_membership, ambiguous_selection (multiple; select first), locked,
-  ; budget_exhausted (epoch rate limit spent), invalid_argument, transient.
-  method generate_proof(registry_id: tstr, rln_identifier_hex: tstr, signal_hex: tstr) -> result
+  ; Spec generate_proof(scope, signal, timestamp). Scope = (registry_id,
+  ; rln_identifier_hex — the application's 32-byte scope key). signal_hex: the
+  ; raw signal bytes as hex; the circuit binds x = hash_to_field_le(signal).
+  ; timestamp: the consumer's Unix-seconds clock reading — the SAME value it
+  ; stamps on the message. The proof's epoch derives from it (epoch =
+  ; timestamp / epoch_size_sec), NOT this module's clock, so the epoch always
+  ; agrees with the message timestamp a receiver validates against — the two
+  ; independent clocks can no longer disagree on an epoch boundary. Picks the
+  ; scope's sole usable (active|grace_period) membership, decrypts its
+  ; credential IN-MODULE (requires an unlocked keystore — the secret never
+  ; crosses this wire), reserves and durably persists the next message_id,
+  ; fetches the Merkle path, and proves. Returns the RateLimitProof —
+  ; {"proof":<canonical hex>,"root","external_nullifier","share_x","share_y",
+  ; "nullifier"} (all hex) — plus the spent "message_id", the "epoch" (u64
+  ; index), and the "membership_hash". Errors: no_usable_membership,
+  ; ambiguous_selection (multiple; select first), locked, budget_exhausted
+  ; (epoch rate limit spent), invalid_argument (bad signal/timestamp, or a
+  ; timestamp whose epoch is outside now ± max_epoch_gap), transient.
+  method generate_proof(registry_id: tstr, rln_identifier_hex: tstr, signal_hex: tstr, timestamp: tstr) -> result
 
   ; Spec verify_proof(scope, signal, proof). The message hot path: served
   ; entirely from the locally maintained valid-root window, NEVER reading the

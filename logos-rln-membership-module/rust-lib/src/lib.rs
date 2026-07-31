@@ -902,23 +902,47 @@ pub(crate) fn json_u8_array(v: &serde_json::Value, key: &str) -> Result<Vec<u8>,
         })
 }
 
-/// Spec generate_proof(scope, signal): pick the scope's usable membership,
-/// serve its Merkle path (the background-maintained cache when warm, an
-/// on-demand fetch on a miss), reserve + DURABLY PERSIST the next
+/// Spec generate_proof(scope, signal, timestamp): pick the scope's usable
+/// membership, serve its Merkle path (the background-maintained cache when
+/// warm, an on-demand fetch on a miss), reserve + DURABLY PERSIST the next
 /// message_id, and prove — the identity secret is decrypted and used
-/// entirely inside this call and never leaves the module. Returns the
-/// `RateLimitProof` plus the spent `message_id` and `epoch`.
+/// entirely inside this call and never leaves the module. The proof's epoch
+/// derives from the caller-supplied `timestamp` (Unix seconds — the value the
+/// consumer stamps on the message), NOT this module's clock, and must land
+/// within now ± `max_epoch_gap`. Returns the `RateLimitProof` plus the spent
+/// `message_id` and `epoch`.
 fn generate_proof_impl(
     registry_id_raw: &str,
     rln_identifier_hex: &str,
     signal_hex: &str,
+    timestamp: &str,
 ) -> Result<serde_json::Value, ApiError> {
     let (registry, rln_identifier, rln_id_hex) =
         parse_scope(registry_id_raw, rln_identifier_hex)?;
     let prov = provider_of(&registry)?;
     // Readiness gate FIRST (spec: not_ready before anything else): an
     // un-started module has no epoch base and must not mint a proof on one.
-    let epoch = rate_limit::current_epoch(now_unix(), epoch_size()?);
+    let size = epoch_size()?;
+    // The epoch derives from the CONSUMER's timestamp (Unix seconds), not this
+    // module's clock: it is the same value the consumer stamps on the message,
+    // so the receiver's timestamp->epoch check lines up by construction — the
+    // two independent clocks can no longer disagree on an epoch boundary.
+    let epoch = rate_limit::current_epoch(
+        timestamp.trim().parse::<u64>().map_err(|_| {
+            ApiError::new(ErrorKind::InvalidArgument, "timestamp must be a Unix-seconds integer")
+        })?,
+        size,
+    );
+    // ...and it must still fall within this module's acceptable window (now ±
+    // max_epoch_gap): a stale or future timestamp fails fast here instead of
+    // minting a proof the verifier would reject as not fresh.
+    let now_epoch = rate_limit::current_epoch(now_unix(), size);
+    if !(now_epoch.saturating_sub(epoch_gap())..=now_epoch + epoch_gap()).contains(&epoch) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidArgument,
+            "timestamp is outside the acceptable epoch window (now ± max_epoch_gap)",
+        ));
+    }
     let signal = registry_id::hex_to_vec(signal_hex)
         .ok_or_else(|| ApiError::new(ErrorKind::InvalidArgument, "signal must be hex"))?;
 
@@ -1293,8 +1317,14 @@ impl LiblogosRlnMembershipModule for LogosRlnMembershipModuleImpl {
         registry_id: String,
         rln_identifier_hex: String,
         signal_hex: String,
+        timestamp: String,
     ) -> Result<serde_json::Value, String> {
-        reply_result(generate_proof_impl(&registry_id, &rln_identifier_hex, &signal_hex))
+        reply_result(generate_proof_impl(
+            &registry_id,
+            &rln_identifier_hex,
+            &signal_hex,
+            &timestamp,
+        ))
     }
 
     fn verify_proof(
@@ -1433,7 +1463,8 @@ mod tests {
 
         let err = get_epoch_quota_impl(&registry, &rln_id_hex).unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotReady);
-        let err = generate_proof_impl(&registry, &rln_id_hex, signal_hex).unwrap_err();
+        let err = generate_proof_impl(&registry, &rln_id_hex, signal_hex, &now_unix().to_string())
+            .unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotReady);
         let err = verify_proof_impl(&registry, &rln_id_hex, signal_hex, "{}").unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotReady);
@@ -1801,7 +1832,8 @@ mod tests {
         start_impl(r#"{"epoch_size_sec": 600}"#).unwrap();
         let registry = format!("logos:local:{}", "cd".repeat(32));
         let rln_id_hex = "ef".repeat(32);
-        let err = generate_proof_impl(&registry, &rln_id_hex, "nothex").unwrap_err();
+        let err = generate_proof_impl(&registry, &rln_id_hex, "nothex", &now_unix().to_string())
+            .unwrap_err();
         assert_eq!(err.kind, ErrorKind::InvalidArgument);
     }
 
@@ -1862,7 +1894,8 @@ mod tests {
 
         // MISS: cold cache falls back to the registry — dead transport, so
         // provider_failure proves a real read was attempted.
-        let miss = generate_proof_impl(&reg, &rln_id_hex, signal_hex).unwrap_err();
+        let miss = generate_proof_impl(&reg, &rln_id_hex, signal_hex, &now_unix().to_string())
+            .unwrap_err();
         assert_eq!(
             miss.kind,
             ErrorKind::ProviderFailure,
@@ -1878,7 +1911,7 @@ mod tests {
             vec![0u8; proof::RLN_TREE_DEPTH],
             leaf_index,
         );
-        let out = generate_proof_impl(&reg, &rln_id_hex, signal_hex)
+        let out = generate_proof_impl(&reg, &rln_id_hex, signal_hex, &now_unix().to_string())
             .expect("a warm cache entry needs no registry call");
         assert!(out.get("proof").and_then(|v| v.as_str()).is_some(), "got: {out}");
         assert!(out.get("root").and_then(|v| v.as_str()).is_some(), "got: {out}");
@@ -1891,6 +1924,99 @@ mod tests {
 
         store::reset_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The proof's epoch follows the CALLER's timestamp, not the module clock:
+    // a timestamp one epoch in the past (still inside now ± max_epoch_gap)
+    // yields a proof bound to that past epoch — proving the derivation tracks
+    // the supplied timestamp rather than `now`.
+    #[test]
+    fn generate_proof_impl_derives_epoch_from_supplied_timestamp() {
+        let _serial = crate::lock(&store::TEST_STORE_LOCK);
+        let dir =
+            std::env::temp_dir().join(format!("rln-ms-epoch-src-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        store::init(dir.clone());
+        // start() BEFORE the membership exists → tracked is empty, so the
+        // warm-up is a harmless one-shot and never races the cache below.
+        start_impl(r#"{"epoch_size_sec": 600, "max_epoch_gap": 1}"#).unwrap();
+
+        let mut imp = LogosRlnMembershipModuleImpl;
+        assert!(imp.unlock_keystore("pw".into()).contains(r#""unlocked":true"#));
+
+        let reg = format!("logos:local:{}", "1a".repeat(32));
+        let rln_id_hex = "2b".repeat(32);
+        let (commitment_hex, secret_hex) = proof::generate_identity().expect("test identity");
+        let commitment = registry_id::hex_to_bytes32(&commitment_hex).unwrap();
+        let hash = registry_id::membership_hash(&reg, &commitment);
+        let leaf_index = 3u64;
+        store::with_store(|s| {
+            let meta = store::MembershipMeta {
+                allocations: Vec::new(),
+                failed_reason: None,
+                identity_commitment: commitment_hex.clone(),
+                leaf_index,
+                rate_limit: 300,
+                registry_id: reg.clone(),
+                retryable: None,
+                rln_identifier: rln_id_hex.clone(),
+                state: store::MembershipState::Active,
+                state_history: vec![],
+                submitted_at: now_unix(),
+                tx_result: None,
+            };
+            let credential = store::StoredCredential {
+                identity_commitment: commitment_hex.clone(),
+                identity_nullifier: None,
+                identity_secret_hash: secret_hex,
+                identity_trapdoor: None,
+                registry_id: reg.clone(),
+            };
+            s.insert(&hash, meta, &credential)
+        })
+        .unwrap();
+        path_cache::set_path_for_test(
+            &hash,
+            vec!["00".repeat(32); proof::RLN_TREE_DEPTH],
+            vec![0u8; proof::RLN_TREE_DEPTH],
+            leaf_index,
+        );
+
+        let size = epoch_size().unwrap();
+        let now_epoch = rate_limit::current_epoch(now_unix(), size);
+        // One epoch in the past — inside now ± max_epoch_gap (=1).
+        let ts = (now_unix() - size).to_string();
+        let out = generate_proof_impl(&reg, &rln_id_hex, "aa", &ts)
+            .expect("a past-but-in-window timestamp still proves");
+        assert_eq!(
+            out.get("epoch").and_then(|v| v.as_u64()),
+            Some(now_epoch - 1),
+            "epoch must derive from the supplied timestamp, not the module clock: {out}"
+        );
+
+        store::reset_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A timestamp whose epoch is outside now ± max_epoch_gap is rejected at
+    // generation (invalid_argument) before any membership is even selected —
+    // the sender-side guardrail that fails fast instead of minting a proof the
+    // verifier would reject as not fresh.
+    #[test]
+    fn generate_proof_impl_rejects_timestamp_outside_epoch_window() {
+        let _serial = crate::lock(&store::TEST_STORE_LOCK);
+        reset_config_for_test();
+        start_impl(r#"{"epoch_size_sec": 600, "max_epoch_gap": 1}"#).unwrap();
+        let registry = format!("logos:local:{}", "3c".repeat(32));
+        let rln_id_hex = "4d".repeat(32);
+        // 100 epochs in the past — far outside now ± 1.
+        let stale = (now_unix() - 100 * 600).to_string();
+        let err = generate_proof_impl(&registry, &rln_id_hex, "aa", &stale).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidArgument);
+        assert!(err.message.contains("window"), "got: {}", err.message);
+        // Leave CONFIG set (per the suite convention): a trailing reset would
+        // strand another serialized test that reads epoch_size() from ambient
+        // config with NOT_READY.
     }
 
     // Frozen cross-crate wire contract: every MembershipState variant MUST

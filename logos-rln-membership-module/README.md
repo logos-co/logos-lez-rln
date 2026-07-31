@@ -28,7 +28,7 @@ JSON replies; `scope` = the `registry_id` + `rln_identifier_hex` arg pair):
 | `start(config)` / `stop()` | `start(config_json)` / `stop()` |
 | `register(scope, rate_limit, options)` | `register(registry_id, rln_identifier_hex, rate_limit, options_json)` |
 | `get_membership_state(scope)` | `get_membership_state(registry_id, rln_identifier_hex)` |
-| `generate_proof(scope, signal)` | `generate_proof(registry_id, rln_identifier_hex, signal_hex)` |
+| `generate_proof(scope, signal, timestamp)` | `generate_proof(registry_id, rln_identifier_hex, signal_hex, timestamp)` |
 | `verify_proof(scope, signal, proof)` | `verify_proof(registry_id, rln_identifier_hex, signal_hex, proof_json)` |
 | `get_epoch_quota(scope)` | `get_epoch_quota(registry_id, rln_identifier_hex)` |
 | registry parameters read (optional ext.) | `get_registry_parameters(registry_id, rln_identifier_hex)` |
