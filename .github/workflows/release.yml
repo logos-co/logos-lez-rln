@@ -1,0 +1,221 @@
+name: release
+
+# Manual, idempotent release of the RLN module catalog. Builds each releasable
+# module's multi-platform `.lgx` (the PORTABLE bundle), aggregates them into a
+# self-hosted catalog (index.json + logos-repo.json via tools/catalog-gen.py),
+# and publishes it to the rolling `index` GitHub release in THIS repo. Clients
+# install by adding `<repo>/releases/download/index/logos-repo.json` in the
+# Basecamp package manager.
+#
+# Why not the upstream logos-modules-release-action? It builds each module with
+# a clean git-tree `nix build .#lgx-portable` and no pre-step. Our two Rust
+# modules keep their SDK (+ generated scaffold) gitignored and build via
+# `nix build path:...#lgx-portable` after a staging/codegen step — so we wire
+# our own build here and reuse tools/catalog-gen.py for the (identical) catalog
+# contract. Staging per module: logos-rln-module -> stage-sources.sh (rsyncs a
+# pinned SDK); logos-rln-membership-module -> `nix run .#generate` (codegens the
+# scaffold + stages the SDK, exactly as its own CI does); the UI is pure QML.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild + republish modules whose <name>-<version> is already in the index."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# One release run at a time — several would race the shared `index` release's
+# asset uploads. Queue rather than cancel so an in-flight publish finishes.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  INDEX_TAG: index
+  BASE_URL: https://github.com/${{ github.repository }}/releases/download/index
+
+jobs:
+  # Decide which modules actually need building: skip any whose
+  # <name>-<version>.lgx is already an asset on the rolling index release
+  # (unless `force`). The expensive Nix build only runs for moved versions.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      to_build: ${{ steps.decide.outputs.to_build }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          published="$(gh release view "$INDEX_TAG" --repo "$GH_REPO" \
+                        --json assets -q '.assets[].name' 2>/dev/null || true)"
+          build=()
+          for dir in logos-rln-module logos-rln-membership-module logos-rln-membership-ui; do
+            name="$(jq -r .name "$dir/metadata.json")"
+            ver="$(jq -r .version "$dir/metadata.json")"
+            if [ "$FORCE" != "true" ] && grep -qxF "${name}-${ver}.lgx" <<< "$published"; then
+              echo "::notice::${name}-v${ver} already published — skip build"
+            else
+              build+=("$dir")
+            fi
+          done
+          joined="$(IFS=,; echo "${build[*]:-}")"
+          echo "to_build=$joined" >> "$GITHUB_OUTPUT"
+          echo "will build: ${joined:-<none>}"
+
+  # One .lgx per (module, variant). fail-fast:false so a variant a module's
+  # flake can't produce doesn't sink the others — the publish job merges
+  # whatever variants succeeded.
+  build:
+    needs: plan
+    if: needs.plan.outputs.to_build != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: darwin-arm64
+            runs-on: macos-latest
+          - variant: linux-amd64
+            runs-on: ubuntu-latest
+          - variant: linux-arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      # Sets up Nix + the Logos attic cache (the heavy zerokit build needs it).
+      # If a runner family isn't supported here, that variant fails and the
+      # others still publish (fail-fast:false) — swap to the DeterminateSystems
+      # installer for that runner if it becomes a problem.
+      - name: Setup Nix and Logos cache
+        uses: logos-co/setup-nix-cache-action@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+
+      - name: Build portable .lgx (${{ matrix.variant }})
+        shell: bash
+        env:
+          TO_BUILD: ${{ needs.plan.outputs.to_build }}
+        run: |
+          set -euo pipefail
+          mkdir -p _artifacts
+          IFS=',' read -ra mods <<< "$TO_BUILD"
+          for dir in "${mods[@]}"; do
+            [ -n "$dir" ] || continue
+            echo "== staging $dir =="
+            case "$dir" in
+              logos-rln-module)
+                ( cd "$dir" && bash stage-sources.sh ) ;;
+              logos-rln-membership-module)
+                nix run "path:./$dir#generate" -L ;;
+              logos-rln-membership-ui)
+                : ;;  # pure QML — no staging
+              *)
+                echo "::error::unknown module $dir"; exit 1 ;;
+            esac
+            echo "== building $dir#lgx-portable =="
+            out="$(nix build "path:./$dir#lgx-portable" --no-link --print-out-paths -L)"
+            lgx="$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)"
+            [ -n "$lgx" ] || { echo "::error::no .lgx produced for $dir"; exit 1; }
+            name="$(jq -r .name "$dir/metadata.json")"
+            cp "$lgx" "_artifacts/${name}-${{ matrix.variant }}.lgx"
+            echo "  -> _artifacts/${name}-${{ matrix.variant }}.lgx"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lgx-${{ matrix.variant }}
+          path: _artifacts/*.lgx
+          if-no-files-found: error
+
+  # Merge each module's per-variant bundles into one multi-platform .lgx,
+  # regenerate the catalog, and (re)upload it to the rolling index release.
+  publish:
+    needs: [plan, build]
+    # Run even when some variants failed (partial multi-platform is fine) or the
+    # build job was skipped entirely (everything already published -> refresh).
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Nix and Logos cache
+        uses: logos-co/setup-nix-cache-action@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+
+      # lgx (merge / verify) is not in nixpkgs — build it from logos-package.
+      - name: Set up lgx CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix build github:logos-co/logos-package#lgx --out-link "$RUNNER_TEMP/lgx-tool"
+          echo "$RUNNER_TEMP/lgx-tool/bin" >> "$GITHUB_PATH"
+
+      - name: Download per-variant bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: _per-variant
+          pattern: lgx-*
+        continue-on-error: true # no artifacts when the build job was skipped
+
+      - name: Merge variants + build the catalog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p _merged
+          for dir in logos-rln-module logos-rln-membership-module logos-rln-membership-ui; do
+            name="$(jq -r .name "$dir/metadata.json")"
+            ver="$(jq -r .version "$dir/metadata.json")"
+            out="_merged/${name}-${ver}.lgx"
+            mapfile -t parts < <(find _per-variant -type f -name "${name}-*.lgx" 2>/dev/null || true)
+            if [ "${#parts[@]}" -gt 1 ]; then
+              lgx merge "${parts[@]}" -o "$out" -y
+            elif [ "${#parts[@]}" -eq 1 ]; then
+              cp "${parts[0]}" "$out"          # only one variant built
+            else
+              # Not rebuilt this run — carry the already-published bundle forward
+              # so the regenerated index keeps listing it.
+              gh release download "$INDEX_TAG" --repo "$GH_REPO" -p "${name}-${ver}.lgx" -D _merged \
+                || { echo "::error::${name}-${ver}.lgx neither built nor already published"; exit 1; }
+            fi
+            lgx verify "$out"
+          done
+
+          python3 tools/catalog-gen.py \
+            --files-dir _merged \
+            --base-url "$BASE_URL" \
+            --out dist/catalog \
+            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Publish to the rolling index release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$INDEX_TAG" --repo "$GH_REPO" >/dev/null 2>&1 \
+            || gh release create "$INDEX_TAG" --repo "$GH_REPO" \
+                 --title "Module catalog" \
+                 --notes "Self-hosted Logos module catalog (rolling). Add ${BASE_URL}/logos-repo.json in the Basecamp package manager."
+          gh release upload "$INDEX_TAG" --repo "$GH_REPO" --clobber \
+            dist/catalog/logos-repo.json \
+            dist/catalog/index.json \
+            dist/catalog/files/*.lgx
+          echo "Published. Clients add: ${BASE_URL}/logos-repo.json"
