@@ -50,13 +50,16 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/lgx"
 
 # The two Rust modules build from a gitignored staged SDK copy (not in a fresh
-# clone). Stage it on demand so this works straight from `git clone`.
-for m in logos-rln-module logos-rln-membership-module; do
-  if [ ! -d "${REPO_ROOT}/${m}/logos-rust-sdk-src" ]; then
-    echo "== Staging sources for ${m} =="
-    bash "${REPO_ROOT}/${m}/stage-sources.sh"
-  fi
-done
+# clone). Stage it on demand so this works straight from `git clone`. Each
+# module stages differently: logos-rln-module has a stage-sources.sh; the
+# membership module has none — it codegens its scaffold + stages the SDK via
+# `nix run .#generate` (exactly as its own CI does).
+if [ ! -d "${REPO_ROOT}/logos-rln-module/logos-rust-sdk-src" ]; then
+  echo "== Staging sources for logos-rln-module =="
+  bash "${REPO_ROOT}/logos-rln-module/stage-sources.sh"
+fi
+echo "== Staging sources for logos-rln-membership-module (codegen) =="
+nix run "path:${REPO_ROOT}/logos-rln-membership-module#generate" -L
 
 echo "== Building portable .lgx bundles =="
 for sub in logos-rln-module logos-rln-membership-module logos-rln-membership-ui; do

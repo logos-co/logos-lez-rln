@@ -117,11 +117,16 @@ fn ensure(slot: fn(&mut Supervisor) -> &mut Slot, name: &'static str, body: fn(u
 }
 
 /// Spawn a named worker of generation `gen`, wrapped in the exit epilogue
-/// (done flag + generation-scoped `running` decrement + wake). The decrement
+/// (generation-scoped `running` decrement + done flag + wake). The decrement
 /// is skipped for a worker whose generation is no longer current: a
 /// `stop()`/reset bumps the generation only once its workers are already
 /// accounted for, so a superseded straggler exiting later must not disturb
 /// the count a fresh run is now keeping.
+///
+/// The `done` flag is set LAST — only after the worker has released SUP — so a
+/// reaper that joins a `done` slot WHILE HOLDING SUP can never block on the
+/// worker still trying to acquire SUP. (Setting it before the SUP-locked tail
+/// deadlocks: the reaper holds SUP and joins; the worker parks on SUP.)
 fn spawn_into(
     name: &'static str,
     gen: u64,
@@ -133,12 +138,16 @@ fn spawn_into(
         .name(name.into())
         .spawn(move || {
             body();
-            done_in.store(true, Ordering::SeqCst);
-            let mut sup = crate::lock(&SUP);
-            if sup.generation == gen {
-                sup.running = sup.running.saturating_sub(1);
+            {
+                let mut sup = crate::lock(&SUP);
+                if sup.generation == gen {
+                    sup.running = sup.running.saturating_sub(1);
+                }
             }
-            drop(sup);
+            // Past the SUP section: the flag now truthfully means "instant
+            // join" for a reaper holding SUP. Only the wake — which needs no
+            // lock — and the thread's own teardown remain.
+            done_in.store(true, Ordering::SeqCst);
             CVAR.notify_all();
         })
         .expect("spawn worker thread");

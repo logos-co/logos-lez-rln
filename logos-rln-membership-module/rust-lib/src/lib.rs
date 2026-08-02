@@ -401,7 +401,7 @@ fn funded_submit_callback(hash: String) -> provider::RegisterCallback {
                         }
                     }
                 }
-                Err(e) => m.mark_submit_failed(&e.message, is_retryable_submit_error(e)),
+                Err(e) => m.record_async_submit_error(&e.message, is_retryable_submit_error(e)),
             })
         });
         if let Err(e) = update {
@@ -422,10 +422,17 @@ fn delegated_submit_callback(hash: String) -> provider::RegisterCallback {
                 Ok(reply) => match serde_json::from_str::<serde_json::Value>(reply) {
                     Ok(v) => {
                         if let Some(e) = v.get("error") {
-                            m.state = store::MembershipState::Failed;
-                            let msg =
-                                e.as_str().map(String::from).unwrap_or_else(|| e.to_string());
-                            m.failed_reason = Some(format!("gifter_failed: {msg}"));
+                            // A late gifter rejection must not overwrite a state
+                            // the poller already confirmed from the registry
+                            // (authoritative). Only a still-pending record fails.
+                            if m.state == store::MembershipState::Pending {
+                                let msg = e
+                                    .as_str()
+                                    .map(String::from)
+                                    .unwrap_or_else(|| e.to_string());
+                                m.state = store::MembershipState::Failed;
+                                m.failed_reason = Some(format!("gifter_failed: {msg}"));
+                            }
                             return;
                         }
                         if let Some(leaf) = v.get("leaf_index").and_then(|x| x.as_u64()) {
@@ -450,7 +457,7 @@ fn delegated_submit_callback(hash: String) -> provider::RegisterCallback {
                         m.tx_result = Some(reply.clone());
                     }
                 },
-                Err(e) => m.mark_submit_failed(&e.message, is_retryable_submit_error(e)),
+                Err(e) => m.record_async_submit_error(&e.message, is_retryable_submit_error(e)),
             })
         });
         if let Err(e) = update {
@@ -982,9 +989,13 @@ fn generate_proof_impl(
     };
 
     // Reserve + PERSIST the slot BEFORE proving, so a crash can waste a slot
-    // but never reissue one.
-    let message_id =
-        store::with_store(|s| s.reserve_message_id(&hash, &rln_id_hex, epoch, meta.rate_limit))?;
+    // but never reissue one. The retain floor is the oldest epoch this window
+    // can still serve; the reservation must keep every in-window epoch's
+    // counter so an interleaving timestamp can't reuse a spent slot.
+    let retain_floor = now_epoch.saturating_sub(epoch_gap());
+    let message_id = store::with_store(|s| {
+        s.reserve_message_id(&hash, &rln_id_hex, epoch, retain_floor, meta.rate_limit)
+    })?;
 
     let material = proof::WitnessMaterial {
         identity_secret_hash_hex: credential.identity_secret_hash.clone(),
@@ -1774,8 +1785,8 @@ mod tests {
         // Spend two slots in the CURRENT epoch; the snapshot pairs the same
         // index with the decremented budget.
         store::with_store(|s| {
-            s.reserve_message_id(&hash, &rln_id, epoch_index, 100)?;
-            s.reserve_message_id(&hash, &rln_id, epoch_index, 100)
+            s.reserve_message_id(&hash, &rln_id, epoch_index, epoch_index, 100)?;
+            s.reserve_message_id(&hash, &rln_id, epoch_index, epoch_index, 100)
         })
         .unwrap();
         let spent = get_epoch_quota_impl(&registry, &rln_id).unwrap();

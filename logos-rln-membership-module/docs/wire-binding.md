@@ -107,7 +107,7 @@ lp timeouts for (the logos-core default is ~20 s):
 
 | Method | Budget | Why |
 |---|---|---|
-| `register` | 5 s | returns at durable-persist; submission is background |
+| `register` | 90 s | a fresh registration first does a synchronous registry-bounds pre-check (one registry read, ≤70 s worst case) before it mints, durably persists, and returns; only the on-chain submission is background. The idempotent short-circuit (a live local membership for the scope) returns in milliseconds |
 | `generate_proof` | 90 s | warm: served from the background-maintained Merkle-path cache, no registry read; cold miss: one registry read (Merkle path, ≤70 s worst case) + proving (~seconds) |
 | `get_registry_parameters` | 90 s | one registry read (≤70 s worst case) |
 | `get_membership_state` | 90 s | one registry read |

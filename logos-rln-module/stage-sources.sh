@@ -14,10 +14,11 @@
 # never touches this repo's git state and never invokes nix.
 set -euo pipefail
 
-# The one SDK pin. Keep it the rev the builder's codegen comes from
-# (rust-lib/Cargo.toml, "The runtime SDK ..."); bump deliberately and
-# re-run the sim acceptance gate afterwards.
-SDK_REV=e288fb0f8c0fd6d913e53fc19a5b574cd9628e37
+# The one SDK pin. MUST track the rev `nix build` actually uses — the root
+# flake's logos-module-builder → logos-rust-sdk input in flake.lock
+# (rust-lib/Cargo.toml, "The runtime SDK ..."). Bump deliberately, keep it
+# equal to flake.lock, and re-run the sim acceptance gate afterwards.
+SDK_REV=270e4cf687896d501ed73c1409ea4157cc8a5b54
 SDK_REPO=https://github.com/logos-co/logos-rust-sdk
 # "tests" mirrors the actual staged tree (mkLogosModule needs none of these).
 SDK_EXCLUDES=(--exclude .git --exclude target --exclude doctests --exclude result --exclude tests)

@@ -2159,6 +2159,51 @@ mod tests {
         assert!(result.is_ok(), "Register should succeed: {:?}", result);
     }
 
+    // SECURITY (free-registration exploit): `register` must reject a payment
+    // holding whose data looks valid (right definition, huge balance) but which
+    // is owned by a program OTHER than the configured token program. Pre-fix,
+    // the payment Transfer was dispatched to the holding's OWN program_owner, so
+    // an attacker's no-op program let registration mint a membership while the
+    // treasury was never paid. Positive control: `test_register_succeeds` runs
+    // the identical flow with a token-program-owned holding and passes.
+    #[test]
+    fn test_register_rejects_holding_owned_by_foreign_program() {
+        let mut setup = state_with_initialized_registration().expect("Setup should succeed");
+
+        // Forge the payer: valid token-holding bytes and an unlimited balance,
+        // but owned by the merkle program (any non-token program stands in for
+        // the attacker's).
+        let forged = TokenHolding::Fungible {
+            definition_id: setup.payment_def_id.clone(),
+            balance: u128::MAX,
+        };
+        setup.state.force_insert_account(
+            setup.user_payment_id.clone(),
+            Account {
+                program_owner: setup.merkle.id(),
+                data: Data::from(&forged),
+                ..Account::default()
+            },
+        );
+
+        let register_tx = build_register_tx(
+            &setup,
+            &TREE_ID,
+            valid_field_element(0x42),
+            300,
+            Nonce(0),
+            0,
+        );
+        let result = setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0);
+        assert!(
+            result.is_err(),
+            "register must reject a payment holding not owned by the configured \
+             token program (free-registration exploit); got Ok: {result:?}"
+        );
+    }
+
     #[test]
     fn test_register_increments_total_registrations() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
@@ -2313,6 +2358,47 @@ mod tests {
         );
     }
 
+    // SECURITY (payment-bypass): `buy_credits` must reject a payment holding
+    // owned by a program other than the configured token program — pre-fix the
+    // payment Transfer was dispatched to that foreign owner, so it no-op'd and
+    // the treasury was never paid. Positive control: test_buy_credits_succeeds.
+    #[test]
+    fn test_buy_credits_rejects_payment_holding_owned_by_foreign_program() {
+        let mut setup = state_with_initialized_registration().expect("Setup should succeed");
+        let (user_credit_key, user_credit_id) = create_test_keypair(10);
+
+        let forged = TokenHolding::Fungible {
+            definition_id: setup.payment_def_id.clone(),
+            balance: u128::MAX,
+        };
+        setup.state.force_insert_account(
+            setup.user_payment_id.clone(),
+            Account {
+                program_owner: setup.merkle.id(),
+                data: Data::from(&forged),
+                ..Account::default()
+            },
+        );
+
+        let buy_tx = build_buy_credits_tx(
+            &setup,
+            &TREE_ID,
+            &user_credit_id,
+            &user_credit_key,
+            300,
+            Nonce(0),
+            Nonce(0),
+        );
+        let result = setup
+            .state
+            .transition_from_public_transaction(&buy_tx, 1, 0);
+        assert!(
+            result.is_err(),
+            "buy_credits must reject a payment holding not owned by the configured \
+             token program; got Ok: {result:?}"
+        );
+    }
+
     #[test]
     fn test_register_with_credits_succeeds() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
@@ -2353,6 +2439,52 @@ mod tests {
             result.is_ok(),
             "Register with credits should succeed: {:?}",
             result
+        );
+    }
+
+    // SECURITY (free-registration via credits): `register_with_credits` must
+    // reject a receipt holding owned by a program other than the configured
+    // token program — pre-fix the Burn was dispatched to that foreign owner and
+    // no-op'd, minting a membership without burning any real credits. Positive
+    // control: test_register_with_credits_succeeds.
+    #[test]
+    fn test_register_with_credits_rejects_credit_holding_owned_by_foreign_program() {
+        let mut setup = state_with_initialized_registration().expect("Setup should succeed");
+        let (user_credit_key, user_credit_id) = create_test_keypair(10);
+        let credit_token_id = derive_credit_token_pda(setup.registration.id(), &TREE_ID);
+
+        // Forge the receipt holding directly (no legitimate buy): valid
+        // receipt-token bytes, unlimited balance, owned by a non-token program.
+        let forged = TokenHolding::Fungible {
+            definition_id: credit_token_id,
+            balance: u128::MAX,
+        };
+        setup.state.force_insert_account(
+            user_credit_id.clone(),
+            Account {
+                program_owner: setup.merkle.id(),
+                data: Data::from(&forged),
+                ..Account::default()
+            },
+        );
+
+        let register_tx = build_register_with_credits_tx(
+            &setup,
+            &TREE_ID,
+            &user_credit_id,
+            &user_credit_key,
+            valid_field_element(0x43),
+            300,
+            Nonce(0),
+            0,
+        );
+        let result = setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0);
+        assert!(
+            result.is_err(),
+            "register_with_credits must reject a receipt holding not owned by the \
+             configured token program; got Ok: {result:?}"
         );
     }
 

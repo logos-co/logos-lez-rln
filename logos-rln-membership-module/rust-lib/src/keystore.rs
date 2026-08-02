@@ -314,21 +314,21 @@ pub(crate) fn decrypt(
 
 // ------------------------------------------------------------------- file IO
 
-/// Load the keystore, treating a missing file as a fresh (empty) one. An
-/// unreadable or unparseable file is quarantined to `.bad.<ts>` and replaced
-/// by a fresh keystore — never silently overwritten in place.
-pub(crate) fn load(dir: &Path) -> KeystoreFile {
+/// Load the keystore. A missing file is a fresh (empty) one; an unparseable
+/// file is quarantined to `.bad.<ts>` and replaced by a fresh keystore — never
+/// silently overwritten in place. A file that EXISTS but cannot be read
+/// (EIO/EACCES/…) returns `Err`: the caller MUST fail closed rather than treat
+/// "unreadable" as "empty", because an empty store invents a new secret over —
+/// and then clobbers — the credentials that were merely temporarily unreadable.
+pub(crate) fn load(dir: &Path) -> io::Result<KeystoreFile> {
     let path = dir.join(KEYSTORE_FILE);
     let raw = match fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return KeystoreFile::default(),
-        Err(e) => {
-            eprintln!("keystore: read failed ({e}); starting empty WITHOUT quarantining");
-            return KeystoreFile::default();
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(KeystoreFile::default()),
+        Err(e) => return Err(e),
     };
     match serde_json::from_str::<KeystoreFile>(&raw) {
-        Ok(file) => file,
+        Ok(file) => Ok(file),
         Err(e) => {
             let ts = crate::now_unix();
             let bad = dir.join(format!("{KEYSTORE_FILE}.bad.{ts}"));
@@ -336,7 +336,7 @@ pub(crate) fn load(dir: &Path) -> KeystoreFile {
             if let Err(re) = fs::rename(&path, &bad) {
                 eprintln!("keystore: quarantine rename failed ({re}); bad file left in place");
             }
-            KeystoreFile::default()
+            Ok(KeystoreFile::default())
         }
     }
 }
@@ -434,15 +434,15 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
 
-        let fresh = load(&dir);
+        let fresh = load(&dir).unwrap();
         assert!(fresh.credentials.is_empty());
         save_atomic(&dir, &fresh).unwrap();
-        let reloaded = load(&dir);
+        let reloaded = load(&dir).unwrap();
         assert_eq!(reloaded.application, "logos-rln-membership");
 
         // Corrupt file → quarantined to .bad.<ts>, fresh keystore returned.
         fs::write(dir.join(KEYSTORE_FILE), "{not json").unwrap();
-        let recovered = load(&dir);
+        let recovered = load(&dir).unwrap();
         assert!(recovered.credentials.is_empty());
         let quarantined = fs::read_dir(&dir)
             .unwrap()

@@ -14,11 +14,13 @@
 //! Granularity: the external nullifier is `poseidon(epoch, rln_identifier)`,
 //! so the same `message_id` is safe to reuse across different applications
 //! (distinct `rln_identifier`s) but never within one. Allocation is therefore
-//! keyed by `(rln_identifier, epoch)`. A membership belongs to one registry,
-//! so every application using it shares that registry's `epoch_size` and thus
-//! the same epoch index at a given instant — a new epoch prunes all prior rows.
-//! The index's wire encoding (the spec's `epoch[32]`) lives in the proof
-//! engine (`proof::epoch_to_bytes`); this module deals only in the `u64`.
+//! keyed by `(rln_identifier, epoch)`. The epoch derives from the caller's
+//! message timestamp and `generate_proof` accepts anything within
+//! `now ± max_epoch_gap`, so several epochs are live at once and each keeps its
+//! own counter; only rows below the window floor (which can never be served
+//! again) are pruned. The index's wire encoding (the spec's `epoch[32]`) lives
+//! in the proof engine (`proof::epoch_to_bytes`); this module deals only in the
+//! `u64`.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,9 +56,16 @@ pub(crate) fn current_epoch(now_unix: u64, epoch_size_sec: u64) -> u64 {
 }
 
 /// Reserve the next `message_id` for `(rln_identifier, epoch)` within
-/// `rate_limit`, mutating `allocations` in place. A new epoch resets every
-/// application's budget (stale rows are pruned first). Returns the slot, or
-/// `BudgetExhausted` when the epoch's budget is spent.
+/// `rate_limit`, mutating `allocations` in place. Returns the slot, or
+/// `BudgetExhausted` when that epoch's budget is spent.
+///
+/// `retain_floor` is the oldest epoch `generate_proof` can still serve
+/// (`now_epoch - max_epoch_gap`). Rows below it can never be reserved again and
+/// are pruned to bound growth; every epoch at or above it keeps its counter.
+/// Pruning must NOT drop an in-window epoch: because the epoch derives from the
+/// caller's timestamp, interleaving timestamps can revisit a neighboring epoch,
+/// and evicting its row would reissue a spent `(epoch, message_id)` slot —
+/// exposing the Shamir shares that reconstruct the identity secret.
 ///
 /// The caller MUST durably persist `allocations` before using the returned
 /// slot — the whole point of the pre-persist ordering.
@@ -64,16 +73,16 @@ pub(crate) fn reserve_slot(
     allocations: &mut Vec<EpochAllocation>,
     rln_identifier_hex: &str,
     epoch: u64,
+    retain_floor: u64,
     rate_limit: u64,
 ) -> Result<u64, AllocError> {
-    // All live applications share this membership's epoch, so anything from a
-    // different epoch is stale — dropping it bounds the row count to the set
-    // of applications active in the current epoch.
-    allocations.retain(|a| a.epoch == epoch);
+    allocations.retain(|a| a.epoch >= retain_floor);
 
+    // Rows for several in-window epochs coexist, so the slot must be looked up
+    // by `(rln_identifier, epoch)` — never by application alone.
     if let Some(row) = allocations
         .iter_mut()
-        .find(|a| a.rln_identifier == rln_identifier_hex)
+        .find(|a| a.rln_identifier == rln_identifier_hex && a.epoch == epoch)
     {
         if row.used >= rate_limit {
             return Err(AllocError::BudgetExhausted);
@@ -130,35 +139,54 @@ mod tests {
     #[test]
     fn slots_increment_from_zero_then_exhaust() {
         let mut allocs = Vec::new();
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 3), Ok(0));
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 3), Ok(1));
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 3), Ok(2));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 1, 3), Ok(0));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 1, 3), Ok(1));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 1, 3), Ok(2));
         assert_eq!(
-            reserve_slot(&mut allocs, APP_A, 1, 3),
+            reserve_slot(&mut allocs, APP_A, 1, 1, 3),
             Err(AllocError::BudgetExhausted)
         );
         assert_eq!(remaining(&allocs, APP_A, 1, 3), 0);
     }
 
     #[test]
-    fn new_epoch_resets_budget_and_prunes() {
+    fn below_floor_epochs_are_pruned_but_in_window_ones_survive() {
         let mut allocs = Vec::new();
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 2), Ok(0));
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 2), Ok(1));
-        // Advancing the epoch prunes the old row and starts fresh at 0.
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 2, 2), Ok(0));
-        assert_eq!(allocs.len(), 1);
-        assert_eq!(allocs[0].epoch, 2);
-        assert_eq!(remaining(&allocs, APP_A, 2, 2), 1);
+        // Window floor 4: epochs 4 and 5 are both live and keep independent
+        // budgets — reserving 4 does NOT evict epoch 5's row.
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 5, 4, 2), Ok(0));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 4, 4, 2), Ok(0));
+        assert_eq!(allocs.len(), 2);
+        // Revisiting epoch 5 continues its counter — slot 1, never a reissued 0.
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 5, 4, 2), Ok(1));
+        assert_eq!(remaining(&allocs, APP_A, 5, 2), 0);
+        assert_eq!(remaining(&allocs, APP_A, 4, 2), 1);
+        // Advancing the floor past 4 finally prunes it.
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 6, 5, 2), Ok(0));
+        assert!(allocs.iter().all(|a| a.epoch >= 5));
+    }
+
+    #[test]
+    fn interleaved_in_window_epochs_never_reissue_a_slot() {
+        // now_epoch 10, max_epoch_gap 1 -> floor 9. A caller stamps timestamps
+        // that map to epochs 10, 9, then 10 again. If reserving epoch 9 evicted
+        // epoch 10's row, the second epoch-10 proof would reuse spent slot 0 —
+        // the (epoch, message_id) collision that leaks the identity secret.
+        let mut allocs = Vec::new();
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 10, 9, 5), Ok(0));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 9, 9, 5), Ok(0));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 10, 9, 5), Ok(1));
+        assert_eq!(remaining(&allocs, APP_A, 10, 5), 3);
+        assert_eq!(remaining(&allocs, APP_A, 9, 5), 4);
     }
 
     #[test]
     fn applications_are_independent_within_an_epoch() {
         let mut allocs = Vec::new();
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 2), Ok(0));
-        assert_eq!(reserve_slot(&mut allocs, APP_B, 1, 2), Ok(0));
-        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 2), Ok(1));
-        assert_eq!(reserve_slot(&mut allocs, APP_B, 1, 2), Ok(1));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 1, 2), Ok(0));
+        assert_eq!(reserve_slot(&mut allocs, APP_B, 1, 1, 2), Ok(0));
+        assert_eq!(reserve_slot(&mut allocs, APP_A, 1, 1, 2), Ok(1));
+        assert_eq!(reserve_slot(&mut allocs, APP_B, 1, 1, 2), Ok(1));
         assert_eq!(allocs.len(), 2);
         assert_eq!(remaining(&allocs, APP_A, 1, 2), 0);
         assert_eq!(remaining(&allocs, APP_B, 1, 2), 0);
@@ -168,7 +196,7 @@ mod tests {
     fn zero_rate_limit_never_allocates() {
         let mut allocs = Vec::new();
         assert_eq!(
-            reserve_slot(&mut allocs, APP_A, 1, 0),
+            reserve_slot(&mut allocs, APP_A, 1, 1, 0),
             Err(AllocError::BudgetExhausted)
         );
     }

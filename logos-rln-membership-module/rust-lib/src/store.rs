@@ -67,6 +67,22 @@ impl MembershipMeta {
         self.failed_reason = Some(format!("submit_failed: {message}"));
         self.retryable = Some(retryable);
     }
+
+    /// Record a LATE/async submission error without clobbering a state the
+    /// poller — or a registry read-back — already advanced past `Pending`: a
+    /// lost or timed-out reply proves nothing about a submission the registry
+    /// may already have confirmed (the exact race that would flip a confirmed
+    /// Active record to a terminal, unselectable Failed). A still-`Pending`
+    /// record is failed only for a definitive (non-retryable) error; a
+    /// retryable transport failure is left `Pending` for the poller to
+    /// confirm-or-time-out (`merge_state` fails a stale Pending after
+    /// `CONFIRMATION_WINDOW_SECS`), per the poller's invariant.
+    pub(crate) fn record_async_submit_error(&mut self, message: &str, retryable: bool) {
+        if self.state != MembershipState::Pending || retryable {
+            return;
+        }
+        self.mark_submit_failed(message, retryable);
+    }
 }
 
 /// One registry's local record as consumers see it: the membership_hash, its
@@ -121,7 +137,22 @@ pub(crate) fn reset_for_tests() {
 /// Load (or create) the store. Called from `on_context_ready`; runs the
 /// tamper scan binding each entry's sidecar to its membership_hash key.
 pub(crate) fn init(dir: PathBuf) {
-    let file = keystore::load(&dir);
+    let file = match keystore::load(&dir) {
+        Ok(file) => file,
+        Err(e) => {
+            // The keystore file exists but couldn't be read. Fail closed:
+            // leave the store UNINITIALIZED so every op errors instead of
+            // treating the fault as an empty store — which would invent a new
+            // secret over, then clobber, credentials that were only
+            // temporarily unreadable. The next launch retries the read.
+            eprintln!(
+                "store: keystore read failed ({e}); leaving store uninitialized to avoid \
+                 clobbering existing credentials — resolve the fault and restart"
+            );
+            *crate::lock(&STORE) = None;
+            return;
+        }
+    };
     let mut quarantined = BTreeSet::new();
     for (hash, entry) in &file.credentials {
         let meta = &entry.membership;
@@ -344,6 +375,7 @@ impl Store {
         hash: &str,
         rln_identifier_hex: &str,
         epoch: u64,
+        retain_floor: u64,
         rate_limit: u64,
     ) -> Result<u64, ApiError> {
         let entry = self.file.credentials.get_mut(hash).ok_or_else(|| {
@@ -353,6 +385,7 @@ impl Store {
             &mut entry.membership.allocations,
             rln_identifier_hex,
             epoch,
+            retain_floor,
             rate_limit,
         )
         .map_err(|_| {

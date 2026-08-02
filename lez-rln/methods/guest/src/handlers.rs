@@ -353,6 +353,15 @@ pub fn register(
     );
     assert!(user_balance >= payment_amount, "Insufficient balance");
 
+    // The holding's self-reported data is attacker-controllable; only the
+    // owning program is not. Require it to be the configured token program so
+    // the payment can't be routed to an attacker's no-op program.
+    let user_holding_owner: [u8; 32] = bytemuck::cast(user_holding.account.program_owner);
+    assert_eq!(
+        user_holding_owner, config_state.token_program_id,
+        "Payment holding not owned by the configured token program"
+    );
+
     let treasury_id: [u8; 32] = *treasury_holding.account_id.value();
     assert_eq!(
         treasury_id, config_state.treasury_account_id,
@@ -384,7 +393,7 @@ pub fn register(
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     let token_transfer = ChainedCall::new(
-        user_holding.account.program_owner,
+        bytemuck::cast(config_state.token_program_id),
         vec![authorized(&user_holding), treasury_holding.clone()],
         &token_core::Instruction::Transfer {
             amount_to_transfer: payment_amount,
@@ -555,7 +564,15 @@ pub fn buy_credits(
         "Wrong treasury"
     );
 
-    let token_program_id = user_payment_holding.account.program_owner;
+    // The holding's owner is the only field an attacker can't forge; require it
+    // to be the configured token program and dispatch to that trusted id, not
+    // to whatever program the holding claims to belong to.
+    let payment_holding_owner: [u8; 32] = bytemuck::cast(user_payment_holding.account.program_owner);
+    assert_eq!(
+        payment_holding_owner, config_state.token_program_id,
+        "Payment holding not owned by the configured token program"
+    );
+    let token_program_id = bytemuck::cast(config_state.token_program_id);
     let transfer = ChainedCall::new(
         token_program_id,
         vec![authorized(&user_payment_holding), treasury_holding.clone()],
@@ -638,6 +655,14 @@ pub fn register_with_credits(
         "Insufficient receipt tokens"
     );
 
+    // Only the owning program is unforgeable; require it to be the configured
+    // token program so the burn can't be dispatched to an attacker's no-op.
+    let credit_holding_owner: [u8; 32] = bytemuck::cast(user_credit_holding.account.program_owner);
+    assert_eq!(
+        credit_holding_owner, config_state.token_program_id,
+        "Credit holding not owned by the configured token program"
+    );
+
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
     let expected_subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     assert_eq!(
@@ -663,7 +688,7 @@ pub fn register_with_credits(
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     let burn = ChainedCall::new(
-        user_credit_holding.account.program_owner,
+        bytemuck::cast(config_state.token_program_id),
         vec![credit_token_def.clone(), authorized(&user_credit_holding)],
         &token_core::Instruction::Burn {
             amount_to_burn: rate_limit as u128,
