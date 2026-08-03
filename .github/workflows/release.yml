@@ -15,6 +15,15 @@ name: release
 # contract. Staging per module: logos-rln-module -> stage-sources.sh (rsyncs a
 # pinned SDK); logos-rln-membership-module -> `nix run .#generate` (codegens the
 # scaffold + stages the SDK, exactly as its own CI does); the UI is pure QML.
+#
+# The catalog also carries the four logos-rln-gifter modules (checked out at
+# GIFTER_REV): the membership UI declares rln_gifter_module and
+# keycard_capture_module as dependencies, and a gifter node needs the
+# keycard/eth verifier modules — none of them are in the official catalog, so
+# they only resolve if THIS catalog publishes them. They need NO staging step:
+# their bare mkLogosModule flakes codegen inside the derivation (their
+# #generate output is a staged source package for local dev, not a runnable
+# app).
 
 on:
   workflow_dispatch:
@@ -40,6 +49,21 @@ env:
   # of these is rebuilt on the next run (see the plan job) instead of being
   # skipped forever as "already published".
   EXPECTED_VARIANTS: "darwin-arm64 linux-amd64 linux-arm64"
+  # External modules published into this catalog. Pinned by rev — bump
+  # GIFTER_REV deliberately when logos-rln-gifter moves (the rev must be pushed
+  # to that repo for checkout to fetch it).
+  GIFTER_REPO: logos-co/logos-rln-gifter
+  GIFTER_REV: 3167302b7a444fa1ba08260baa7fccbfb8a2a89e
+  # Every module dir the catalog publishes, local and external. The three
+  # per-module loops below all iterate this one list.
+  MODULE_DIRS: >-
+    logos-rln-module
+    logos-rln-membership-module
+    logos-rln-membership-ui
+    external/logos-rln-gifter/rust/rln-gifter-module
+    external/logos-rln-gifter/rust/keycard-capture-module
+    external/logos-rln-gifter/rust/keycard-auth-module
+    external/logos-rln-gifter/rust/eth-auth-module
 
 jobs:
   # Decide which modules actually need building: skip any whose
@@ -51,6 +75,11 @@ jobs:
       to_build: ${{ steps.decide.outputs.to_build }}
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.GIFTER_REPO }}
+          ref: ${{ env.GIFTER_REV }}
+          path: external/logos-rln-gifter
       - id: decide
         shell: bash
         env:
@@ -62,7 +91,7 @@ jobs:
           published="$(gh release view "$INDEX_TAG" --repo "$GH_REPO" \
                         --json assets -q '.assets[].name' 2>/dev/null || true)"
           build=()
-          for dir in logos-rln-module logos-rln-membership-module logos-rln-membership-ui; do
+          for dir in $MODULE_DIRS; do
             name="$(jq -r .name "$dir/metadata.json")"
             ver="$(jq -r .version "$dir/metadata.json")"
             if [ "$FORCE" = "true" ]; then
@@ -114,6 +143,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.GIFTER_REPO }}
+          ref: ${{ env.GIFTER_REV }}
+          path: external/logos-rln-gifter
 
       # Sets up Nix + the Logos attic cache (the heavy zerokit build needs it).
       # If a runner family isn't supported here, that variant fails and the
@@ -150,6 +184,8 @@ jobs:
                   nix run "path:./$dir#generate" -L ;;
                 logos-rln-membership-ui)
                   : ;;  # pure QML — no staging
+                external/logos-rln-gifter/*)
+                  : ;;  # builder codegens in-derivation — no staging
                 *)
                   echo "::error::unknown module $dir"; exit 1 ;;
               esac
@@ -190,6 +226,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.GIFTER_REPO }}
+          ref: ${{ env.GIFTER_REV }}
+          path: external/logos-rln-gifter
 
       - name: Setup Nix and Logos cache
         uses: logos-co/setup-nix-cache-action@v1
@@ -220,7 +261,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _merged
-          for dir in logos-rln-module logos-rln-membership-module logos-rln-membership-ui; do
+          for dir in $MODULE_DIRS; do
             name="$(jq -r .name "$dir/metadata.json")"
             ver="$(jq -r .version "$dir/metadata.json")"
             out="_merged/${name}-${ver}.lgx"
