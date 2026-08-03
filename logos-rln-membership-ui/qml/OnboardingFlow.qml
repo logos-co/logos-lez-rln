@@ -120,11 +120,11 @@ Item {
     // ---- Gifter path (alternative to Phases A/B/D) -------------------------
     // "gifter" replaces wallet-provision + sync + faucet with ONE delegated
     // register() call: the membership module generates the identity, drives
-    // rln_gifter_module.request with its commitment, and the gifter captures
-    // the Keycard attestation (bound to that commitment) before dialing the
-    // gifter node that pays for the registration. The Phase E poll tail is
-    // REUSED for confirmation. Set on Welcome; reset to "wallet" by
-    // resetForNewRegistration.
+    // rln_gifter_module.request with its commitment, and the gifter client
+    // has the keycard capture module produce the attestation (bound to that
+    // commitment) before dialing the gifter node that pays for the
+    // registration. The Phase E poll tail is REUSED for confirmation. Set on
+    // Welcome; reset to "wallet" by resetForNewRegistration.
     property string registrationMode: "wallet"
     // idle | running | done | error. gifterStage is the running sub-step, for
     // the progress caption: wallet -> node -> capture (which the caption keeps
@@ -687,9 +687,9 @@ Item {
     // Bring up the transport, gate on a Keycard being on the reader, then hand
     // the WHOLE delegated flow to the membership module: one register() call
     // generates the identity in-module, drives rln_gifter_module.request with
-    // its commitment, the gifter captures the attestation (bound to exactly
-    // that commitment — the ordering constraint is internal to the module),
-    // and the
+    // its commitment, the auth_provider (the capture module) produces the
+    // attestation bound to exactly that commitment — the ordering constraint
+    // is internal to the module — and the
     // gifter node pays for the on-chain registration. The Phase E poll tail
     // drives regPhase, so OnboardingView completes the wizard exactly as the
     // wallet path does.
@@ -846,7 +846,11 @@ Item {
             delegated: "true",
             gifter_peer_id: gifterPeerId.trim(),
             gifter_multiaddr: gifterMultiaddr.trim(),
-            capture_attestation: "true"
+            // Keycard vector via the generic auth surface: the gifter client
+            // asks the capture module (an rln_auth_vector producer) for the
+            // attestation bound to the module-generated commitment.
+            auth_type: "keycard-attestation",
+            auth_provider: M.CAPTURE_MODULE
         })
         callRetry(M.MEMBERSHIP_MODULE, "register",
                [registryId, M.DEFAULT_RLN_ID, rateLimit, options], function (r) {
