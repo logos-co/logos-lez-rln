@@ -8,7 +8,7 @@
 //! default) at EVERY call site, with no per-call override — while this
 //! module's reads need up to [`READ_TIMEOUT_MS`] (70s, the sibling's own
 //! wallet-backed reads run up to 60s; add hop margin) and the gifter path
-//! needs [`GIFTER_REQUEST_TIMEOUT_MS`] (340s: in-module keycard capture
+//! needs [`GIFTER_REQUEST_TIMEOUT_MS`] (340s: vector payload production
 //! plus the dial). So this module binds the consumer C ABI directly, giving
 //! every call an explicit, per-call timeout instead of the generated
 //! client's one-size-fits-all default.
@@ -403,8 +403,10 @@ fn invoke_async_recorded(
 /// metadata.json dependencies — deployments without a gifter module must
 /// still load; the lazy client below means they never pay for it either.
 const GIFTER_MODULE: &str = "rln_gifter_module";
-/// The gifter request budget: in-module keycard capture (≤120s) plus the dial
-/// and the server-side on-chain register (≤205s), with dispatch margin.
+/// The gifter request budget: client-side payload production by the vector's
+/// provider module (≤120s — keycard capture with a slow tap sets the bar)
+/// plus the dial and the server-side on-chain register (≤205s), with
+/// dispatch margin.
 const GIFTER_REQUEST_TIMEOUT_MS: c_int = 340_000;
 
 static GIFTER_CLIENT: Mutex<Option<ClientHandle>> = Mutex::new(None);
@@ -444,8 +446,9 @@ fn gifter_client(method: &str) -> Result<*mut lp::LpClient, ApiError> {
 
 /// Fire the gifter module's `request` with the module-generated commitment and
 /// record the reply (fire-and-record, like the funded submit). The gifter
-/// captures the keycard attestation itself — bound to that commitment — then
-/// dials the gifter server, which funds and registers on-chain.
+/// client produces the auth payload via the selected vector's provider module
+/// — bound to that commitment — then dials the gifter server, which verifies
+/// through its configured vector and funds the on-chain register.
 pub(crate) fn gifter_request_async(
     args_json: &str,
     on_done: RegisterCallback,

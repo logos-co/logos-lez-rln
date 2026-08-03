@@ -237,13 +237,30 @@ The spec's flat `{key, value}` options translate to a JSON object:
   the holding that pays `rate_limit × price_per_unit`.
 - **`logos` namespace, delegated** (RLN Membership Allocation Protocol):
   `{"delegated": "true", "gifter_peer_id": …, "gifter_multiaddr": …,
-  "capture_attestation"?: "true", "attestation"?: "<tlv hex>"}` — all values
-  are strings, per the spec's flat `char*` pairs; `capture_attestation` is
-  optional (default `"false"`). register drives `rln_gifter_module` with the
-  module-generated commitment; with `capture_attestation` the gifter
-  captures the keycard attestation itself (card on reader required). A JSON
-  boolean for `delegated` or `capture_attestation` is rejected as
-  `invalid_argument` rather than silently coerced.
+  "auth_type"?, "auth_payload"?, "auth_provider"?, "auth_args"?}` — all
+  values are strings, per the spec's flat `char*` pairs. register drives
+  `rln_gifter_module` with the module-generated commitment.
+
+  The auth surface is fully vector-agnostic — this module knows **no vector
+  by name**. `auth_type` names the gifter auth vector verbatim in the wire's
+  **open** `authentication_type` vocabulary (e.g. `"keycard-attestation"`);
+  its payload comes from exactly ONE of `auth_payload` (raw hex, sent
+  verbatim) or `auth_provider` — a module implementing the
+  `rln_auth_vector` producer contract, which the gifter client calls with
+  the commitment (`auth_args` forwarded verbatim). Omitting `auth_type`
+  entirely makes an unauthenticated request for an open gifter. An
+  application shipping its own allocation-auth strategy as
+  `rln_auth_vector` plugin modules therefore needs **zero changes** here or
+  in the gifter — configuration only. Example (keycard):
+  `{"auth_type": "keycard-attestation", "auth_provider":
+  "keycard_capture_module"}`.
+
+  Rejected as `invalid_argument` **before a credential is minted** (the
+  gifter client's own rules, checked early): payload material without
+  `auth_type`; a named vector with no payload source, or with both at once;
+  a non-hex `auth_payload`; auth options on the funded (non-delegated) path;
+  a JSON boolean for `delegated` (or any non-string auth value) rather than
+  silently coerced.
 
 ## start() config
 

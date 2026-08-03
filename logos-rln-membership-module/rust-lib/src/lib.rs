@@ -327,14 +327,19 @@ fn provider_of(
 // -------------------------------------------------------------- method impls
 
 /// Delegated-registration options (the RegistryOptions FLAT
-/// "gifter_peer_id"/"gifter_multiaddr"/"capture_attestation"/"attestation"
-/// keys, selected by "delegated":"true"), parsed once at register so
-/// everything downstream works from typed fields.
+/// "gifter_peer_id"/"gifter_multiaddr"/"auth_*" keys, selected by
+/// "delegated":"true"), parsed once at register so everything downstream
+/// works from typed fields. The auth surface is fully vector-agnostic: this
+/// module knows NO vector by name — "auth_type" and its payload material
+/// pass to the gifter verbatim, so a new vector (shipped as rln_auth_vector
+/// plugin modules) needs zero changes here.
 struct DelegatedOptions {
     gifter_peer_id: String,
     gifter_multiaddr: String,
-    capture_attestation: bool,
-    attestation: Option<String>,
+    auth_type: Option<String>,
+    auth_payload: Option<String>,
+    auth_provider: Option<String>,
+    auth_args: Option<String>,
 }
 
 /// Read a RegistryOptions flat boolean field: the spec's char* key/value
@@ -354,11 +359,27 @@ fn flat_bool_option(options: &serde_json::Value, key: &str) -> Result<bool, ApiE
     }
 }
 
+/// Read a RegistryOptions flat string field: absent and "" both mean unset;
+/// any non-string JSON value is a type error for the same reason as
+/// `flat_bool_option` — the wire format is flat char* pairs.
+fn flat_str_option(options: &serde_json::Value, key: &str) -> Result<Option<String>, ApiError> {
+    match options.get(key) {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) if s.is_empty() => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(ApiError::new(
+            ErrorKind::InvalidArgument,
+            &format!("options_json.{key} must be a string (flat char* option)"),
+        )),
+    }
+}
+
 /// Gifter `request` args for a delegated registration: the module-generated
-/// commitment (never the secret) plus the caller's gifter selection. With
-/// capture_attestation the gifter captures the keycard attestation itself —
-/// bound to exactly this commitment — so the ordering constraint (attestation
-/// after generation) is internal to the register call.
+/// commitment (never the secret) plus the caller's gifter and auth-vector
+/// selection, passed through verbatim. With an auth_provider the gifter
+/// client produces the payload bound to exactly this commitment (e.g. a
+/// keycard capture), so the ordering constraint (payload after credential
+/// generation) is internal to the register call.
 fn delegated_request_args(d: &DelegatedOptions, commitment_hex: &str, rate_limit: u64) -> String {
     let mut args = serde_json::json!({
         "gifterPeerId": d.gifter_peer_id,
@@ -366,11 +387,17 @@ fn delegated_request_args(d: &DelegatedOptions, commitment_hex: &str, rate_limit
         "identityCommitment": commitment_hex,
         "rate": rate_limit,
     });
-    if d.capture_attestation {
-        args["captureAttestation"] = true.into();
+    if let Some(t) = &d.auth_type {
+        args["authType"] = t.as_str().into();
     }
-    if let Some(tlv) = &d.attestation {
-        args["attestation"] = tlv.as_str().into();
+    if let Some(p) = &d.auth_payload {
+        args["authPayload"] = p.as_str().into();
+    }
+    if let Some(module) = &d.auth_provider {
+        args["authProvider"] = module.as_str().into();
+    }
+    if let Some(extra) = &d.auth_args {
+        args["authArgs"] = extra.as_str().into();
     }
     args.to_string()
 }
@@ -490,10 +517,16 @@ fn register_impl(
     // Delegated registration (spec RegistryOptions selecting the RLN Membership
     // Allocation Protocol): RegistryOptions is a FLAT string key/value map
     // (spec: char* key/value pairs) — {"delegated":"true",
-    // "gifter_peer_id":…,"gifter_multiaddr":…,"capture_attestation"?:"true",
-    // "attestation"?:"<hex>"}. "delegated" selects the path: "true" is
+    // "gifter_peer_id":…,"gifter_multiaddr":…,"auth_type"?,"auth_payload"?,
+    // "auth_provider"?,"auth_args"?}. "delegated" selects the path: "true" is
     // delegated, anything else (absent, "false", other) is the funded path.
-    // Validated up front so a malformed request never mints a credential.
+    // "auth_type" names the gifter auth vector verbatim in the wire's OPEN
+    // authentication_type vocabulary (e.g. "keycard-attestation"); its
+    // payload comes from "auth_payload" (hex, verbatim) or the
+    // "auth_provider" module — an rln_auth_vector producer the gifter client
+    // calls, with "auth_args" forwarded verbatim. No auth_type at all is an
+    // unauthenticated request for an open gifter. Validated up front so a
+    // malformed request never mints a credential.
     let opts = if options_json.trim().is_empty() {
         serde_json::Value::Null
     } else {
@@ -512,12 +545,10 @@ fn register_impl(
                 .and_then(|x| x.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            capture_attestation: flat_bool_option(&opts, "capture_attestation")?,
-            attestation: opts
-                .get("attestation")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from),
+            auth_type: flat_str_option(&opts, "auth_type")?,
+            auth_payload: flat_str_option(&opts, "auth_payload")?,
+            auth_provider: flat_str_option(&opts, "auth_provider")?,
+            auth_args: flat_str_option(&opts, "auth_args")?,
         })
     } else {
         None
@@ -529,6 +560,55 @@ fn register_impl(
                 "delegated registration needs gifter_peer_id and gifter_multiaddr",
             ));
         }
+        // The auth_type vocabulary is OPEN (passed to the gifter verbatim, so
+        // a plugin vector needs no change here) — only the SHAPE is checked,
+        // and it mirrors the gifter client's own rules so a doomed request
+        // fails BEFORE a credential is minted: payload material without a
+        // named vector is meaningless; a named vector needs exactly one
+        // payload source (raw auth_payload xor an auth_provider module).
+        if d.auth_type.is_none()
+            && (d.auth_payload.is_some() || d.auth_provider.is_some() || d.auth_args.is_some())
+        {
+            return Err(ApiError::new(
+                ErrorKind::InvalidArgument,
+                "auth_payload/auth_provider/auth_args need auth_type",
+            ));
+        }
+        if let Some(t) = d.auth_type.as_deref() {
+            match (&d.auth_payload, &d.auth_provider) {
+                (Some(_), Some(_)) => {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidArgument,
+                        "auth_payload and auth_provider are mutually exclusive",
+                    ))
+                }
+                (None, None) => {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidArgument,
+                        &format!("auth_type '{t}' needs auth_payload or auth_provider"),
+                    ))
+                }
+                _ => {}
+            }
+        }
+        if let Some(p) = &d.auth_payload {
+            let h = p.trim_start_matches("0x");
+            if h.is_empty() || h.len() % 2 != 0 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidArgument,
+                    "auth_payload must be hex-encoded bytes",
+                ));
+            }
+        }
+    } else if ["auth_type", "auth_payload", "auth_provider", "auth_args"]
+        .iter()
+        .any(|k| opts.get(*k).is_some())
+    {
+        // Auth material on the funded path is a caller mistake, not a no-op.
+        return Err(ApiError::new(
+            ErrorKind::InvalidArgument,
+            "auth_* options apply to delegated registration only — set \"delegated\":\"true\"",
+        ));
     }
 
     // Idempotent PER SCOPE (spec): a LIVE membership registered under this
@@ -2312,15 +2392,30 @@ mod tests {
             "delegated": "true",
             "gifter_peer_id": "12D3KooWTest",
             "gifter_multiaddr": "/ip4/127.0.0.1/tcp/1",
-            "capture_attestation": "true",
+            "auth_type": "keycard-attestation",
+            "auth_provider": "keycard_capture_module",
+        })
+        .to_string();
+        let out = imp.register(registry.clone(), rln_id.clone(), 300, opts);
+        assert!(out.contains(r#""kind":"provider_failure""#), "got: {out}");
+        assert!(
+            imp.get_memberships(registry.clone()).contains("membership_hash"),
+            "the credential was minted and the failed record retained"
+        );
+
+        // A plugin auth vector this module has never heard of passes the same
+        // validation (open vocabulary) and reaches the gifter dispatch — the
+        // prior failed record is terminal, so a fresh credential is minted.
+        let opts = serde_json::json!({
+            "delegated": "true",
+            "gifter_peer_id": "12D3KooWTest",
+            "gifter_multiaddr": "/ip4/127.0.0.1/tcp/1",
+            "auth_type": "voucher-v1",
+            "auth_payload": "deadbeef",
         })
         .to_string();
         let out = imp.register(registry.clone(), rln_id, 300, opts);
         assert!(out.contains(r#""kind":"provider_failure""#), "got: {out}");
-        assert!(
-            imp.get_memberships(registry).contains("membership_hash"),
-            "the credential was minted and the failed record retained"
-        );
 
         store::reset_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2341,6 +2436,107 @@ mod tests {
         assert!(out.contains("options_json.delegated"), "got: {out}");
         assert!(out.contains("must be the string"), "got: {out}");
         assert!(out.contains("not a JSON boolean"), "got: {out}");
+    }
+
+    // The auth_type vocabulary is OPEN (a plugin vector needs no change
+    // here), so validation is about SHAPE, and every rejection lands BEFORE a
+    // credential is minted: non-string values, payload material without a
+    // named vector, a named vector with no payload source, both payload
+    // sources at once, undecodable payload hex, and auth material on the
+    // funded path.
+    #[test]
+    fn delegated_register_validates_auth_options_before_minting() {
+        let _serial = crate::lock(&store::TEST_STORE_LOCK);
+        let dir =
+            std::env::temp_dir().join(format!("rln-ms-auth-validate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        store::init(dir.clone());
+
+        let mut imp = LogosRlnMembershipModuleImpl;
+        assert!(imp.unlock_keystore("pw".into()).contains(r#""unlocked":true"#));
+        let registry = format!("logos:local:{}", "ab".repeat(32));
+        let rln_id = "ef".repeat(32);
+        let opts = |extra: &str| {
+            format!(
+                r#"{{"delegated":"true","gifter_peer_id":"12D3KooWTest",
+                     "gifter_multiaddr":"/ip4/127.0.0.1/tcp/1",{extra}}}"#
+            )
+        };
+        let reg = |imp: &mut LogosRlnMembershipModuleImpl, extra: &str| {
+            imp.register(registry.clone(), rln_id.clone(), 300, opts(extra))
+        };
+
+        for (extra, expect) in [
+            (r#""auth_type":42"#, "auth_type must be a string"),
+            (r#""auth_payload":"deadbeef""#, "need auth_type"),
+            (r#""auth_type":"voucher-v1""#, "needs auth_payload or auth_provider"),
+            (
+                r#""auth_type":"voucher-v1","auth_payload":"deadbeef","auth_provider":"voucher_module""#,
+                "mutually exclusive",
+            ),
+            (r#""auth_type":"voucher-v1","auth_payload":"not-hex!""#, "must be hex"),
+        ] {
+            let out = reg(&mut imp, extra);
+            assert!(out.contains(r#""kind":"invalid_argument""#), "{extra} got: {out}");
+            assert!(out.contains(expect), "{extra} got: {out}");
+        }
+
+        let out = imp.register(
+            registry.clone(),
+            rln_id.clone(),
+            300,
+            r#"{"auth_type":"voucher-v1","auth_payload":"deadbeef"}"#.into(),
+        );
+        assert!(out.contains(r#""kind":"invalid_argument""#), "got: {out}");
+        assert!(out.contains("delegated registration only"), "got: {out}");
+
+        assert_eq!(
+            imp.get_memberships(registry),
+            r#"{"memberships":[]}"#,
+            "no rejection above may mint a credential"
+        );
+
+        store::reset_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The gifter request args carry the auth selection verbatim — any vector
+    // name, its payload/provider/args material included — and an unspecified
+    // vector stays ABSENT (the gifter client infers from the payload fields)
+    // rather than defaulting here: the module never second-guesses the
+    // gifter's own defaulting, which is what keeps the vocabulary open.
+    #[test]
+    fn delegated_request_args_pass_auth_selection_through_verbatim() {
+        let mut d = DelegatedOptions {
+            gifter_peer_id: "p".into(),
+            gifter_multiaddr: "/ip4/127.0.0.1/tcp/1".into(),
+            auth_type: None,
+            auth_payload: None,
+            auth_provider: None,
+            auth_args: None,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&delegated_request_args(&d, "ab", 300)).unwrap();
+        for key in ["authType", "authPayload", "authProvider", "authArgs"] {
+            assert!(v.get(key).is_none(), "unset {key} must stay absent, got: {v}");
+        }
+
+        d.auth_type = Some("voucher-v1".into());
+        d.auth_provider = Some("voucher_module".into());
+        d.auth_args = Some(r#"{"campaign":"launch"}"#.into());
+        let v: serde_json::Value =
+            serde_json::from_str(&delegated_request_args(&d, "ab", 300)).unwrap();
+        assert_eq!(v["authType"], "voucher-v1", "got: {v}");
+        assert_eq!(v["authProvider"], "voucher_module", "got: {v}");
+        assert_eq!(v["authArgs"], r#"{"campaign":"launch"}"#, "got: {v}");
+        assert!(v.get("authPayload").is_none(), "got: {v}");
+
+        d.auth_provider = None;
+        d.auth_args = None;
+        d.auth_payload = Some("deadbeef".into());
+        let v: serde_json::Value =
+            serde_json::from_str(&delegated_request_args(&d, "ab", 300)).unwrap();
+        assert_eq!(v["authPayload"], "deadbeef", "got: {v}");
     }
 
     // select_membership returns the PUBLIC membership only — never the secret,

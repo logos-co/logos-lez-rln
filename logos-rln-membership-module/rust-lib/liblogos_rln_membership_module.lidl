@@ -41,7 +41,7 @@
 ; Events are a third channel, pushed over the lp event stream rather than
 ; returned from a call — see the events section below.
 module liblogos_rln_membership_module {
-  version "0.3.0"
+  version "0.4.0"
   description "RLN Membership Management Module"
   category "blockchain"
   depends [liblogos_rln_module]
@@ -142,11 +142,13 @@ module liblogos_rln_membership_module {
   ; (spec RegistryOptions: char* key/value pairs) for the logos namespace:
   ; {"funding_holding_account_id":"<account>"} (direct, the caller pays), or
   ; {"delegated":"true","gifter_peer_id":…,"gifter_multiaddr":…,
-  ; "capture_attestation"?:"true","attestation"?:"<tlv hex>"} — delegated
+  ; "auth_type"?,"auth_payload"?,"auth_provider"?,"auth_args"?} — delegated
   ; registration via the RLN Membership Allocation Protocol: register drives
-  ; rln_gifter_module.request with the module-generated commitment; with
-  ; capture_attestation the gifter captures the keycard attestation itself,
-  ; bound to that commitment (card on reader required). A rate_limit outside
+  ; rln_gifter_module.request with the module-generated commitment. auth_type
+  ; names the gifter auth vector verbatim (open vocabulary); its payload is
+  ; auth_payload (hex) or produced by the auth_provider module (an
+  ; rln_auth_vector producer, auth_args forwarded verbatim — e.g.
+  ; keycard_capture_module, card on reader required). A rate_limit outside
   ; the registry's bounds fails permanent BEFORE a credential is minted (soft
   ; pre-check: an unreadable registry skips it and lets the registry enforce
   ; at submission). Idempotent PER SCOPE (spec): a live membership registered

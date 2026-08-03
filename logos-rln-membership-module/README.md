@@ -85,8 +85,8 @@ budgets, option keys — is [`docs/wire-binding.md`](docs/wire-binding.md).
   client of the sibling module (owner-thread-bound, explicit per-call
   timeouts; fire-and-record async submission), plus the lazy gifter client
   for delegated registration (`rln_gifter_module.request` driven with the
-  module-generated commitment; the gifter captures the keycard attestation
-  itself, bound to that commitment).
+  module-generated commitment and the caller's auth-vector selection; the
+  vector's producer module binds the auth payload to that commitment).
 - `rust-lib/src/poller.rs` — confirmation + lifecycle poller: 15s-tick
   detached thread; pending→active with authoritative leaf/rate re-read, or
   pending→failed past the 300s window; 60s non-terminal state refresh with
