@@ -1227,6 +1227,10 @@ fn verify_proof_impl(
 /// registry access, no unlock. All three fields derive from ONE epoch
 /// observation (spec MUST): the index is taken once and keys the remaining
 /// read, so a snapshot never mixes epochs even across a rollover.
+/// A scope with no usable membership has no budget, not an error (spec
+/// SHALL): the current epoch_index with rate_limit and remaining both zero.
+/// rate_limit 0 therefore always means "no usable membership", never an
+/// exhausted budget — the consumer disambiguates via get_membership_state.
 fn get_epoch_quota_impl(
     registry_id_raw: &str,
     rln_identifier_hex: &str,
@@ -1245,10 +1249,7 @@ fn get_epoch_quota_impl(
         .filter(|r| !r.quarantined && r.meta.state.is_usable())
         .collect();
     if usable.is_empty() {
-        return Err(ApiError::new(
-            ErrorKind::NoUsableMembership,
-            "no active or grace_period membership backs this scope",
-        ));
+        return ok_json(views::EpochQuotaView::new(epoch_index, 0, 0));
     }
     if usable.len() > 1 {
         return Err(ApiError::new(
@@ -1821,10 +1822,13 @@ mod tests {
         let registry = format!("logos:local:{}", "aa".repeat(32));
         let rln_id = "ef".repeat(32);
 
-        // No membership yet → no_usable_membership (the consumer's cue to
-        // fall back to wall-clock metering).
-        let err = get_epoch_quota_impl(&registry, &rln_id).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::NoUsableMembership);
+        // No membership yet → a zero-budget SNAPSHOT, not an error (spec
+        // SHALL): rate_limit 0 is the no-usable-membership signal, so it can
+        // never be confused with an exhausted budget.
+        let q = get_epoch_quota_impl(&registry, &rln_id).unwrap();
+        assert_eq!(q["rate_limit"], 0, "got: {q}");
+        assert_eq!(q["remaining"], 0, "got: {q}");
+        assert!(q["epoch_index"].as_u64().is_some(), "got: {q}");
 
         // Seed an ACTIVE membership registered under this scope.
         let commitment = [0x77u8; 32];

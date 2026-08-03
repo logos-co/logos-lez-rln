@@ -262,8 +262,11 @@ module liblogos_rln_membership_module {
   ; never paired with another epoch's index). Purely local: no registry
   ; access, no unlock needed. Advisory only — generate_proof remains the
   ; allocation authority (budget_exhausted when spent between read and
-  ; proof). Errors: no_usable_membership (the consumer's cue to fall back to
-  ; wall-clock metering), ambiguous_selection, invalid_argument.
+  ; proof). A scope without a usable membership is NOT an error (spec
+  ; SHALL): the reply carries the current epoch_index with rate_limit and
+  ; remaining both 0 — rate_limit 0 always means "no usable membership",
+  ; never an exhausted budget (disambiguate via get_membership_state).
+  ; Errors: ambiguous_selection, invalid_argument.
   method get_epoch_quota(registry_id: tstr, rln_identifier_hex: tstr) -> result
 
   ; Registry parameters read (spec's optional extension): the
