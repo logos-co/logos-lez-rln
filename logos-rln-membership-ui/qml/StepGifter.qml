@@ -23,16 +23,15 @@ ColumnLayout {
     // No auto-start: the user supplies the gifter address and taps the card.
     function entered() {}
 
-    // Plain-language caption for the running sub-step (gifter stages first, then
-    // the shared confirmation poll once the grant lands).
+    // Plain-language caption for the running sub-step. After the delegated
+    // register() is dispatched the module captures + dials in the background,
+    // so the "capture" caption (keep the card on the reader) holds until the
+    // shared confirmation poll settles.
     readonly property string stageCaption:
         flow.gifterStage === "wallet" ? "Setting up your account…"
         : flow.gifterStage === "node" ? "Starting a peer-to-peer node…"
-        : flow.gifterStage === "identity" ? "Creating your identity…"
         : flow.gifterStage === "capture" ? "Hold your Keycard on the reader…"
-        : flow.gifterStage === "dial" ? "Asking the gifter to register you…"
-        : (flow.gifterStage === "confirm" || flow.gifterStage === "persist"
-           || flow.regPhase === "running") ? "Confirming your membership on-chain…"
+        : flow.regPhase === "running" ? "Confirming your membership on-chain…"
         : "Working…"
 
     // LogosTextField sizes its glyphs from a fixed caption token; lift them to

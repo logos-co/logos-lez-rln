@@ -1,0 +1,11 @@
+{
+  "name": "auth-fix-verify",
+  "tree_id": "5f4968d461e0fee02adb7a08e4033e92dd12580798ff9e5c49c2ec93d538d855",
+  "sequencer": "https://testnet.lez.logos.co/",
+  "registration_program_id": "9bb775c0f884caf6a3503d7daaa97c75250e7b7dc325a6b531ad11ff45b959fd",
+  "merkle_program_id": "f557d44343f604a9491b06b2a82646d93e637faca52190300340d9607b06152b",
+  "config_account": "Dtzk2Vt2RmDziABtg2eEXY9y4TKcjXKQDJLHnd4Wud6Y",
+  "payment_account": "dzHp9KMMDNDWpKFVcP2QrFT6AvpiEmEymmHBkZu2VFB",
+  "supply_holding": "74xGaB2GEe6Urj955U2Q24KnEHSV1jfvwiTUXCmei1Nf",
+  "funding": "faucet"
+}

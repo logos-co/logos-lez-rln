@@ -2,12 +2,16 @@
 //! namespace → provider routing, and the lez-rln provider — a raw `lp_*`
 //! wire client of the sibling `liblogos_rln_module`.
 //!
-//! The raw C ABI (not the SDK's generated typed client) is deliberate, for
-//! the same reason as the sibling's wallet path: `PluginProxy` hardcodes
-//! `timeout_ms = 0` (the 20s protocol default), while the sibling's reads
-//! can run up to 60s against the wallet and `register_member` submits with
-//! a 180s tx timeout — every hop here needs an explicit per-call margin
-//! above the sibling's own budget.
+//! Why raw `lp_*` rather than the SDK's generated typed client
+//! (`LiblogosRlnModuleClient`, from `deps/liblogos_rln_module.lidl`): the
+//! generated `PluginProxy` hardcodes `timeout_ms = 0` (the ~20s protocol
+//! default) at EVERY call site, with no per-call override — while this
+//! module's reads need up to [`READ_TIMEOUT_MS`] (70s, the sibling's own
+//! wallet-backed reads run up to 60s; add hop margin) and the gifter path
+//! needs [`GIFTER_REQUEST_TIMEOUT_MS`] (340s: vector payload production
+//! plus the dial). So this module binds the consumer C ABI directly, giving
+//! every call an explicit, per-call timeout instead of the generated
+//! client's one-size-fits-all default.
 //!
 //! Threading contract (mirrors the sibling): the lp client is created once
 //! on the host's main Qt thread (`init_client` from `on_context_ready`) and
@@ -25,6 +29,7 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 use crate::registry_id::CanonicalRegistryId;
+use crate::store::MembershipState;
 use crate::{lock, ApiError, ErrorKind};
 
 const TARGET_MODULE: &str = "liblogos_rln_module";
@@ -324,14 +329,149 @@ fn provider_call(
     Ok(value)
 }
 
+// ------------------------------------------------- fire-and-record submission
+
+/// Boxed-callback plumbing shared by the fire-and-record submit paths (the
+/// funded register_member, the delegated gifter request). The reply lands on
+/// the owner thread after the dispatching handler has returned, so the
+/// callback may freely take the store lock.
+struct SubmitReply {
+    method: &'static str,
+    on_done: Option<RegisterCallback>,
+}
+
+extern "C" fn submit_trampoline(ok: c_int, json: *const c_char, user_data: *mut std::ffi::c_void) {
+    if user_data.is_null() {
+        return;
+    }
+    let mut reply = unsafe { Box::from_raw(user_data as *mut SubmitReply) };
+    let raw = if json.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned()
+    };
+    let value = if ok != 0 { lp_result_to_string(&raw) } else { String::new() };
+    if let Some(cb) = reply.on_done.take() {
+        if value.is_empty() {
+            cb(Err(provider_failure(reply.method)));
+        } else {
+            cb(Ok(value));
+        }
+    }
+}
+
+/// Dispatch one fire-and-record call: `on_done` receives the target's QString
+/// reply (or the transport error) once it lands.
+fn invoke_async_recorded(
+    client: *mut lp::LpClient,
+    method: &'static str,
+    args: &serde_json::Value,
+    timeout_ms: c_int,
+    on_done: RegisterCallback,
+) -> Result<(), ApiError> {
+    let (Ok(method_c), Ok(args_c)) = (CString::new(method), CString::new(args.to_string())) else {
+        return Err(ApiError::internal("submit args not CString-safe"));
+    };
+    let user_data = Box::into_raw(Box::new(SubmitReply {
+        method,
+        on_done: Some(on_done),
+    })) as *mut std::ffi::c_void;
+    let rc = unsafe {
+        lp::lp_invoke_async(
+            client,
+            method_c.as_ptr(),
+            args_c.as_ptr(),
+            timeout_ms,
+            submit_trampoline,
+            user_data,
+        )
+    };
+    if rc != lp::LP_OK {
+        drop(unsafe { Box::from_raw(user_data as *mut SubmitReply) });
+        return Err(ApiError::new(
+            ErrorKind::ProviderFailure,
+            &format!("{method} dispatch failed rc={rc}"),
+        ));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------ gifter delegate
+
+/// The delegated-registration executor (RLN Membership Allocation Protocol):
+/// the co-located gifter client module. Deliberately NOT declared in
+/// metadata.json dependencies — deployments without a gifter module must
+/// still load; the lazy client below means they never pay for it either.
+const GIFTER_MODULE: &str = "rln_gifter_module";
+/// The gifter request budget: client-side payload production by the vector's
+/// provider module (≤120s — keycard capture with a slow tap sets the bar)
+/// plus the dial and the server-side on-chain register (≤205s), with
+/// dispatch margin.
+const GIFTER_REQUEST_TIMEOUT_MS: c_int = 340_000;
+
+static GIFTER_CLIENT: Mutex<Option<ClientHandle>> = Mutex::new(None);
+
+/// Owner-thread-lazy client to the gifter module — created on first delegated
+/// register, never at init, so deployments without a gifter module pay nothing
+/// and fail cleanly only when actually asked to delegate.
+fn gifter_client(method: &str) -> Result<*mut lp::LpClient, ApiError> {
+    if lock(&GIFTER_CLIENT).is_none() {
+        let owner = *lock(&PROVIDER_OWNER);
+        if owner.is_none() || owner == Some(std::thread::current().id()) {
+            if let (Ok(target), Ok(origin)) = (CString::new(GIFTER_MODULE), CString::new("core")) {
+                let raw = unsafe {
+                    lp::lp_client_create(
+                        target.as_ptr(),
+                        origin.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    )
+                };
+                if raw.is_null() {
+                    eprintln!("membership provider: lp_client_create failed for {GIFTER_MODULE}");
+                } else {
+                    *lock(&GIFTER_CLIENT) = Some(ClientHandle(raw));
+                }
+            }
+        }
+    }
+    match lock(&GIFTER_CLIENT).as_ref() {
+        Some(h) => Ok(h.0),
+        None => Err(ApiError::new(
+            ErrorKind::ProviderFailure,
+            &format!("{GIFTER_MODULE}.{method}: no lp client (is the gifter module loaded?)"),
+        )),
+    }
+}
+
+/// Fire the gifter module's `request` with the module-generated commitment and
+/// record the reply (fire-and-record, like the funded submit). The gifter
+/// client produces the auth payload via the selected vector's provider module
+/// — bound to that commitment — then dials the gifter server, which verifies
+/// through its configured vector and funds the on-chain register.
+pub(crate) fn gifter_request_async(
+    args_json: &str,
+    on_done: RegisterCallback,
+) -> Result<(), ApiError> {
+    let client = gifter_client("request")?;
+    invoke_async_recorded(
+        client,
+        "request",
+        &serde_json::json!([args_json]),
+        GIFTER_REQUEST_TIMEOUT_MS,
+        on_done,
+    )
+}
+
 // ----------------------------------------------------------- provider trait
 
 /// The registry's view of one commitment (the spec provider's
 /// `get_membership` return: state + authoritative leaf_index/rate_limit).
 pub(crate) struct ProviderMembership {
     pub(crate) registered: bool,
-    /// active | grace_period | expired (meaningful only when registered).
-    pub(crate) state: String,
+    /// active | grace_period | expired (meaningful only when registered;
+    /// `Unknown` placeholder otherwise, never read while `!registered`).
+    pub(crate) state: MembershipState,
     pub(crate) leaf_index: u64,
     pub(crate) rate_limit: u64,
 }
@@ -369,6 +509,13 @@ pub(crate) trait RegistryProvider: Send + Sync {
 
     fn get_valid_roots(&self, registry: &CanonicalRegistryId)
         -> Result<Vec<String>, ApiError>;
+
+    /// The registry's parameters (spec RegistryParameters — max_rate_limit and
+    /// friends) as the sibling's raw bounds object. Backs the quota read.
+    fn get_registry_bounds(
+        &self,
+        registry: &CanonicalRegistryId,
+    ) -> Result<serde_json::Value, ApiError>;
 }
 
 static LEZ_RLN: LezRlnProvider = LezRlnProvider;
@@ -412,20 +559,39 @@ impl RegistryProvider for LezRlnProvider {
         if !registered {
             return Ok(ProviderMembership {
                 registered: false,
-                state: String::new(),
+                state: MembershipState::Unknown,
                 leaf_index: 0,
                 rate_limit: 0,
             });
         }
+        // For a membership the registry just reported registered, these
+        // fields are its contract — a missing one is a provider fault, never
+        // a defaultable value (leaf 0 is a VALID leaf, so defaulting would
+        // silently prove against the wrong membership; rate 0 would brick
+        // allocation).
+        let required = |key: &str| {
+            v.get(key).and_then(|x| x.as_u64()).ok_or_else(|| {
+                ApiError::new(
+                    ErrorKind::ProviderFailure,
+                    &format!("get_membership: registered member missing {key}"),
+                )
+            })
+        };
         Ok(ProviderMembership {
             registered: true,
-            state: v
-                .get("state")
-                .and_then(|x| x.as_str())
-                .unwrap_or(crate::store::ST_ACTIVE)
-                .to_string(),
-            leaf_index: v.get("leaf_index").and_then(|x| x.as_u64()).unwrap_or(0),
-            rate_limit: v.get("rate_limit").and_then(|x| x.as_u64()).unwrap_or(0),
+            // Loud-fail on an unrecognized state string, matching the adjacent
+            // missing-field faults — no panic, no silent fallback.
+            state: serde_json::from_value::<MembershipState>(
+                v.get("state").cloned().unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|_| {
+                ApiError::new(
+                    ErrorKind::ProviderFailure,
+                    "get_membership: unrecognized state",
+                )
+            })?,
+            leaf_index: required("leaf_index")?,
+            rate_limit: required("rate_limit")?,
         })
     }
 
@@ -459,61 +625,7 @@ impl RegistryProvider for LezRlnProvider {
 
         let client = owner_client("register_member")?;
         let args = serde_json::json!([registry.account, funding, id_commitment_hex, rate_limit]);
-        let (Ok(method_c), Ok(args_c)) = (
-            CString::new("register_member"),
-            CString::new(args.to_string()),
-        ) else {
-            return Err(ApiError::internal("register args not CString-safe"));
-        };
-
-        struct SubmitReply {
-            on_done: Option<RegisterCallback>,
-        }
-        extern "C" fn submit_trampoline(
-            ok: c_int,
-            json: *const c_char,
-            user_data: *mut std::ffi::c_void,
-        ) {
-            if user_data.is_null() {
-                return;
-            }
-            let mut reply = unsafe { Box::from_raw(user_data as *mut SubmitReply) };
-            let raw = if json.is_null() {
-                String::new()
-            } else {
-                unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned()
-            };
-            let value = if ok != 0 { lp_result_to_string(&raw) } else { String::new() };
-            if let Some(cb) = reply.on_done.take() {
-                if value.is_empty() {
-                    cb(Err(provider_failure("register_member")));
-                } else {
-                    cb(Ok(value));
-                }
-            }
-        }
-
-        let user_data = Box::into_raw(Box::new(SubmitReply {
-            on_done: Some(on_done),
-        })) as *mut std::ffi::c_void;
-        let rc = unsafe {
-            lp::lp_invoke_async(
-                client,
-                method_c.as_ptr(),
-                args_c.as_ptr(),
-                REGISTER_TIMEOUT_MS,
-                submit_trampoline,
-                user_data,
-            )
-        };
-        if rc != lp::LP_OK {
-            drop(unsafe { Box::from_raw(user_data as *mut SubmitReply) });
-            return Err(ApiError::new(
-                ErrorKind::ProviderFailure,
-                &format!("register_member dispatch failed rc={rc}"),
-            ));
-        }
-        Ok(())
+        invoke_async_recorded(client, "register_member", &args, REGISTER_TIMEOUT_MS, on_done)
     }
 
     fn get_merkle_proof(
@@ -551,6 +663,20 @@ impl RegistryProvider for LezRlnProvider {
         )?;
         serde_json::from_str::<Vec<String>>(&raw).map_err(|e| {
             ApiError::new(ErrorKind::ProviderFailure, &format!("roots reply parse: {e}"))
+        })
+    }
+
+    fn get_registry_bounds(
+        &self,
+        registry: &CanonicalRegistryId,
+    ) -> Result<serde_json::Value, ApiError> {
+        let raw = provider_call(
+            "get_registry_bounds",
+            &serde_json::json!([registry.account]),
+            READ_TIMEOUT_MS,
+        )?;
+        serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+            ApiError::new(ErrorKind::ProviderFailure, &format!("bounds reply parse: {e}"))
         })
     }
 }

@@ -14,6 +14,7 @@
 use sha2::{Digest, Sha256};
 
 /// A parsed, canonicalized CAIP-10 account id (`namespace:reference:account`).
+#[derive(Clone)]
 pub(crate) struct CanonicalRegistryId {
     pub(crate) namespace: String,
     pub(crate) account: String,
@@ -52,6 +53,17 @@ pub(crate) fn parse(raw: &str) -> Result<CanonicalRegistryId, String> {
     {
         return Err("chain reference must match [-_a-zA-Z0-9]{1,32}".to_string());
     }
+
+    // The logos binding pins the reference to lowercase (Appendix A): network
+    // names are lowercase, and since references compare opaquely a case
+    // variant would silently identify a distinct registry with a distinct
+    // membership_hash, fragmenting stored memberships. Foreign namespaces
+    // keep their case (we cannot know their canonical form).
+    let reference = if namespace == "logos" {
+        reference.to_ascii_lowercase()
+    } else {
+        reference.to_string()
+    };
 
     let account = if namespace == "logos" {
         match hex_to_bytes32(account_raw) {
@@ -153,9 +165,14 @@ mod tests {
     }
 
     #[test]
-    fn reference_case_is_preserved_and_opaque() {
+    fn logos_reference_pins_to_lowercase_foreign_preserved() {
+        // logos: the Appendix A binding lowercases the reference, so case
+        // variants can't fragment membership_hashes.
         let id = parse(&format!("logos:TestNet-1:{}", "ab".repeat(32))).unwrap();
-        assert_eq!(id.canonical, format!("logos:TestNet-1:{}", "ab".repeat(32)));
+        assert_eq!(id.canonical, format!("logos:testnet-1:{}", "ab".repeat(32)));
+        // Foreign namespaces: case preserved (their canonical form is theirs).
+        let id = parse("eip155:59144:0xB9cd878C90E49F797B4431fBF4fb333108CB90e6").unwrap();
+        assert!(id.canonical.starts_with("eip155:59144:0xB9cd"));
     }
 
     #[test]

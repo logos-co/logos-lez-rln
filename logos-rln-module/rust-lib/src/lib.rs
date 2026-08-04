@@ -168,16 +168,21 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// One entry per (config_account_id, id_commitment_hex) registration this
-/// session: the reply returned to every caller after the first. Delivery
-/// fires register_member on two paths within seconds (the sync
-/// selfRegisterRln and the Nim fetcher's async trip); the on-chain pre-check
-/// cannot see a submission still confirming (60-90s on testnet), and a
-/// duplicate Register submit poisons the gifter wallet's nonce sequence and
-/// freezes the gifter for the whole confirmation window. The C++ module only
-/// avoided this by accidental Qt serialization timing.
-/// (reply, inserted_at) per in-flight `(config, commitment)` registration.
-type RegInFlightMap = std::collections::HashMap<(String, String), (String, Instant)>;
+/// One entry per membership PDA this session: the reply returned to every
+/// caller after the first. Delivery fires register_member on two paths within
+/// seconds (the sync selfRegisterRln and the Nim fetcher's async trip); the
+/// on-chain pre-check cannot see a submission still confirming (60-90s on
+/// testnet), and a duplicate Register submit poisons the gifter wallet's nonce
+/// sequence and freezes the gifter for the whole confirmation window. The C++
+/// module only avoided this by accidental Qt serialization timing.
+///
+/// The key is the membership PDA hex — the canonical `(tree_id, id_commitment)`
+/// identity the on-chain `Claim::Pda` enforces uniqueness on — NOT the raw
+/// caller strings: two callers describing the same membership with equivalent
+/// but differently-formatted inputs (`0xAB..` vs `ab..`, base58 vs 64-hex
+/// config) must land in the same slot, or both submit and freeze the gifter.
+/// (reply, inserted_at) per in-flight registration.
+type RegInFlightMap = std::collections::HashMap<String, (String, Instant)>;
 
 static REG_IN_FLIGHT: Mutex<Option<RegInFlightMap>> = Mutex::new(None);
 
@@ -1009,8 +1014,11 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
 
         // In-flight dedup (see REG_IN_FLIGHT): first caller proceeds to
         // submit; concurrent and repeat callers get the first submission's
-        // reply instead of a second conflicting transaction.
-        let reg_key = (config_account_id.clone(), id_commitment_hex.clone());
+        // reply instead of a second conflicting transaction. Keyed by the
+        // canonical membership PDA (derived from the resolved tree_id +
+        // normalized id_commitment), so equivalent-but-differently-formatted
+        // inputs dedup to the same slot.
+        let reg_key = membership_pda_hex.clone();
         let placeholder = serde_json::json!({
             "leaf_index": plan.next_leaf_index as i64,
             "pending": true,
@@ -1391,8 +1399,10 @@ mod tests {
     // fall out of the dedup map, while a fresh entry keeps deduping.
     #[test]
     fn reg_in_flight_entries_expire_after_ttl() {
-        let stale_key = ("cfg-ttl-test".to_string(), "aa".repeat(32));
-        let fresh_key = ("cfg-ttl-test".to_string(), "bb".repeat(32));
+        // Keys are membership-PDA hex strings (see RegInFlightMap); any two
+        // distinct values exercise the TTL eviction.
+        let stale_key = "aa".repeat(32);
+        let fresh_key = "bb".repeat(32);
         let Some(back_dated) =
             Instant::now().checked_sub(REG_IN_FLIGHT_TTL + Duration::from_secs(1))
         else {

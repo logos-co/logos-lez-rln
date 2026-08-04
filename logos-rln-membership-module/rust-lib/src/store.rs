@@ -40,19 +40,14 @@ use crate::keystore::{self, KeystoreEntry, KeystoreFile};
 use crate::registry_id;
 use crate::{ApiError, ErrorKind};
 
-pub(crate) const ST_PENDING: &str = "pending";
-pub(crate) const ST_FAILED: &str = "failed";
-/// Wire counterparts of logos-rln-module `rln_core::membership_status`:
-/// ST_ACTIVE / ST_GRACE / ST_EXPIRED MUST equal the exact
-/// "active"/"grace_period"/"expired" strings that sibling returns over the
-/// provider wire. The two crates are deliberately decoupled (no shared type —
-/// this crate has no rln-layouts dep); the `membership_state_wire_strings`
-/// test is the single tested anchor for the contract.
-pub(crate) const ST_ACTIVE: &str = "active";
-pub(crate) const ST_GRACE: &str = "grace_period";
-pub(crate) const ST_EXPIRED: &str = "expired";
-pub(crate) const ST_ERASED: &str = "erased";
-pub(crate) const ST_UNKNOWN: &str = "unknown";
+/// The persisted schema cluster lives in `keystore.rs` (it owns the on-disk
+/// format — `MembershipMeta`/`StateChange` are the `membership` field of a
+/// `KeystoreEntry`, and `MembershipState` is `MembershipMeta.state`'s type).
+/// Re-exported here so every `store::MembershipMeta` / `store::MembershipState`
+/// path across the crate keeps resolving, and so `store→keystore` stays the
+/// only edge between the two (defining `MembershipState` in keystore rather
+/// than here is what keeps the former cycle broken).
+pub(crate) use crate::keystore::{MembershipMeta, MembershipState, StateChange};
 
 /// Pending→Failed bound. Testnet confirmation is 60–90s; 300s keeps a
 /// comfortable margin while still bounding Pending per the spec MUST.
@@ -61,31 +56,45 @@ const STATE_HISTORY_CAP: usize = 20;
 
 // ------------------------------------------------------------------- records
 
-/// Plaintext-safe sidecar metadata stored NEXT TO the crypto envelope.
-/// `registry_id` + `identity_commitment` are tamper-bound by the entry's
-/// membership_hash key (recomputed at load) and duplicated inside the
-/// ciphertext; the rest are self-healing caches of registry state.
-#[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct MembershipMeta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) failed_reason: Option<String>,
-    pub(crate) identity_commitment: String,
-    /// Provisional while pending (pre-submit estimate); authoritative after
-    /// the pending→active re-read (spec MUST).
-    pub(crate) leaf_index: u64,
-    pub(crate) rate_limit: u64,
-    pub(crate) registry_id: String,
-    pub(crate) state: String,
-    pub(crate) state_history: Vec<StateChange>,
-    pub(crate) submitted_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) tx_result: Option<String>,
+impl MembershipMeta {
+    /// The one place a failed submission is recorded: the state transition,
+    /// the "submit_failed: " failure-reason prefix consumers key on, and the
+    /// spec's retryable flag (mirrors the submission error's class). An
+    /// inherent impl on the keystore-owned schema type — legal cross-module,
+    /// same crate.
+    pub(crate) fn mark_submit_failed(&mut self, message: &str, retryable: bool) {
+        self.state = MembershipState::Failed;
+        self.failed_reason = Some(format!("submit_failed: {message}"));
+        self.retryable = Some(retryable);
+    }
+
+    /// Record a LATE/async submission error without clobbering a state the
+    /// poller — or a registry read-back — already advanced past `Pending`: a
+    /// lost or timed-out reply proves nothing about a submission the registry
+    /// may already have confirmed (the exact race that would flip a confirmed
+    /// Active record to a terminal, unselectable Failed). A still-`Pending`
+    /// record is failed only for a definitive (non-retryable) error; a
+    /// retryable transport failure is left `Pending` for the poller to
+    /// confirm-or-time-out (`merge_state` fails a stale Pending after
+    /// `CONFIRMATION_WINDOW_SECS`), per the poller's invariant.
+    pub(crate) fn record_async_submit_error(&mut self, message: &str, retryable: bool) {
+        if self.state != MembershipState::Pending || retryable {
+            return;
+        }
+        self.mark_submit_failed(message, retryable);
+    }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct StateChange {
-    pub(crate) at: u64,
-    pub(crate) state: String,
+/// One registry's local record as consumers see it: the membership_hash, its
+/// sidecar metadata, and whether the load-time tamper scan quarantined it.
+/// Clone-only — NEVER persisted or serialized (the on-disk shape is
+/// `KeystoreEntry`); this is purely the in-memory read triple `records_for`
+/// hands back in place of the former `(String, MembershipMeta, bool)`.
+#[derive(Clone)]
+pub(crate) struct MembershipRecord {
+    pub(crate) hash: String,
+    pub(crate) meta: MembershipMeta,
+    pub(crate) quarantined: bool,
 }
 
 /// The decrypted credential plaintext (see keystore.rs module docs).
@@ -128,7 +137,22 @@ pub(crate) fn reset_for_tests() {
 /// Load (or create) the store. Called from `on_context_ready`; runs the
 /// tamper scan binding each entry's sidecar to its membership_hash key.
 pub(crate) fn init(dir: PathBuf) {
-    let file = keystore::load(&dir);
+    let file = match keystore::load(&dir) {
+        Ok(file) => file,
+        Err(e) => {
+            // The keystore file exists but couldn't be read. Fail closed:
+            // leave the store UNINITIALIZED so every op errors instead of
+            // treating the fault as an empty store — which would invent a new
+            // secret over, then clobber, credentials that were only
+            // temporarily unreadable. The next launch retries the read.
+            eprintln!(
+                "store: keystore read failed ({e}); leaving store uninitialized to avoid \
+                 clobbering existing credentials — resolve the fault and restart"
+            );
+            *crate::lock(&STORE) = None;
+            return;
+        }
+    };
     let mut quarantined = BTreeSet::new();
     for (hash, entry) in &file.credentials {
         let meta = &entry.membership;
@@ -273,13 +297,17 @@ impl Store {
         self.quarantined.contains(hash)
     }
 
-    /// All records for one canonical registry_id: (hash, meta, quarantined).
-    pub(crate) fn records_for(&self, canonical_registry: &str) -> Vec<(String, MembershipMeta, bool)> {
+    /// All records for one canonical registry_id, as [`MembershipRecord`]s.
+    pub(crate) fn records_for(&self, canonical_registry: &str) -> Vec<MembershipRecord> {
         self.file
             .credentials
             .iter()
             .filter(|(_, e)| e.membership.registry_id == canonical_registry)
-            .map(|(h, e)| (h.clone(), e.membership.clone(), self.quarantined.contains(h)))
+            .map(|(h, e)| MembershipRecord {
+                hash: h.clone(),
+                meta: e.membership.clone(),
+                quarantined: self.quarantined.contains(h),
+            })
             .collect()
     }
 
@@ -289,7 +317,7 @@ impl Store {
         self.file
             .credentials
             .iter()
-            .filter(|(h, e)| e.membership.state == ST_PENDING && !self.quarantined.contains(*h))
+            .filter(|(h, e)| e.membership.state == MembershipState::Pending && !self.quarantined.contains(*h))
             .map(|(h, e)| (h.clone(), e.membership.clone()))
             .collect()
     }
@@ -302,7 +330,10 @@ impl Store {
             .iter()
             .filter(|(h, e)| {
                 !self.quarantined.contains(*h)
-                    && [ST_ACTIVE, ST_GRACE, ST_EXPIRED].contains(&e.membership.state.as_str())
+                    && matches!(
+                        e.membership.state,
+                        MembershipState::Active | MembershipState::GracePeriod | MembershipState::Expired
+                    )
             })
             .map(|(h, e)| (h.clone(), e.membership.clone()))
             .collect()
@@ -319,12 +350,12 @@ impl Store {
         let entry = self.file.credentials.get_mut(hash).ok_or_else(|| {
             ApiError::new(ErrorKind::UnknownMembership, "no such membership_hash")
         })?;
-        let before = entry.membership.state.clone();
+        let before = entry.membership.state;
         f(&mut entry.membership);
         if entry.membership.state != before {
             entry.membership.state_history.push(StateChange {
                 at: crate::now_unix(),
-                state: entry.membership.state.clone(),
+                state: entry.membership.state,
             });
             if entry.membership.state_history.len() > STATE_HISTORY_CAP {
                 let drop_n = entry.membership.state_history.len() - STATE_HISTORY_CAP;
@@ -332,6 +363,62 @@ impl Store {
             }
         }
         self.persist()
+    }
+
+    /// Reserve the next `message_id` for `(membership, rln_identifier, epoch)`
+    /// and DURABLY PERSIST it before returning — the caller uses the slot only
+    /// after this call succeeds, so a crash can waste a slot but never reissue
+    /// one. No unlock needed: allocations live in the plaintext
+    /// sidecar. `BudgetExhausted` when the epoch's `rate_limit` is spent.
+    pub(crate) fn reserve_message_id(
+        &mut self,
+        hash: &str,
+        rln_identifier_hex: &str,
+        epoch: u64,
+        retain_floor: u64,
+        rate_limit: u64,
+    ) -> Result<u64, ApiError> {
+        let entry = self.file.credentials.get_mut(hash).ok_or_else(|| {
+            ApiError::new(ErrorKind::UnknownMembership, "no such membership_hash")
+        })?;
+        let slot = crate::rate_limit::reserve_slot(
+            &mut entry.membership.allocations,
+            rln_identifier_hex,
+            epoch,
+            retain_floor,
+            rate_limit,
+        )
+        .map_err(|_| {
+            ApiError::new(
+                ErrorKind::BudgetExhausted,
+                "epoch rate-limit budget exhausted; retry next epoch",
+            )
+        })?;
+        self.persist()?;
+        Ok(slot)
+    }
+
+    /// Remaining slots for `(membership, rln_identifier, epoch)` — the quota
+    /// read's current-epoch budget. Read-only.
+    pub(crate) fn remaining_budget(
+        &self,
+        hash: &str,
+        rln_identifier_hex: &str,
+        epoch: u64,
+        rate_limit: u64,
+    ) -> u64 {
+        self.file
+            .credentials
+            .get(hash)
+            .map(|e| {
+                crate::rate_limit::remaining(
+                    &e.membership.allocations,
+                    rln_identifier_hex,
+                    epoch,
+                    rate_limit,
+                )
+            })
+            .unwrap_or(0)
     }
 
     fn persist(&self) -> Result<(), ApiError> {
@@ -345,10 +432,7 @@ impl Store {
 /// True once a record has ever been observed on the registry — the spec's
 /// "state becomes Unknown after having been Active" removal signal.
 fn has_been_active(meta: &MembershipMeta) -> bool {
-    let active_like = |s: &str| {
-        s == ST_ACTIVE || s == ST_GRACE || s == ST_EXPIRED || s == ST_ERASED
-    };
-    active_like(&meta.state) || meta.state_history.iter().any(|c| active_like(&c.state))
+    meta.state.is_active_like() || meta.state_history.iter().any(|c| c.state.is_active_like())
 }
 
 /// The spec's merged view, as a pure function: the registry's report
@@ -356,42 +440,80 @@ fn has_been_active(meta: &MembershipMeta) -> bool {
 /// Callers persist any transition this implies (pending→failed, →erased).
 pub(crate) fn merge_state(
     local: Option<&MembershipMeta>,
-    registry_state: Option<&str>,
+    registry_state: Option<MembershipState>,
     now: u64,
-) -> String {
+) -> MembershipState {
     match (local, registry_state) {
-        (None, None) => ST_UNKNOWN.to_string(),
+        (None, None) => MembershipState::Unknown,
         // The registry has it: its chain-clock view wins outright.
-        (_, Some(state)) => state.to_string(),
+        (_, Some(state)) => state,
         (Some(meta), None) => {
-            if meta.state == ST_PENDING {
+            if meta.state == MembershipState::Pending {
                 if now.saturating_sub(meta.submitted_at) > CONFIRMATION_WINDOW_SECS {
-                    ST_FAILED.to_string()
+                    MembershipState::Failed
                 } else {
-                    ST_PENDING.to_string()
+                    MembershipState::Pending
                 }
             } else if has_been_active(meta) {
-                ST_ERASED.to_string()
+                MembershipState::Erased
             } else {
                 // failed stays failed (visible until re-registered).
-                meta.state.clone()
+                meta.state
             }
         }
     }
+}
+
+/// The `membership_state_changed` event's args (module docs: LIDL events
+/// section), if `new_state` is an actual transition — `None` for a mere
+/// re-observation of the same state, which the poller and the
+/// self-healing read path (`get_membership_state_impl`) both hit on every
+/// tick/read and must NOT emit for. `meta` is the PRE-transition record —
+/// callers snapshot it before applying the write, so `previous` is always
+/// the state that held immediately before this change. `rln_identifier`
+/// carries through empty for a pre-scope legacy record, matching the
+/// event's documented contract.
+pub(crate) fn transition_event(
+    hash: &str,
+    meta: &MembershipMeta,
+    new_state: MembershipState,
+) -> Option<(String, String, String, String, String)> {
+    if new_state == meta.state {
+        return None;
+    }
+    // Enum→wire string for the &str-args generated event: serde (the
+    // `rename_all = "snake_case"` on MembershipState) is the single source of
+    // truth, so the payload bytes stay identical to the former string states.
+    let wire = |s: MembershipState| {
+        serde_json::to_value(s)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default()
+    };
+    Some((
+        meta.registry_id.clone(),
+        meta.rln_identifier.clone(),
+        hash.to_string(),
+        wire(new_state),
+        wire(meta.state),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn meta(state: &str, submitted_at: u64) -> MembershipMeta {
+    fn meta(state: MembershipState, submitted_at: u64) -> MembershipMeta {
         MembershipMeta {
+            allocations: Vec::new(),
             failed_reason: None,
             identity_commitment: "11".repeat(32),
             leaf_index: 7,
             rate_limit: 300,
             registry_id: format!("logos:local:{}", "ab".repeat(32)),
-            state: state.to_string(),
+            retryable: None,
+            rln_identifier: String::new(),
+            state,
             state_history: vec![],
             submitted_at,
             tx_result: None,
@@ -400,29 +522,55 @@ mod tests {
 
     #[test]
     fn merge_state_matrix() {
+        use MembershipState::*;
         let now = 10_000;
         // No local record.
-        assert_eq!(merge_state(None, None, now), ST_UNKNOWN);
-        assert_eq!(merge_state(None, Some(ST_ACTIVE), now), ST_ACTIVE);
+        assert_eq!(merge_state(None, None, now), Unknown);
+        assert_eq!(merge_state(None, Some(Active), now), Active);
         // Pending inside/outside the confirmation window.
-        let fresh = meta(ST_PENDING, now - 10);
-        assert_eq!(merge_state(Some(&fresh), None, now), ST_PENDING);
-        let stale = meta(ST_PENDING, now - CONFIRMATION_WINDOW_SECS - 1);
-        assert_eq!(merge_state(Some(&stale), None, now), ST_FAILED);
+        let fresh = meta(Pending, now - 10);
+        assert_eq!(merge_state(Some(&fresh), None, now), Pending);
+        let stale = meta(Pending, now - CONFIRMATION_WINDOW_SECS - 1);
+        assert_eq!(merge_state(Some(&stale), None, now), Failed);
         // Registry view wins when present.
-        assert_eq!(merge_state(Some(&stale), Some(ST_GRACE), now), ST_GRACE);
+        assert_eq!(merge_state(Some(&stale), Some(GracePeriod), now), GracePeriod);
         // Failed stays failed while absent.
-        let failed = meta(ST_FAILED, now - 1_000);
-        assert_eq!(merge_state(Some(&failed), None, now), ST_FAILED);
+        let failed = meta(Failed, now - 1_000);
+        assert_eq!(merge_state(Some(&failed), None, now), Failed);
         // Was active, now gone from the registry → inferred erased.
-        let was_active = meta(ST_ACTIVE, now - 1_000);
-        assert_eq!(merge_state(Some(&was_active), None, now), ST_ERASED);
-        let mut expired_history = meta(ST_FAILED, now - 1_000);
+        let was_active = meta(Active, now - 1_000);
+        assert_eq!(merge_state(Some(&was_active), None, now), Erased);
+        let mut expired_history = meta(Failed, now - 1_000);
         expired_history.state_history.push(StateChange {
             at: now - 500,
-            state: ST_EXPIRED.to_string(),
+            state: Expired,
         });
-        assert_eq!(merge_state(Some(&expired_history), None, now), ST_ERASED);
+        assert_eq!(merge_state(Some(&expired_history), None, now), Erased);
+    }
+
+    #[test]
+    fn transition_event_gates_on_actual_state_change() {
+        use MembershipState::*;
+        // A mere re-observation of the same state must not emit.
+        let active = meta(Active, 0);
+        assert!(transition_event("h", &active, Active).is_none());
+
+        // pending -> active: previous carries the pre-transition state.
+        let pending = meta(Pending, 0);
+        let (registry_id, rln_identifier, hash, state, previous) =
+            transition_event("h1", &pending, Active).expect("real transition");
+        assert_eq!(registry_id, pending.registry_id);
+        assert_eq!(rln_identifier, "");
+        assert_eq!(hash, "h1");
+        assert_eq!(state, "active");
+        assert_eq!(previous, "pending");
+
+        // A legacy record's empty rln_identifier is preserved verbatim.
+        let mut scoped = meta(Pending, 0);
+        scoped.rln_identifier = "ab".repeat(32);
+        let (_, rln_identifier, ..) =
+            transition_event("h2", &scoped, Failed).expect("real transition");
+        assert_eq!(rln_identifier, scoped.rln_identifier);
     }
 
     fn test_store(tag: &str) -> PathBuf {
@@ -453,7 +601,7 @@ mod tests {
         };
         with_store(|s| {
             s.unlock("pw")?;
-            let mut m = meta(ST_PENDING, crate::now_unix());
+            let mut m = meta(MembershipState::Pending, crate::now_unix());
             m.registry_id = registry.clone();
             m.identity_commitment = credential.identity_commitment.clone();
             s.insert(&hash, m, &credential)
@@ -514,13 +662,13 @@ mod tests {
         };
         with_store(|s| {
             s.unlock("pw")?;
-            let mut m = meta(ST_PENDING, crate::now_unix());
+            let mut m = meta(MembershipState::Pending, crate::now_unix());
             m.registry_id = registry.clone();
             m.identity_commitment = credential.identity_commitment.clone();
             s.insert(&hash, m, &credential)?;
             for i in 0..(STATE_HISTORY_CAP + 5) {
-                let next = if i % 2 == 0 { ST_ACTIVE } else { ST_GRACE };
-                s.update(&hash, |m| m.state = next.to_string())?;
+                let next = if i % 2 == 0 { MembershipState::Active } else { MembershipState::GracePeriod };
+                s.update(&hash, |m| m.state = next)?;
             }
             let meta = s.get(&hash).unwrap();
             assert_eq!(meta.state_history.len(), STATE_HISTORY_CAP);

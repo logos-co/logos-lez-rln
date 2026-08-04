@@ -92,6 +92,14 @@ Item {
     property int transientRetryMs: 1500
     property int transientRetryMax: 4
 
+    // True once the module's push channel is armed on this bridge (see
+    // M.armModuleEvent) — set once at startup below. false on a host
+    // predating onModuleEvent; regTimer then just keeps its normal cadence,
+    // polling being the one channel. MembershipCard reads this flag too
+    // (via its `flow` reference) rather than arming a second subscription
+    // for the same (module, event) pair.
+    property bool eventsArmed: false
+
     // Phase D — faucet claim into a fresh holding.
     property string fundPhase: "idle"
     property string fundError: ""
@@ -100,26 +108,28 @@ Item {
     property string holdingHex: ""
     property int claimPolls: 0
 
-    // Phase E — identity + registration + confirmation poll.
+    // Phase E — registration + confirmation poll. The identity credential is
+    // generated INSIDE the membership module by register(); this flow only ever
+    // sees the public commitment from its reply.
     property string regPhase: "idle"
     property string regError: ""
     property string regState: ""
     property string commitment: ""
     property bool rateLimitMismatch: false
-    // The identity secret lives here only between generate_identity and
-    // register, which hands it to the module's encrypted keystore.
-    property string secretHash: ""
 
     // ---- Gifter path (alternative to Phases A/B/D) -------------------------
-    // "gifter" replaces wallet-provision + sync + faucet with a libp2p dial to
-    // a gifter node that pays for the registration, authorized by a Keycard
-    // attestation. Phase C (keystore unlock) and the Phase E register+poll tail
-    // are REUSED — the gifter registers the identity on-chain, then the
-    // idempotent register() records it in the keystore with no funds. Set on
+    // "gifter" replaces wallet-provision + sync + faucet with ONE delegated
+    // register() call: the membership module generates the identity, drives
+    // rln_gifter_module.request with its commitment, and the gifter client
+    // has the keycard capture module produce the attestation (bound to that
+    // commitment) before dialing the gifter node that pays for the
+    // registration. The Phase E poll tail is REUSED for confirmation. Set on
     // Welcome; reset to "wallet" by resetForNewRegistration.
     property string registrationMode: "wallet"
     // idle | running | done | error. gifterStage is the running sub-step, for
-    // the progress caption: node -> identity -> capture -> dial -> persist.
+    // the progress caption: wallet -> node -> capture (which the caption keeps
+    // showing while the module's background chain captures, dials, and
+    // registers).
     property string gifterPhase: "idle"
     property string gifterStage: ""
     property string gifterError: ""
@@ -127,29 +137,27 @@ Item {
     // dev gifter's stable peerId + address, freely editable.
     property string gifterPeerId: M.GIFTER_PEER_ID_DEFAULT
     property string gifterMultiaddr: M.GIFTER_MULTIADDR_DEFAULT
-    // The seed we derive the identity from and re-hand to rlnGifterRequest (it
-    // re-derives the SAME identity internally), and the card's one-shot
-    // nullifier from the verified attestation (kept for display/diagnostics).
-    property string gifterSeed: ""
-    property string gifterNullifier: ""
-    // The gifter's on-chain register_member tx hash, passed to register() so the
-    // gifted membership's detail view shows the transaction.
-    property string gifterTxHash: ""
     // createNode + start are one-time per session; once a node answers peerInfo
     // we skip re-creating it on a retry or a second gifted membership.
     property bool libp2pNodeReady: false
     // The gifter pays for registration, but the CLIENT still needs an OPEN wallet
-    // for on-chain READS: get_membership and the idempotent register both fetch
+    // for on-chain READS: the membership module's confirmation poller fetches
     // accounts through the wallet's sequencer connection ("Null wallet handle"
     // otherwise). Provisioned + opened once, unfunded, unsynced.
     property bool gifterWalletReady: false
-    // On-chain confirmation of the gifter's registration (it submits the tx, so
-    // the PDA is Pending for a bit before get_membership can read it). Poll until
-    // it lands, then persist. Bounded so it always terminates.
-    property int giftConfirmPolls: 0
-    property int giftConfirmBudget: 40
-    property int giftConfirmMs: 6000
-    property string giftConfirmCfg: ""
+    // Card-presence gate before the delegated register: the in-module capture
+    // starts right after register() is called, and gating keeps the whole
+    // background chain (capture + dial + on-chain register) inside the module's
+    // 300s pending confirmation window.
+    property int cardWaitPolls: 0
+    property int cardWaitBudget: 40
+
+    // Arm the push channel as soon as the flow exists — bridge is a
+    // required property, already resolved (possibly to null under a bare
+    // preview) by the time Component.onCompleted runs.
+    Component.onCompleted: {
+        flow.eventsArmed = M.armModuleEvent(flow.bridge, M.MEMBERSHIP_MODULE, M.MEMBERSHIP_STATE_CHANGED)
+    }
 
     // Fired by finish() when the user leaves the completed wizard.
     signal completed(string commitment)
@@ -213,15 +221,12 @@ Item {
             rateLimitMismatch = false
         }
         // A re-run re-offers the Welcome choice, so default back to the wallet
-        // path and clear the last gift attempt (a fresh seed/attestation next
-        // time). The libp2p node, if up, stays up.
+        // path and clear the last gift attempt. The libp2p node, if up, stays up.
         registrationMode = "wallet"
         if (gifterPhase !== "running") {
             gifterPhase = "idle"
             gifterStage = ""
             gifterError = ""
-            gifterSeed = ""
-            gifterNullifier = ""
         }
     }
 
@@ -577,9 +582,8 @@ Item {
     }
 
     // ---- Phase E: registration ----------------------------------------------
-    // mirrors RegisterView.doGenerate + doRegister — keep in sync. Identity
-    // generation is the consumer's job (spec); the seed is UI-grade entropy,
-    // same policy as the Advanced register form.
+    // mirrors RegisterView.doRegister — keep in sync. The membership module
+    // generates the identity credential inside register().
     function startRegistration() {
         if (regPhase === "running" || regPhase === "done")
             return
@@ -587,17 +591,9 @@ Item {
         regError = ""
         regState = ""
         rateLimitMismatch = false
-        callRetry(M.RLN_MODULE, "generate_identity", [M.randomSeedHex()], function (r) {
-            if (r.error) { flow.regPhase = "error"; flow.regError = M.errorText(r.error); return }
-            if (!r.id_commitment || !r.id_secret_hash) {
-                flow.regPhase = "error"
-                flow.regError = "generate_identity returned no credential: " + JSON.stringify(r)
-                return
-            }
-            flow.commitment = r.id_commitment
-            flow.secretHash = r.id_secret_hash
-            flow.submitRegistration()
-        })
+        // The credential is generated inside the module by register — there is
+        // no client-side generate_identity step; the secret never leaves it.
+        flow.submitRegistration()
     }
 
     function retryRegistration() {
@@ -608,21 +604,16 @@ Item {
     }
 
     function submitRegistration() {
-        var credential = JSON.stringify({
-            identity_commitment: commitment,
-            identity_secret_hash: secretHash
-        })
-        // The gifter already funded + registered this identity on-chain, so
-        // register() is idempotent here: with no funding account it detects the
-        // existing membership and just records it in the keystore (no faucet,
-        // no wallet). The wallet path passes its faucet holding as before.
-        var options = registrationMode === "gifter"
-            ? JSON.stringify({ gifter_tx_hash: gifterTxHash })
-            : JSON.stringify({ funding_holding_account_id: holdingHex })
+        // Wallet path: register generates the credential in-module (the caller
+        // supplies no credential) and the faucet holding pays. The gifter path
+        // never comes through here — it submits via registerDelegated().
+        var options = JSON.stringify({ funding_holding_account_id: holdingHex })
         callRetry(M.MEMBERSHIP_MODULE, "register",
-               [registryId, credential, rateLimit, options], function (r) {
-            flow.secretHash = ""
+               [registryId, M.DEFAULT_RLN_ID, rateLimit, options], function (r) {
             if (r.error) { flow.regPhase = "error"; flow.regError = M.errorText(r.error); return }
+            // register returns the public Membership view; the commitment is the
+            // only credential-derived value it exposes.
+            flow.commitment = (r.credential && r.credential.identity_commitment) || ""
             flow.regState = r.state || "pending"
             flow.rateLimitMismatch = r.rate_limit_mismatch === true
             regTimer.start()
@@ -637,7 +628,7 @@ Item {
     // non-transient error stops and fails.
     function pollRegistration() {
         M.call(bridge, M.MEMBERSHIP_MODULE, "get_membership_state",
-               [registryId, commitment], function (r) {
+               [registryId, M.DEFAULT_RLN_ID], function (r) {
             if (r.error) {
                 if (M.isTransientError(r.error.kind))
                     return
@@ -657,6 +648,16 @@ Item {
             } else {
                 flow.regPhase = "error"
                 flow.regError = "Registration settled in state \"" + flow.regState + "\"."
+            }
+            // The gifter path runs its whole chain (capture -> dial -> on-chain
+            // register) behind the one delegated register(); its phase settles
+            // with the registration itself.
+            if (flow.registrationMode === "gifter" && flow.gifterPhase === "running") {
+                flow.gifterStage = ""
+                if (flow.regPhase === "done")
+                    flow.gifterPhase = "done"
+                else
+                    flow.gifterPhase = "error"
             }
         })
     }
@@ -683,19 +684,21 @@ Item {
     }
 
     // ---- Gifter path ---------------------------------------------------------
-    // One callback chain replacing wallet/sync/faucet: bring up a libp2p node,
-    // derive an identity from a fresh seed, capture a Keycard attestation bound
-    // to its commitment, ask the gifter to register it (the gifter pays), then
-    // hand off to the Phase E persist+confirm tail (which drives regPhase, so
-    // OnboardingView completes the wizard exactly as the wallet path does).
-    // ORDER MATTERS: the attestation must be bound to the commitment, so the
-    // identity is derived BEFORE capture.
+    // Bring up the transport, gate on a Keycard being on the reader, then hand
+    // the WHOLE delegated flow to the membership module: one register() call
+    // generates the identity in-module, drives rln_gifter_module.request with
+    // its commitment, the auth_provider (the capture module) produces the
+    // attestation bound to exactly that commitment — the ordering constraint
+    // is internal to the module — and the
+    // gifter node pays for the on-chain registration. The Phase E poll tail
+    // drives regPhase, so OnboardingView completes the wizard exactly as the
+    // wallet path does.
     function startGifter() {
         if (gifterPhase === "running" || gifterPhase === "done")
             return
         // Keycard grants are clamped server-side to RATE_LIMIT_MIN regardless of
-        // the request, so ask for exactly that — otherwise the persist step sees
-        // the granted rate differ from the requested one and warns spuriously.
+        // the request, so ask for exactly that — otherwise the reply reports the
+        // granted rate differing from the requested one and warns spuriously.
         rateLimit = M.RATE_LIMIT_MIN
         gifterPhase = "running"
         gifterError = ""
@@ -705,18 +708,9 @@ Item {
         flow.gifterStage = "node"
         flow.ensureLibp2pNode(function (nodeErr) {
             if (nodeErr) { flow.failGifter(nodeErr); return }
-            flow.gifterStage = "identity"
-            flow.gifterSeed = M.randomSeedHex()
-            flow.callRetry(M.RLN_MODULE, "generate_identity", [flow.gifterSeed], function (r) {
-                if (r.error) { flow.failGifter(M.errorText(r.error)); return }
-                if (!r.id_commitment || !r.id_secret_hash) {
-                    flow.failGifter("generate_identity returned no credential: " + JSON.stringify(r))
-                    return
-                }
-                flow.commitment = r.id_commitment
-                flow.secretHash = r.id_secret_hash
-                flow.captureAndRequest()
-            })
+            flow.gifterStage = "capture"
+            flow.cardWaitPolls = 0
+            flow.pollCardThenRegister()
         })
         })
     }
@@ -816,102 +810,61 @@ Item {
         })
     }
 
-    // Capture the attestation (blocks until the card is tapped — no timeout),
-    // then dial the gifter. On grant, hand off to the persist+confirm tail.
-    function captureAndRequest() {
-        gifterStage = "capture"
-        M.call(bridge, M.CAPTURE_MODULE, "capture_attestation", [commitment], function (r) {
+    // Wait for a Keycard on the reader before delegating: the in-module capture
+    // starts right after register() is dispatched, so gating on presence keeps
+    // the background chain (capture + dial + on-chain register) fast and inside
+    // the module's pending confirmation window. Bounded, with a clear message.
+    function pollCardThenRegister() {
+        M.call(bridge, M.CAPTURE_MODULE, "card_status", [], function (r) {
+            // A reader/module fault is not "no card yet" — surface the real
+            // cause immediately instead of burning the presence budget and
+            // reporting a misleading no-card message.
             if (r.error) { flow.failGifter(M.errorText(r.error)); return }
-            if (r.verified !== true || !r.attestation_tlv) {
-                flow.failGifter("The Keycard attestation could not be verified. Is a genuine card tapped?")
+            if (r.present === true) { flow.registerDelegated(); return }
+            flow.cardWaitPolls += 1
+            if (flow.cardWaitPolls >= flow.cardWaitBudget) {
+                flow.failGifter("No Keycard detected. Place your card on the reader and try again.")
                 return
             }
-            flow.gifterNullifier = r.nullifier || ""
-            var cfg = M.registryConfigHex(flow.registryId)
-            if (cfg === "") {
-                flow.failGifter("Registry id is not logos:<ref>:<64-hex> — cannot derive the config account.")
-                return
-            }
-            flow.gifterStage = "dial"
-            var reqObj = {
-                gifterPeerId: flow.gifterPeerId.trim(),
-                gifterMultiaddr: flow.gifterMultiaddr.trim(),
-                config: cfg,
-                seed: flow.gifterSeed,
-                rate: flow.rateLimit,
-                attestation: r.attestation_tlv
-            }
-            // rln_gifter_module.request runs the whole gifter protocol over
-            // libp2p_module's generic bridge and returns a plain-String JSON
-            // (real value through the QML bridge, unlike a libp2p LogosResult).
-            // Its internal timeout is 180s (dial + auth + on-chain register);
-            // give the client a little more so we see the real error rather than
-            // a client-side cutoff.
-            M.call(bridge, M.GIFTER_MODULE, "request", [JSON.stringify(reqObj)], function (rr) {
-                if (rr.error) {
-                    // The module registers on-chain BEFORE the (best-effort) mix
-                    // identity adoption, so a real error here means nothing was
-                    // granted — auth refused, dial/timeout. Fail fast.
-                    flow.failGifter(M.gifterErrorText(rr.error))
-                    return
-                }
-                if (rr.auth_success !== true && rr.leaf_index === undefined) {
-                    flow.failGifter("The gifter did not grant a membership: " + JSON.stringify(rr))
-                    return
-                }
-                // The gifter's on-chain tx — carried into the record so the detail
-                // view shows it (the gifter submitted it on our behalf).
-                flow.gifterTxHash = rr.tx_hash || ""
-                // Granted (identity_adopted may be false — mix adoption is optional
-                // and not needed here). The PDA is Pending briefly, so poll for the
-                // on-chain confirmation, then persist to the keystore.
-                flow.confirmAndPersist(cfg)
-            }, 190000)
-        }, 0)
-    }
-
-    // The gift IS registered on-chain (rlnGifterRequest returned success), but the
-    // PDA is Pending for a bit, so poll get_membership until it lands, then
-    // persist + confirm. Stays in the running "confirm" stage (progress, not an
-    // error); times out with a clear message if it never confirms (e.g. the
-    // gifter couldn't apply the tx).
-    function confirmAndPersist(cfg) {
-        flow.gifterStage = "confirm"
-        flow.giftConfirmCfg = cfg
-        flow.giftConfirmPolls = 0
-        flow.pollGiftConfirm()
-        giftConfirmTimer.start()
-    }
-
-    function pollGiftConfirm() {
-        flow.giftConfirmPolls += 1
-        M.call(bridge, M.RLN_MODULE, "get_membership", [flow.giftConfirmCfg, commitment], function (r) {
-            if (!r.error && r.registered === true) {
-                giftConfirmTimer.stop()
-                flow.gifterStage = "persist"
-                flow.gifterPhase = "done"
-                flow.persistGifterMembership()
-                return
-            }
-            if (flow.giftConfirmPolls >= flow.giftConfirmBudget) {
-                giftConfirmTimer.stop()
-                flow.failGifter("Your membership was requested, but it didn't confirm on-chain in time. "
-                    + "The gifter may be busy — try again in a moment.")
-            }
+            var t = retryTimerComponent.createObject(flow, { interval: 1500 })
+            t.triggered.connect(function () { t.destroy(); flow.pollCardThenRegister() })
+            t.start()
         })
     }
 
-    // Persist the gifted grant + confirm it, reusing Phase E. The identity is
-    // already on-chain (the gifter registered it), so register() is idempotent
-    // and needs no funds (see submitRegistration's gifter branch); regTimer then
-    // polls it to active — driving regPhase, which OnboardingView watches to
-    // complete the wizard.
-    function persistGifterMembership() {
+    // The ONE delegated call: register() generates the identity in-module and
+    // returns the public Pending membership immediately; the module then drives
+    // the gifter in the background (capture bound to its commitment -> dial ->
+    // the gifter's funded on-chain register). Confirmation comes through the
+    // shared Phase E poll; keep the card on the reader until it settles.
+    function registerDelegated() {
         regPhase = "running"
         regError = ""
         regState = ""
         rateLimitMismatch = false
-        submitRegistration()
+        var options = JSON.stringify({
+            delegated: "true",
+            gifter_peer_id: gifterPeerId.trim(),
+            gifter_multiaddr: gifterMultiaddr.trim(),
+            // Keycard vector via the generic auth surface: the gifter client
+            // asks the capture module (an rln_auth_vector producer) for the
+            // attestation bound to the module-generated commitment.
+            auth_type: "keycard-attestation",
+            auth_provider: M.CAPTURE_MODULE
+        })
+        callRetry(M.MEMBERSHIP_MODULE, "register",
+               [registryId, M.DEFAULT_RLN_ID, rateLimit, options], function (r) {
+            if (r.error) {
+                flow.regPhase = "error"
+                flow.regError = M.errorText(r.error)
+                flow.failGifter(M.errorText(r.error))
+                return
+            }
+            flow.commitment = (r.credential && r.credential.identity_commitment) || ""
+            flow.regState = r.state || "pending"
+            flow.rateLimitMismatch = r.rate_limit_mismatch === true
+            regTimer.start()
+        })
     }
 
     // No sync progress Timer anymore: mid-sync reads starve (and can crash
@@ -926,16 +879,13 @@ Item {
 
     Timer {
         id: regTimer
-        interval: flow.statePollMs
+        // Events only tighten latency, never replace the poll: when armed
+        // the interval widens to 60s (a slow-poll safety net behind the
+        // push channel); statePollMs keeps the normal cadence — and its
+        // full test-tunability — when this bridge has no event support.
+        interval: flow.eventsArmed ? 60000 : flow.statePollMs
         repeat: true
         onTriggered: flow.pollRegistration()
-    }
-
-    Timer {
-        id: giftConfirmTimer
-        interval: flow.giftConfirmMs
-        repeat: true
-        onTriggered: flow.pollGiftConfirm()
     }
 
     // One-shot backoff timer for callRetry, instantiated per retry and
@@ -943,5 +893,27 @@ Item {
     Component {
         id: retryTimerComponent
         Timer { repeat: false }
+    }
+
+    // Wake-up only, never a data source: get_membership_state (via
+    // pollRegistration, the same call regTimer already makes every tick)
+    // stays the sole authority on state. This flow tracks no
+    // membership_hash to narrow the filter further (register()'s reply is
+    // never captured), so any state change on OUR registry — even one
+    // belonging to a different registrant on this shared-faucet testnet
+    // registry — wakes the poll early; that costs one extra idempotent
+    // read, never a missed one. Gated on regTimer.running so an event
+    // arriving outside an active confirmation wait (before registration
+    // starts, or after it already settled) is a no-op.
+    Connections {
+        target: flow.bridge
+        enabled: flow.eventsArmed
+        function onModuleEventReceived(moduleName, eventName, data) {
+            if (moduleName !== M.MEMBERSHIP_MODULE || eventName !== M.MEMBERSHIP_STATE_CHANGED)
+                return
+            var evt = M.decodeMembershipStateChanged(data)
+            if (evt && evt.registry_id === flow.registryId && regTimer.running)
+                flow.pollRegistration()
+        }
     }
 }
