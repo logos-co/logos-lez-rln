@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 const SERVICE: &str = "org.logos.rln-membership.keystore";
+#[cfg(target_os = "macos")]
 const LABEL: &str = "logos-rln-membership-keystore";
 #[cfg(target_os = "macos")]
 const SECURITY_BIN: &str = "/usr/bin/security";

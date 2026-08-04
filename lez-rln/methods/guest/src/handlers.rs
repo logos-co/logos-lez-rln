@@ -567,7 +567,8 @@ pub fn buy_credits(
     // The holding's owner is the only field an attacker can't forge; require it
     // to be the configured token program and dispatch to that trusted id, not
     // to whatever program the holding claims to belong to.
-    let payment_holding_owner: [u8; 32] = bytemuck::cast(user_payment_holding.account.program_owner);
+    let payment_holding_owner: [u8; 32] =
+        bytemuck::cast(user_payment_holding.account.program_owner);
     assert_eq!(
         payment_holding_owner, config_state.token_program_id,
         "Payment holding not owned by the configured token program"
