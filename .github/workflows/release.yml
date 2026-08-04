@@ -53,7 +53,7 @@ env:
   # GIFTER_REV deliberately when logos-rln-gifter moves (the rev must be pushed
   # to that repo for checkout to fetch it).
   GIFTER_REPO: logos-co/logos-rln-gifter
-  GIFTER_REV: 3167302b7a444fa1ba08260baa7fccbfb8a2a89e
+  GIFTER_REV: be6ddc84feec68a7e7ab01562ffeb8128c7cfb98
   # Every module dir the catalog publishes, local and external. The three
   # per-module loops below all iterate this one list.
   MODULE_DIRS: >-
