@@ -2,6 +2,15 @@
 
 This repository contains the LEZ program for the RLN (Rate-Limiting Nullifiers) membership registry.
 
+## Related repositories
+
+- [logos-co/logos-rln-modules](https://github.com/logos-co/logos-rln-modules) —
+  the Basecamp-facing membership stack (membership module + UI) and the module
+  catalog release pipeline. It builds this repo's `logos-rln-module` into its
+  catalog from a pinned checkout (`LEZ_RLN_REV` in its release workflow).
+- [logos-co/logos-rln-gifter](https://github.com/logos-co/logos-rln-gifter) —
+  the gifter (membership allocation) service/client modules and auth vectors.
+
 ## Prerequisites
 
 - Rust
