@@ -51,7 +51,10 @@ printf '%s' "$PAY" > "$OUT/payment_account.txt"
 printf '%s' "$SUP" > "$OUT/supply_holding.txt"
 printf '%s' "$FUNDING" > "$OUT/funding.txt"
 jq '.last_synced_block = 0' "$WALLET" > "$OUT/storage.json.seed"
-jq -n --arg s "$SEQ" '{sequencer_addr:$s, seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100}' > "$OUT/wallet_config.json"
+# Dual-shape sequencer field: lez >= v0.2.1 reads `sequencers` (multi-client),
+# the rc6-era wallet module still reads flat `sequencer_addr`. Neither struct
+# denies unknown fields, so one file serves both during the transition.
+jq -n --arg s "$SEQ" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100}' > "$OUT/wallet_config.json"
 cat > "$OUT/env.sh" <<EOF
 #!/usr/bin/env bash
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"

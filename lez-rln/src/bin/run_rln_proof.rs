@@ -26,7 +26,7 @@ const RLN_IDENTIFIER: &str = "rln/logos-rln-relay/v2.0.0";
 
 #[tokio::main]
 async fn main() {
-    let mut wallet_core = init_wallet();
+    let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
 

@@ -20,12 +20,12 @@ workspace = true
 # LSSA dependencies fetched as git deps pinned to upstream rc6 (renamed
 # nssa->lee, nssa_core->lee_core; package aliasing keeps the lez-rln source
 # unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
-nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6", features = ["client"] }
-programs = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2", features = ["client"] }
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
 
 rln-layouts = { path = "rln-layouts" }
 
@@ -54,9 +54,9 @@ name = "register_member"
 path = "src/bin/register_member.rs"
 
 [dev-dependencies]
-nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6", features = ["test-utils"] }
-token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2", features = ["test-utils"] }
+token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
 
 [workspace.dependencies]
 rln-layouts = { path = "rln-layouts", default-features = false }

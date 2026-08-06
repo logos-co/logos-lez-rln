@@ -132,14 +132,18 @@ pub const DATA_DIR: &str = ".logos-lez-rln";
 /// An existing `wallet_config.json` is preserved (lets callers point the
 /// wallet at a non-default sequencer, e.g. the public LEZ testnet); with
 /// none present, a fresh local-dev default is written.
-pub fn init_wallet() -> WalletCore {
+pub async fn init_wallet() -> WalletCore {
     let config_path = wallet::helperfunctions::fetch_config_path().unwrap();
     let storage_path = wallet::helperfunctions::fetch_persistent_storage_path().unwrap();
+    let statistics_path = wallet::helperfunctions::fetch_statistics_path().unwrap();
     if storage_path.exists() {
-        WalletCore::new_update_chain(config_path, storage_path, None).unwrap()
+        WalletCore::new_update_chain(config_path, storage_path, statistics_path, None)
+            .await
+            .unwrap()
     } else {
         println!("First run: initializing wallet storage at {storage_path:?}");
-        WalletCore::new_init_storage(config_path, storage_path, None, "")
+        WalletCore::new_init_storage(config_path, storage_path, statistics_path, None, "")
+            .await
             .unwrap()
             .0
     }
@@ -377,7 +381,7 @@ async fn send_deploy_tx(
     let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
 
     match wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
         .await
     {
@@ -470,7 +474,7 @@ async fn send_init_tx(
     let witness = WitnessSet::for_message(&msg, &[]);
     let tx = PublicTransaction::new(msg, witness);
     let hash = wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"));
@@ -869,7 +873,7 @@ pub async fn register_identity(
     let nonces = match nonce_override {
         Some(nonce) => vec![nonce],
         None => wallet_core
-            .get_accounts_nonces(vec![*user_holding_id])
+            .get_accounts_nonces(&[*user_holding_id])
             .await
             .expect("Failed to fetch account nonces"),
     };
@@ -888,7 +892,7 @@ pub async fn register_identity(
     let tx = PublicTransaction::new(message, witness_set);
 
     wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to register identity");
@@ -919,7 +923,7 @@ pub async fn extend_membership(
         .expect("Fee payer account not found in wallet");
 
     let nonces = wallet_core
-        .get_accounts_nonces(vec![*fee_payer_id])
+        .get_accounts_nonces(&[*fee_payer_id])
         .await
         .expect("Failed to fetch account nonces");
 
@@ -935,7 +939,7 @@ pub async fn extend_membership(
     let tx = PublicTransaction::new(message, witness_set);
 
     wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to extend membership");
@@ -974,7 +978,7 @@ pub async fn erase_membership(
         .expect("Fee payer account not found in wallet");
 
     let nonces = wallet_core
-        .get_accounts_nonces(vec![*fee_payer_id])
+        .get_accounts_nonces(&[*fee_payer_id])
         .await
         .expect("Failed to fetch account nonces");
 
@@ -991,7 +995,7 @@ pub async fn erase_membership(
     let tx = PublicTransaction::new(message, witness_set);
 
     wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to erase membership");

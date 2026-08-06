@@ -28,9 +28,9 @@ workspace = true
 [dependencies]
 # rc6 lssa fetched as git deps (nssa_core->lee_core; package alias keeps guest
 # source unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
-nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6", default-features = false }
-token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
+nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2", default-features = false }
+token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
@@ -78,3 +78,9 @@ large_enum_variant = "deny"
 wildcard_enum_match_arm = "deny"
 module_name_repetitions = "allow"
 similar_names = "allow"
+
+# TEMPORARY (v0.2.2 validation): local spel with lez pins bumped to v0.2.2 and
+# the rc6 rule-7 output filter removed (v0.2.2 requires every declared account
+# in the output diff). Replace with a pushed spel rev before merging.
+[patch."https://github.com/0x-r4bbit/spel.git"]
+spel-framework = { path = "/private/tmp/claude-501/-Users-arseniy-Waku-Logos-logos-lez-rln/3e10eab8-18dd-4377-b4d2-3c4bc88097cf/scratchpad/spel-pin/spel-framework" }
