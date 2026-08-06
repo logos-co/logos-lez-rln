@@ -36,12 +36,14 @@ bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
 rln-layouts = { path = "../../rln-layouts", default-features = false }
 rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
-# spel-framework must target the SAME lee_core as the guest (v0.2.0-rc6). This
-# rev (the one lez-programs uses on rc6) depends on lee_core@v0.2.0-rc6; the
-# older logos-co/spel@73fc462 targets the pre-rename nssa_core@v0.1.2 and does
-# NOT compile against rc6 lee_core. Keep this and nssa_core above on the same
-# LEZ release.
-spel-framework = { git = "https://github.com/0x-r4bbit/spel.git", rev = "91023c9115bf88173b0d25d2e905f2a55ef0313b" }
+# spel-framework must target the SAME lee_core as the guest (v0.2.2). This rev
+# (adklempner/spel branch lez-v0.2.2-compat, based on 0x-r4bbit/spel@91023c9)
+# bumps spel's lez pins to v0.2.2 and makes program output carry EVERY declared
+# account — v0.2.2's DeclaredAccountMissingFromOutput check silently drops from
+# blocks any tx whose program output omits one. Upstream spel has no v0.2.2
+# support yet; fold this back when it does. Keep this and nssa_core above on
+# the same LEZ release.
+spel-framework = { git = "https://github.com/adklempner/spel.git", rev = "6e8c7d3a1d7c26d4a18f9476ca74412d45fb41d2" }
 
 # NOTE: the risc0 guest toolchain is rustc 1.88; some transitive deps have newer
 # MSRVs and must be held back in Cargo.lock (cargo update --precise), or
@@ -78,9 +80,3 @@ large_enum_variant = "deny"
 wildcard_enum_match_arm = "deny"
 module_name_repetitions = "allow"
 similar_names = "allow"
-
-# TEMPORARY (v0.2.2 validation): local spel with lez pins bumped to v0.2.2 and
-# the rc6 rule-7 output filter removed (v0.2.2 requires every declared account
-# in the output diff). Replace with a pushed spel rev before merging.
-[patch."https://github.com/0x-r4bbit/spel.git"]
-spel-framework = { path = "/private/tmp/claude-501/-Users-arseniy-Waku-Logos-logos-lez-rln/3e10eab8-18dd-4377-b4d2-3c4bc88097cf/scratchpad/spel-pin/spel-framework" }

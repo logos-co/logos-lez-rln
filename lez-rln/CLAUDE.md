@@ -39,6 +39,16 @@ owner equals it, and use the config value as the ChainedCall target — never
 `test_*_rejects_*foreign_program` in state_tests.rs (added at 0780862).
 
 ## Testnet operations
+
+- Provisioning can silently lose InitializeConfig to a deploy race: run_setup
+  submits it after a fixed seal wait (`LEZ_RLN_BLOCK_SEAL_SECS`, default 90s),
+  but a ~460KB program-deploy tx can take several testnet blocks to be
+  included. If InitializeConfig executes before the deploy lands, the v0.2.2
+  sequencer drops it from the block ("failed execution check", visible only
+  in the sequencer's own log — the client just times out waiting for the
+  config account) and NOTHING resubmits it. Provision testnet with
+  `LEZ_RLN_BLOCK_SEAL_SECS=240` (or rerun on timeout); local dev sequencers
+  (~15s blocks) never hit this.
 - register_member's "Timeout waiting for leaf N" panic is often a FALSE
   negative: `wait_for_leaf` polls a hardcoded 30 × 500 ms
   (register_member.rs:66) and testnet confirmation regularly exceeds 15 s.
