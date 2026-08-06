@@ -40,15 +40,17 @@ owner equals it, and use the config value as the ChainedCall target — never
 
 ## Testnet operations
 
-- Provisioning can silently lose InitializeConfig to a deploy race: run_setup
-  submits it after a fixed seal wait (`LEZ_RLN_BLOCK_SEAL_SECS`, default 90s),
-  but a ~460KB program-deploy tx can take several testnet blocks to be
-  included. If InitializeConfig executes before the deploy lands, the v0.2.2
-  sequencer drops it from the block ("failed execution check", visible only
-  in the sequencer's own log — the client just times out waiting for the
-  config account) and NOTHING resubmits it. Provision testnet with
-  `LEZ_RLN_BLOCK_SEAL_SECS=240` (or rerun on timeout); local dev sequencers
-  (~15s blocks) never hit this.
+- A program-deploy tx larger than the sequencer's max_block_size is deferred
+  in the mempool FOREVER with zero client feedback (submission returns a
+  hash; the tx never includes). Measured on testnet 2026-08-05: the ~266KB
+  merkle deploy included, the ~459KB registration deploy never did — the
+  operative cap sits somewhere between, while local debug configs allow
+  1 MiB, so local provisioning hides the problem. Downstream symptom: the
+  one-shot InitializeConfig then fails the execution check ("program
+  missing", visible only in the sequencer's own log) and is silently left
+  out of the block, so run_setup times out waiting for the config account.
+  Check the deploy landed (scan recent blocks for a ~600KB base64 getBlock
+  result) before believing any InitializeConfig diagnosis.
 - register_member's "Timeout waiting for leaf N" panic is often a FALSE
   negative: `wait_for_leaf` polls a hardcoded 30 × 500 ms
   (register_member.rs:66) and testnet confirmation regularly exceeds 15 s.
