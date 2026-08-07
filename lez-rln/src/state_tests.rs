@@ -1071,7 +1071,7 @@ mod tests {
 
         let init_config = build_public_tx(
             registration.id(),
-            vec![config_id, credit_token_id.clone()],
+            vec![config_id.clone(), credit_token_id.clone()],
             Instruction::Initialize {
                 merkle_program_id: bytemuck::cast(merkle.id()),
                 tree_id: *tree_id,
@@ -1090,20 +1090,14 @@ mod tests {
 
         let init_credit_token = build_public_tx(
             registration.id(),
-            vec![credit_token_id, credit_supply_id],
-            Instruction::InitializeCreditToken {
-                token_program_id: bytemuck::cast(programs::token().id()),
-                tree_id: *tree_id,
-            },
+            vec![config_id.clone(), credit_token_id, credit_supply_id],
+            Instruction::InitializeCreditToken { tree_id: *tree_id },
         );
 
         let init_merkle = build_public_tx(
             registration.id(),
-            vec![tree_main_id],
-            Instruction::InitializeMerkleTree {
-                merkle_program_id: bytemuck::cast(merkle.id()),
-                tree_id: *tree_id,
-            },
+            vec![config_id, tree_main_id],
+            Instruction::InitializeMerkleTree { tree_id: *tree_id },
         );
 
         [init_config, init_credit_token, init_merkle]
@@ -1287,11 +1281,12 @@ mod tests {
         // 4th init tx: create RLNTOK as a program-owned PDA definition.
         let init_payment = build_public_tx(
             registration.id(),
-            vec![payment_def_id, payment_supply_id],
-            Instruction::InitializePaymentToken {
-                token_program_id: bytemuck::cast(programs::token().id()),
-                tree_id: TREE_ID,
-            },
+            vec![
+                derive_config_pda(registration.id(), &TREE_ID),
+                payment_def_id,
+                payment_supply_id,
+            ],
+            Instruction::InitializePaymentToken { tree_id: TREE_ID },
         );
         state
             .transition_from_public_transaction(&init_payment, 1, 0)
@@ -2065,6 +2060,52 @@ mod tests {
         );
     }
 
+    // SECURITY (callee substitution): the merkle/token program a chained init
+    // call targets comes from config, never from the caller. The instructions
+    // no longer carry a program-id argument at all, so the only way to aim an
+    // init at an attacker's program is to make config name it — which means
+    // owning the tree_id's config PDA in the first place. Before the fix,
+    // InitializeMerkleTree took merkle_program_id as an arg and handed it
+    // pda_seeds authorizing it to claim this program's `main` PDA.
+    #[test]
+    fn test_init_merkle_uses_config_program_not_caller_arg() {
+        let (mut state, merkle, registration) =
+            state_with_programs().expect("Programs should load");
+
+        let payment_token_id = AccountId::new([10; 32]);
+        let treasury_id = AccountId::new([11; 32]);
+        let init_txs = build_registration_init_txs(
+            &registration,
+            &merkle,
+            &TREE_ID,
+            &payment_token_id,
+            PRICE_PER_UNIT,
+            &treasury_id,
+        );
+        apply_registration_init(&mut state, &init_txs).expect("Init should succeed");
+
+        // Config binds the tree to `merkle`, so a second tree_id whose config
+        // was never initialized has nothing to read: the init must fail rather
+        // than fall back to a caller-named program.
+        let other_tree_id = [0x99u8; 32];
+        let orphan_tx = build_public_tx(
+            registration.id(),
+            vec![
+                derive_config_pda(registration.id(), &other_tree_id),
+                derive_tree_main_pda(registration.id(), &other_tree_id),
+            ],
+            Instruction::InitializeMerkleTree {
+                tree_id: other_tree_id,
+            },
+        );
+        assert!(
+            state
+                .transition_from_public_transaction(&orphan_tx, 1, 0)
+                .is_err(),
+            "InitializeMerkleTree without an initialized config must fail"
+        );
+    }
+
     // SECURITY (tree reset): replaying InitializeMerkleTree alone must not
     // reset a live tree. The batch test above stops at the first tx and never
     // reaches the merkle one; this exercises that tx on its own, which is what
@@ -2123,11 +2164,11 @@ mod tests {
 
         let attack_tx = build_public_tx(
             setup.registration.id(),
-            vec![tree_main_id.clone()],
-            Instruction::InitializeMerkleTree {
-                merkle_program_id: bytemuck::cast(setup.merkle.id()),
-                tree_id: TREE_ID,
-            },
+            vec![
+                derive_config_pda(setup.registration.id(), &TREE_ID),
+                tree_main_id.clone(),
+            ],
+            Instruction::InitializeMerkleTree { tree_id: TREE_ID },
         );
         let result = setup
             .state

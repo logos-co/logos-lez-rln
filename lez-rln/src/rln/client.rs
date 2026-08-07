@@ -615,11 +615,12 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![credit_token_id.clone(), credit_supply_id.clone()],
-        Instruction::InitializeCreditToken {
-            token_program_id: bytemuck::cast(programs::token().id()),
-            tree_id: *tree_id,
-        },
+        vec![
+            config_id.clone(),
+            credit_token_id.clone(),
+            credit_supply_id.clone(),
+        ],
+        Instruction::InitializeCreditToken { tree_id: *tree_id },
         "InitializeCreditToken",
         &credit_supply_id,
     )
@@ -628,11 +629,8 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![tree_main_id.clone()],
-        Instruction::InitializeMerkleTree {
-            merkle_program_id: bytemuck::cast(merkle_program.id()),
-            tree_id: *tree_id,
-        },
+        vec![config_id.clone(), tree_main_id.clone()],
+        Instruction::InitializeMerkleTree { tree_id: *tree_id },
         "InitializeMerkleTree",
         &tree_main_id,
     )
@@ -648,11 +646,12 @@ pub async fn run_setup(
         send_init_tx(
             wallet_core,
             registration_program,
-            vec![payment_def_id.clone(), payment_supply_id.clone()],
-            Instruction::InitializePaymentToken {
-                token_program_id: bytemuck::cast(programs::token().id()),
-                tree_id: *tree_id,
-            },
+            vec![
+                config_id.clone(),
+                payment_def_id.clone(),
+                payment_supply_id.clone(),
+            ],
+            Instruction::InitializePaymentToken { tree_id: *tree_id },
             "InitializePaymentToken",
             &payment_def_id,
         )

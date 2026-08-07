@@ -131,6 +131,22 @@ fn write_borsh<T: BorshSerialize>(
         .unwrap_or_else(|_| panic!("{what} fits in account.data"));
 }
 
+/// Decode the config PDA, binding it to the `tree_id` the caller asked for.
+///
+/// The callee program ids live here and nowhere else: an instruction arg
+/// naming the merkle or token program is attacker-controllable, and these
+/// handlers hand the callee `pda_seeds` that authorize it to claim this
+/// program's PDAs. Read the target from config, never from the caller.
+fn require_config(config: &AccountWithMetadata, tree_id: &[u8; 32]) -> ConfigState {
+    let config_state =
+        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
+    assert_eq!(
+        config_state.tree_id, *tree_id,
+        "tree_id arg must match config"
+    );
+    config_state
+}
+
 // ─── instruction handlers ─────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -190,13 +206,14 @@ pub fn initialize(
 }
 
 pub fn initialize_credit_token(
+    config: AccountWithMetadata,
     credit_token: AccountWithMetadata,
     credit_supply: AccountWithMetadata,
-    token_program_id: [u8; 32],
     tree_id: [u8; 32],
 ) -> Output {
+    let config_state = require_config(&config, &tree_id);
     let token_create = ChainedCall::new(
-        bytemuck::cast(token_program_id),
+        bytemuck::cast(config_state.token_program_id),
         vec![authorized(&credit_token), authorized(&credit_supply)],
         &token_core::Instruction::NewFungibleDefinition {
             name: "RLNREC".to_string(),
@@ -209,6 +226,7 @@ pub fn initialize_credit_token(
     ]);
 
     let states = vec![
+        AccountPostState::new(config.account),
         AccountPostState::new(credit_token.account),
         AccountPostState::new(credit_supply.account),
     ];
@@ -216,13 +234,14 @@ pub fn initialize_credit_token(
 }
 
 pub fn initialize_payment_token(
+    config: AccountWithMetadata,
     payment_token: AccountWithMetadata,
     payment_supply: AccountWithMetadata,
-    token_program_id: [u8; 32],
     tree_id: [u8; 32],
 ) -> Output {
+    let config_state = require_config(&config, &tree_id);
     let token_create = ChainedCall::new(
-        bytemuck::cast(token_program_id),
+        bytemuck::cast(config_state.token_program_id),
         vec![authorized(&payment_token), authorized(&payment_supply)],
         &token_core::Instruction::NewFungibleDefinition {
             name: "RLNTOK".to_string(),
@@ -235,6 +254,7 @@ pub fn initialize_payment_token(
     ]);
 
     let states = vec![
+        AccountPostState::new(config.account),
         AccountPostState::new(payment_token.account),
         AccountPostState::new(payment_supply.account),
     ];
@@ -293,19 +313,23 @@ pub fn claim_tokens(
 }
 
 pub fn initialize_merkle_tree(
+    config: AccountWithMetadata,
     tree_main: AccountWithMetadata,
-    merkle_program_id: [u8; 32],
     tree_id: [u8; 32],
 ) -> Output {
+    let config_state = require_config(&config, &tree_id);
     let merkle_init = ChainedCall {
-        program_id: bytemuck::cast(merkle_program_id),
+        program_id: bytemuck::cast(config_state.merkle_program_id),
         pre_states: vec![authorized(&tree_main)],
         instruction_data: risc0_zkvm::serde::to_vec(&vec![MerkleOpcode::Initialize as u8])
             .expect("serialize merkle init"),
         pda_seeds: vec![PdaSeed::new(main_seed(&tree_id))],
     };
 
-    let states = vec![AccountPostState::new(tree_main.account)];
+    let states = vec![
+        AccountPostState::new(config.account),
+        AccountPostState::new(tree_main.account),
+    ];
     SpelOutput::execute(states, vec![merkle_init])
 }
 

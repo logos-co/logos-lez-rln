@@ -56,9 +56,27 @@ survived, leaving them unable to re-register. Regressions:
 `test_registration_init_prevents_reinit` does NOT cover this: it replays the
 whole init batch and short-circuits on the first tx.
 
-The token initializers are covered by `token_core::new_fungible_definition`,
-which asserts both accounts are `Account::default()` — the merkle program
-had no equivalent. When adding a program that owns accounts, give it one.
+The token initializers are additionally covered by
+`token_core::new_fungible_definition`, which asserts both accounts are
+`Account::default()` — the merkle program had no equivalent. When adding a
+program that owns accounts, give it one.
+
+## Chained-call targets come from config, never from instruction args
+The same rule the token-holding convention below states, generalized: a
+`ChainedCall::program_id` must be read from `config_state`, because these
+handlers attach `pda_seeds` that authorize the callee to claim the
+registration program's own PDAs (`main`, `receipt`, `supply`, `payment`,
+`payment_supply`). A caller-named program id would be handed those seeds.
+
+`InitializeMerkleTree` / `InitializeCreditToken` / `InitializePaymentToken`
+originally took `merkle_program_id` / `token_program_id` as instruction args
+and never loaded config. They now declare the config PDA and read the target
+from it via `require_config` (which also binds `tree_id`), and the args are
+gone from `rln_layouts::Instruction` entirely — the wire cannot express the
+attack. This makes config a prerequisite for those three instructions, which
+is satisfied because `Initialize` runs first (it only reads
+`credit_token.account_id`, never its contents). Regression:
+`test_init_merkle_uses_config_program_not_caller_arg`.
 
 ## Testnet operations
 
@@ -94,10 +112,10 @@ had no equivalent. When adding a program that owns accounts, give it one.
   `test_register_same_commitment_twice_fails`.
 - Deploying new program instances to https://testnet.lez.logos.co/ is
   normal, routine development practice (`tools/deployments/provision.sh`).
-- The registration program recorded in `deployments/shared-faucet` predates
-  the merkle-init fix above, so the live tree can still be reset by anyone
-  until it is redeployed (blocked on the block-size cap). Treat that
-  deployment as demo-only and do not point anything durable at it.
+- `deployments/shared-faucet` records a DEAD deployment: the chain it was
+  provisioned against no longer exists, and its program predates both
+  security fixes above. Its ids (registry, tree, program) are stale — expect
+  to re-provision from scratch rather than to verify against it.
 - `state_tests` reads the guest `.bin`s from the same `docker/` dir the
   deploy host uses, which is also the record of what is live. Set
   `LEZ_RLN_GUEST_DIR` to a fresh build's `release/` dir to test guest changes
