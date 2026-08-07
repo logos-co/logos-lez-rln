@@ -38,6 +38,28 @@ owner equals it, and use the config value as the ChainedCall target — never
 `account.program_owner`. Regression tests:
 `test_*_rejects_*foreign_program` in state_tests.rs (added at 0780862).
 
+## Init handlers must carry `init`
+Public transactions need no signature (`build_public_tx` passes empty nonces
+and keys), so any instruction that writes a PDA is submittable by anyone.
+`#[account(init, pda = ...)]` — which expands to an `Account::default()`
+check — is what makes an initializer one-shot; a bare `pda` constraint is
+not an authorization. Authorization (`is_authorized`) only says the caller
+may write the account, never that the account is unclaimed.
+
+`initialize_merkle_tree` shipped with a bare `pda` constraint and the merkle
+program's `initialize_tree` checked only authorization, so replaying
+`InitializeMerkleTree` against a live tree reset `next_index` and the root
+history — invalidating every member's proof while their membership PDAs
+survived, leaving them unable to re-register. Regressions:
+`test_initialize_merkle_tree_cannot_reset_a_live_tree` (state) and
+`merkle_tree::tests::test_initialize_rejects_live_tree` (guest unit). Note
+`test_registration_init_prevents_reinit` does NOT cover this: it replays the
+whole init batch and short-circuits on the first tx.
+
+The token initializers are covered by `token_core::new_fungible_definition`,
+which asserts both accounts are `Account::default()` — the merkle program
+had no equivalent. When adding a program that owns accounts, give it one.
+
 ## Testnet operations
 
 - A program-deploy tx larger than the sequencer's max_block_size is deferred
@@ -72,5 +94,13 @@ owner equals it, and use the config value as the ChainedCall target — never
   `test_register_same_commitment_twice_fails`.
 - Deploying new program instances to https://testnet.lez.logos.co/ is
   normal, routine development practice (`tools/deployments/provision.sh`).
+- The registration program recorded in `deployments/shared-faucet` predates
+  the merkle-init fix above, so the live tree can still be reset by anyone
+  until it is redeployed (blocked on the block-size cap). Treat that
+  deployment as demo-only and do not point anything durable at it.
+- `state_tests` reads the guest `.bin`s from the same `docker/` dir the
+  deploy host uses, which is also the record of what is live. Set
+  `LEZ_RLN_GUEST_DIR` to a fresh build's `release/` dir to test guest changes
+  without overwriting the artifacts `verify.sh` compares against.
 - Wallet sync is only required for tree insertion (registration); claims and
   reads work against an unsynced wallet (measured pre-0780862).

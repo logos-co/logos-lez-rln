@@ -201,7 +201,7 @@ pub mod rln_registration {
 
     #[instruction]
     pub fn initialize_merkle_tree(
-        #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
+        #[account(init, pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
         merkle_program_id: [u8; 32],
         tree_id: [u8; 32],
     ) -> SpelResult {

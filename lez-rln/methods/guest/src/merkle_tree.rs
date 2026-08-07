@@ -27,7 +27,7 @@
 //! the tree.
 
 use nssa_core::{
-    account::AccountWithMetadata,
+    account::{Account, AccountWithMetadata},
     program::{AccountPostState, Claim},
 };
 pub use rln_layouts::{
@@ -107,11 +107,24 @@ fn write_sparse_node(data: &mut Vec<u8>, level: usize, index: usize, hash: &[u8;
 ///
 /// # Panics
 /// - If `pre_states[0].is_authorized` is false
+/// - If `pre_states[0]` is already initialized
 pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<AccountPostState> {
     let main_account = &pre_states[0];
 
     if !main_account.is_authorized {
         panic!("Authorization required to initialize tree");
+    }
+
+    // Authorization alone does not make initialization idempotent-safe: it
+    // says the caller may write this account, not that no tree lives here
+    // yet. Without this, replaying Initialize against a live tree resets
+    // next_index and the root history, invalidating every member's proof
+    // while their membership PDAs survive (so they can never re-register).
+    // Mirrors token_core::new_fungible_definition's default-account assert
+    // (spelled as a plain compare, not assert_eq!, to keep Account's Debug
+    // formatting machinery out of the guest binary).
+    if main_account.account != Account::default() {
+        panic!("Tree main account must be uninitialized");
     }
 
     let cached_nodes = compute_default_hashes(TREE_DEPTH);
@@ -679,6 +692,15 @@ mod tests {
     fn test_initialize_requires_authorization() {
         let pre_states = vec![AccountForTests::main_unauthorized()];
         initialize_tree(pre_states);
+    }
+
+    #[test]
+    #[should_panic(expected = "Tree main account must be uninitialized")]
+    fn test_initialize_rejects_live_tree() {
+        // Replaying Initialize against a live tree would reset next_index and
+        // the root history, breaking every existing member's proof. Being
+        // authorized to write the account is not permission to wipe it.
+        initialize_tree(vec![AccountForTests::main_initialized()]);
     }
 
     #[test]

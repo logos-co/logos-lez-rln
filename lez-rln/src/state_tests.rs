@@ -81,15 +81,26 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
+    /// Directory holding the guest `.bin`s under test.
+    ///
+    /// Defaults to the `docker/` dir the deploy host reads, which doubles as
+    /// the record of what is live on testnet — so testing a guest change there
+    /// means overwriting the artifacts that `verify.sh` checks the deployment
+    /// against. `LEZ_RLN_GUEST_DIR` points the suite at a fresh build instead
+    /// (e.g. the `release/` dir `cargo build` writes) and leaves them alone.
+    fn guest_binary_dir() -> std::path::PathBuf {
+        match std::env::var_os("LEZ_RLN_GUEST_DIR") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => repo_root().join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker"),
+        }
+    }
+
     fn merkle_tree_binary_path() -> std::path::PathBuf {
-        repo_root().join(
-            "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin",
-        )
+        guest_binary_dir().join("incremental_merkle_tree.bin")
     }
 
     fn rln_registration_binary_path() -> std::path::PathBuf {
-        repo_root()
-            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin")
+        guest_binary_dir().join("rln_registration.bin")
     }
 
     // ========================================================================
@@ -2051,6 +2062,90 @@ mod tests {
         assert!(
             result.is_err(),
             "Re-initialization should fail (config already claimed)"
+        );
+    }
+
+    // SECURITY (tree reset): replaying InitializeMerkleTree alone must not
+    // reset a live tree. The batch test above stops at the first tx and never
+    // reaches the merkle one; this exercises that tx on its own, which is what
+    // an attacker submits. Public transactions carry no signature, so the only
+    // thing standing between anyone and a tree wipe is the init check on
+    // tree_main (plus initialize_tree's own uninitialized assert). A reset
+    // would zero next_index and the root history — invalidating every member's
+    // proof — while the membership PDAs survive, so nobody could re-register.
+    #[test]
+    fn test_initialize_merkle_tree_cannot_reset_a_live_tree() {
+        let mut setup = state_with_initialized_registration().expect("Setup should succeed");
+
+        // Put a real member in the tree, so a successful reset would be
+        // observably destructive rather than a no-op on an empty tree.
+        let (user_credit_key, user_credit_id) = create_test_keypair(10);
+        let buy_tx = build_buy_credits_tx(
+            &setup,
+            &TREE_ID,
+            &user_credit_id,
+            &user_credit_key,
+            300,
+            Nonce(0),
+            Nonce(0),
+        );
+        setup
+            .state
+            .transition_from_public_transaction(&buy_tx, 1, 0)
+            .expect("Buy should succeed");
+        let register_tx = build_register_with_credits_tx(
+            &setup,
+            &TREE_ID,
+            &user_credit_id,
+            &user_credit_key,
+            valid_field_element(0x42),
+            300,
+            Nonce(1),
+            0,
+        );
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("Register should succeed");
+
+        let tree_main_id = derive_tree_main_pda(setup.registration.id(), &TREE_ID);
+        let before = setup
+            .state
+            .get_account_by_id(tree_main_id.clone())
+            .data
+            .as_ref()
+            .to_vec();
+        assert_eq!(
+            u64::from_le_bytes(before[1..9].try_into().unwrap()),
+            1,
+            "the member should be in the tree before the reset attempt"
+        );
+
+        let attack_tx = build_public_tx(
+            setup.registration.id(),
+            vec![tree_main_id.clone()],
+            Instruction::InitializeMerkleTree {
+                merkle_program_id: bytemuck::cast(setup.merkle.id()),
+                tree_id: TREE_ID,
+            },
+        );
+        let result = setup
+            .state
+            .transition_from_public_transaction(&attack_tx, 1, 0);
+        assert!(
+            result.is_err(),
+            "Re-initializing a live tree must fail, got: {result:?}"
+        );
+
+        let after = setup
+            .state
+            .get_account_by_id(tree_main_id)
+            .data
+            .as_ref()
+            .to_vec();
+        assert_eq!(
+            before, after,
+            "the rejected reset must leave the tree byte-identical"
         );
     }
 
