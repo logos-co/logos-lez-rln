@@ -485,6 +485,19 @@ pub fn register_free(
         config_state.authorized_registrar,
         "Not the authorized registrar"
     );
+    // The registrar is a declared account, so it is echoed into this program's
+    // output, and LEZ rule 7 (NonDefaultAccountWithDefaultOwner) only permits
+    // echoing a DEFAULT-owned account while it is still pristine. Signing
+    // increments the nonce, so a plain-wallet registrar would work exactly
+    // ONCE and then have every RegisterFree dropped at block inclusion, with
+    // the reason visible only in the sequencer's log. Require a program-owned
+    // registrar (seed it as a token holding before first use) so the
+    // misconfiguration fails here, loudly, instead of after the fact.
+    assert_ne!(
+        registrar.account.program_owner,
+        nssa_core::program::DEFAULT_PROGRAM_ID,
+        "Registrar must be a program-owned account, not a plain wallet"
+    );
     assert!(
         config_state.free_quota_remaining > 0,
         "Free-registration quota exhausted"
@@ -811,9 +824,22 @@ pub fn slash(
     SpelOutput::execute(states, vec![merkle_remove])
 }
 
+/// Renew a membership from inside its grace period, at the same price its
+/// rate limit would cost to register.
+///
+/// Anyone may pay for anyone's renewal — the membership records no owner, and
+/// a third party topping up a member is harmless. What is NOT harmless is
+/// renewal being FREE: `erase` only reclaims a membership's `rate_limit` once
+/// it is expired, so a free extension lets any passer-by pin an abandoned
+/// membership's share of `max_total_rate_limit` forever, one cheap tx per
+/// grace window, and eventually block all new registrations. Charging the
+/// registration price makes that grief cost exactly as much as holding the
+/// slot legitimately, and gives `active_duration` economic force.
 pub fn extend(
     config: AccountWithMetadata,
     mut membership: AccountWithMetadata,
+    payer_holding: AccountWithMetadata,
+    treasury_holding: AccountWithMetadata,
     clock_account: AccountWithMetadata,
     tree_id: [u8; 32],
 ) -> Output {
@@ -843,18 +869,57 @@ pub fn extend(
         "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
     );
 
+    // Priced off the membership's own rate limit, exactly as registration is.
+    let payment_amount =
+        calculate_payment_amount(membership_state.rate_limit, config_state.price_per_unit);
+
+    assert!(payer_holding.is_authorized, "Payer must authorize payment");
+    let TokenHolding {
+        definition_id: payer_token,
+        balance: payer_balance,
+    } = parse_token_holding(payer_holding.account.data.as_ref());
+    assert_eq!(
+        payer_token, config_state.payment_token_id,
+        "Wrong payment token"
+    );
+    assert!(payer_balance >= payment_amount, "Insufficient balance");
+
+    // Same reasoning as `register`: holding data is attacker-controllable, the
+    // owning program is not.
+    let payer_holding_owner: [u8; 32] = bytemuck::cast(payer_holding.account.program_owner);
+    assert_eq!(
+        payer_holding_owner, config_state.token_program_id,
+        "Payment holding not owned by the configured token program"
+    );
+
+    let treasury_id: [u8; 32] = *treasury_holding.account_id.value();
+    assert_eq!(
+        treasury_id, config_state.treasury_account_id,
+        "Wrong treasury"
+    );
+
     membership_state.grace_period_start_timestamp = membership_state
         .grace_period_start_timestamp
         .saturating_add(membership_state.grace_period_duration as u64)
         .saturating_add(membership_state.active_duration as u64);
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
+    let token_transfer = ChainedCall::new(
+        bytemuck::cast(config_state.token_program_id),
+        vec![authorized(&payer_holding), treasury_holding.clone()],
+        &token_core::Instruction::Transfer {
+            amount_to_transfer: payment_amount,
+        },
+    );
+
     let states = vec![
         AccountPostState::new(config.account),
         AccountPostState::new(membership.account),
+        AccountPostState::new(payer_holding.account),
+        AccountPostState::new(treasury_holding.account),
         AccountPostState::new(clock_account.account),
     ];
-    SpelOutput::execute(states, vec![])
+    SpelOutput::execute(states, vec![token_transfer])
 }
 
 pub fn erase(

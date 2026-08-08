@@ -325,12 +325,21 @@ pub mod rln_registration {
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
         membership: AccountWithMetadata,
+        #[account(signer)] payer_holding: AccountWithMetadata,
+        treasury_holding: AccountWithMetadata,
         clock_account: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
     ) -> SpelResult {
         let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
-        Ok(handlers::extend(config, membership, clock_account, tree_id))
+        Ok(handlers::extend(
+            config,
+            membership,
+            payer_holding,
+            treasury_holding,
+            clock_account,
+            tree_id,
+        ))
     }
 
     #[instruction]

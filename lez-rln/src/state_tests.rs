@@ -1605,6 +1605,34 @@ mod tests {
     /// - pre_states[4]: CLOCK_50 system account
     /// - pre_states[5]: Membership PDA (init)
     #[allow(dead_code)]
+    /// Make the registrar a program-owned account.
+    ///
+    /// `register_free` requires this, and LEZ is why: the registrar is a
+    /// declared account, so it is echoed into the program output, and rule 7
+    /// only tolerates echoing a DEFAULT-owned account while it is pristine.
+    /// Signing bumps the nonce, so a plain-wallet registrar would pass once
+    /// and then have every later RegisterFree silently dropped at inclusion.
+    /// Deployments seed the registrar by claiming tokens into it before first
+    /// use; tests do it directly.
+    fn seed_program_owned_registrar(
+        state: &mut V03State,
+        payment_def_id: &AccountId,
+        registrar_id: &AccountId,
+    ) {
+        let holding = token_core::TokenHolding::Fungible {
+            definition_id: payment_def_id.clone(),
+            balance: 0,
+        };
+        state.force_insert_account(
+            registrar_id.clone(),
+            Account {
+                program_owner: programs::token().id(),
+                data: Data::from(&holding),
+                ..Account::default()
+            },
+        );
+    }
+
     fn build_register_free_tx(
         registration: &Program,
         tree_id: &[u8; 32],
@@ -3220,6 +3248,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 2)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let tx = build_register_free_tx(
             &setup.registration,
@@ -3270,6 +3299,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 1)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let tx1 = build_register_free_tx(
             &setup.registration,
@@ -3303,6 +3333,76 @@ mod tests {
         );
     }
 
+    // SECURITY (registrar reuse): the registrar signs, so LEZ increments its
+    // nonce after every free registration. Because the registrar is a declared
+    // account and therefore echoed into the program output, rule 7
+    // (NonDefaultAccountWithDefaultOwner) rejects the echo of a DEFAULT-owned
+    // account that is no longer pristine — a plain-wallet registrar works
+    // exactly ONCE and then every RegisterFree is dropped at block inclusion,
+    // visible only in the sequencer log. A program-owned registrar is exempt
+    // (rule 7 is skipped) and must keep working indefinitely.
+    //
+    // test_register_free_quota_exhaustion cannot catch this: it sets
+    // free_quota = 1, so its second tx panics inside the guest on the quota
+    // assert before validation is reached, and it only asserts is_err().
+    #[test]
+    fn test_register_free_works_repeatedly_for_one_registrar() {
+        let (registrar_key, registrar_id) = create_test_keypair(35);
+        let mut setup =
+            state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 3)
+                .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
+
+        for (i, commitment) in [0x61u8, 0x62, 0x63].iter().enumerate() {
+            let tx = build_register_free_tx(
+                &setup.registration,
+                &TREE_ID,
+                &registrar_id,
+                &registrar_key,
+                valid_field_element(*commitment),
+                300,
+                Nonce(i as u128),
+                i as u64,
+            );
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 1, 0)
+                .unwrap_or_else(|e| {
+                    panic!("free registration #{} must succeed, got {e:?}", i + 1)
+                });
+        }
+    }
+
+    // The same trap, asserted from the other side: a DEFAULT-owned (plain
+    // wallet) registrar is refused up front with a clear message, rather than
+    // succeeding once and then failing opaquely forever.
+    #[test]
+    fn test_register_free_rejects_a_plain_wallet_registrar() {
+        let (registrar_key, registrar_id) = create_test_keypair(36);
+        let mut setup =
+            state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 2)
+                .expect("Setup should succeed");
+        // Deliberately NOT seeded as program-owned.
+
+        let tx = build_register_free_tx(
+            &setup.registration,
+            &TREE_ID,
+            &registrar_id,
+            &registrar_key,
+            valid_field_element(0x64),
+            300,
+            Nonce(0),
+            0,
+        );
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 1, 0)
+                .is_err(),
+            "a plain-wallet registrar must be rejected on the FIRST call"
+        );
+    }
+
     #[test]
     fn test_register_free_rejects_wrong_signer() {
         let (_registrar_key, registrar_id) = create_test_keypair(33);
@@ -3310,6 +3410,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 5)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let tx = build_register_free_tx(
             &setup.registration,
@@ -3355,6 +3456,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 5)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let register_tx = build_register_tx(
             &setup,
@@ -4259,10 +4361,14 @@ mod tests {
     // Expiration — transaction builders
     // ========================================================================
 
+    /// Renewal is PAID (same price as registering the membership's rate
+    /// limit), so the payer holding signs and is debited — extend is no longer
+    /// a zero-signer transaction.
     fn build_extend_tx(
         setup: &TestSetup,
         tree_id: &[u8; 32],
         id_commitment: [u8; 32],
+        payer_nonce: Nonce,
     ) -> PublicTransaction {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
@@ -4270,6 +4376,8 @@ mod tests {
         let account_ids = vec![
             config_id,
             membership_id,
+            setup.user_payment_id.clone(),
+            setup.treasury_id.clone(),
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
@@ -4278,10 +4386,18 @@ mod tests {
             id_commitment,
         };
 
-        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
-            .expect("valid message");
+        let message = Message::try_new(
+            setup.registration.id(),
+            account_ids,
+            vec![payer_nonce], // nonce for the payer holding (index 2)
+            instruction,
+        )
+        .expect("valid message");
 
-        PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
+        PublicTransaction::new(
+            message.clone(),
+            WitnessSet::for_message(&message, &[&setup.user_payment_key]),
+        )
     }
 
     fn build_erase_tx(
@@ -4381,7 +4497,7 @@ mod tests {
         let in_grace = grace_start + (DEFAULT_GRACE_PERIOD_DURATION as u64 / 2);
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0)
@@ -4406,7 +4522,7 @@ mod tests {
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 10, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         let result = setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0);
@@ -4432,7 +4548,7 @@ mod tests {
             + DEFAULT_GRACE_PERIOD_DURATION as u64;
         set_clock_50(&mut setup.state, expiration + 1, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         let result = setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0);
@@ -4443,10 +4559,15 @@ mod tests {
         );
     }
 
+    // SECURITY (rate-limit pinning): extend deliberately does NOT check caller
+    // identity — a membership records no owner, and letting a third party pay
+    // for someone's renewal is harmless. What stops the grief is the PRICE.
+    // While renewal was free, anyone could keep an abandoned membership alive
+    // one cheap tx per grace window; `erase` only reclaims rate_limit once a
+    // membership expires, so an attacker could pin current_total_rate_limit at
+    // max_total_rate_limit and block every new registration indefinitely.
     #[test]
-    fn test_extend_by_any_caller_succeeds_in_grace() {
-        // Sanity: Extend carries no authorization — the builder signs with no keys.
-        // If this test fails, something is asserting caller identity.
+    fn test_extend_by_a_third_party_is_allowed_but_charged() {
         let Some(mut setup) = setup_with_expiration() else {
             return;
         };
@@ -4458,11 +4579,60 @@ mod tests {
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let paid_before = get_token_balance(&setup.state, &setup.user_payment_id);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0)
-            .expect("extend with no signer must succeed");
+            .expect("a paying third party may renew");
+
+        let paid_after = get_token_balance(&setup.state, &setup.user_payment_id);
+        let expected = EXP_RATE_LIMIT as u128 * PRICE_PER_UNIT;
+        assert_eq!(
+            paid_before - paid_after,
+            expected,
+            "renewal must cost the same as registering that rate limit"
+        );
+        assert!(expected > 0, "a zero-priced renewal would restore the grief");
+    }
+
+    /// The grief itself: without funds the renewal fails, so pinning a
+    /// membership's rate limit forever is no longer free.
+    #[test]
+    fn test_extend_fails_when_payer_cannot_cover_the_price() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_field_element(0xA7);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        // Empty the payer's holding (keeping it a valid token-owned holding),
+        // then try to renew.
+        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
+        set_clock_50(&mut setup.state, in_grace, 100);
+        let empty = token_core::TokenHolding::Fungible {
+            definition_id: setup.payment_def_id.clone(),
+            balance: 0,
+        };
+        let prior = setup.state.get_account_by_id(setup.user_payment_id.clone());
+        setup.state.force_insert_account(
+            setup.user_payment_id.clone(),
+            Account {
+                data: Data::from(&empty),
+                ..prior
+            },
+        );
+
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&extend_tx, 2, 0)
+                .is_err(),
+            "an unfunded renewal must fail"
+        );
     }
 
     #[test]

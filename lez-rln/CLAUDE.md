@@ -78,6 +78,41 @@ is satisfied because `Initialize` runs first (it only reads
 `credit_token.account_id`, never its contents). Regression:
 `test_init_merkle_uses_config_program_not_caller_arg`.
 
+## A declared plain-wallet account breaks the program on its second use
+LEZ rule 7 (`NonDefaultAccountWithDefaultOwner`) rejects any account in a
+program's output that is DEFAULT-owned and no longer `Account::default()`.
+Every declared account IS echoed into the output — v0.2.2's
+`DeclaredAccountMissingFromOutput` leaves no way to omit one, and the
+rc6-era spel filter that used to strip these echoes was deleted for exactly
+that reason. Signing increments the nonce, so a declared plain-wallet signer
+works ONCE and is then rejected forever, with the reason visible only in the
+sequencer's log.
+
+`register_free`'s registrar is the case in point, and it now asserts the
+registrar is program-owned so the misconfiguration fails loudly on the first
+call instead. Deployments must seed the registrar (e.g. claim tokens into it)
+before its first registration. Regressions:
+`test_register_free_works_repeatedly_for_one_registrar` and
+`test_register_free_rejects_a_plain_wallet_registrar` — note that
+`test_register_free_quota_exhaustion` CANNOT catch this, since its second tx
+dies on the quota assert before validation runs.
+
+`claim_tokens`' `dest_holding` is the benign version: its first claim needs a
+pristine account anyway, and the token program then owns it, so rule 7 is
+skipped from then on. Only a plain wallet that has already transacted is
+permanently unusable as a claim destination.
+
+## Renewal is priced, not permissioned
+`extend` deliberately does not check caller identity — `MembershipState`
+records no owner, and a third party paying for someone's renewal is
+harmless. The griefing vector was that renewal was FREE: `erase` reclaims a
+membership's `rate_limit` only once it expires, so anyone could keep
+abandoned memberships alive one cheap tx per grace window and pin
+`current_total_rate_limit` at `max_total_rate_limit`, blocking all new
+registrations. `extend` now charges `rate_limit * price_per_unit` — the same
+as registering — which also gives `active_duration` economic force. Both
+payment accounts are token-owned, so this is rule-7 safe.
+
 ## Testnet operations
 
 - A program-deploy tx larger than the sequencer's max_block_size is deferred

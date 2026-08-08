@@ -899,14 +899,20 @@ pub async fn register_identity(
     next_index
 }
 
-/// Renew a membership that is currently inside its grace period. The
-/// `fee_payer_id` pays the tx fee; any funded account may call this.
+/// Renew a membership that is currently inside its grace period.
+///
+/// Renewal costs the same as registering the membership's rate limit, so
+/// `payer_holding_id` must be a holding of the deployment's payment token with
+/// enough balance; it signs and is debited. Anyone may pay for anyone's
+/// renewal — the charge, not the caller's identity, is what stops a third
+/// party from pinning an abandoned membership's rate limit forever.
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
-    fee_payer_id: &AccountId,
+    payer_holding_id: &AccountId,
+    treasury_id: &AccountId,
 ) {
     rln::utils::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
@@ -915,14 +921,20 @@ pub async fn extend_membership(
     let membership_account =
         crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
 
-    let accounts = vec![config_account, membership_account, clock_account_id()];
+    let accounts = vec![
+        config_account,
+        membership_account,
+        payer_holding_id.clone(),
+        treasury_id.clone(),
+        clock_account_id(),
+    ];
 
     let signing_key = wallet_core
-        .get_account_public_signing_key(fee_payer_id.clone())
-        .expect("Fee payer account not found in wallet");
+        .get_account_public_signing_key(payer_holding_id.clone())
+        .expect("Payer holding not found in wallet");
 
     let nonces = wallet_core
-        .get_accounts_nonces(&[*fee_payer_id])
+        .get_accounts_nonces(&[*payer_holding_id])
         .await
         .expect("Failed to fetch account nonces");
 
