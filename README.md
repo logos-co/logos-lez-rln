@@ -152,7 +152,7 @@ Instructions are passed as a serde `Instruction` enum defined in `rln-layouts/sr
 
 **Slash** — Anyone can remove a spammer by providing their `identity_secret`. The program verifies `id_commitment = hash(identity_secret)`, looks up the membership, and chains to the merkle program to remove the leaf. Frees the consumed rate limit.
 
-**Extend** — Renews an existing membership's active period from the current clock (a membership in its grace period can be extended rather than re-registered).
+**Extend** — Renews an existing membership's active period from the current clock (a membership in its grace period can be extended rather than re-registered). Anyone may call it, including on someone else's behalf, but it costs the same as registering that membership's rate limit — free renewal would let a third party pin an abandoned membership's share of the rate-limit budget indefinitely.
 
 **Erase** — Removes an expired membership and chains to the merkle program to remove its leaf, returning the member's rate limit to the pool.
 

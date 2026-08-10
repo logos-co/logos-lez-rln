@@ -186,30 +186,28 @@ pub mod rln_registration {
 
     #[instruction]
     pub fn initialize_credit_token(
-        #[account(pda = [literal("receipt"), arg("tree_id")])] credit_token: AccountWithMetadata,
-        #[account(pda = [literal("supply"), arg("tree_id")])] credit_supply: AccountWithMetadata,
-        token_program_id: [u8; 32],
+        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
+        #[account(init, pda = [literal("receipt"), arg("tree_id")])]
+        credit_token: AccountWithMetadata,
+        #[account(init, pda = [literal("supply"), arg("tree_id")])]
+        credit_supply: AccountWithMetadata,
         tree_id: [u8; 32],
     ) -> SpelResult {
         Ok(handlers::initialize_credit_token(
+            config,
             credit_token,
             credit_supply,
-            token_program_id,
             tree_id,
         ))
     }
 
     #[instruction]
     pub fn initialize_merkle_tree(
-        #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
-        merkle_program_id: [u8; 32],
+        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
+        #[account(init, pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
         tree_id: [u8; 32],
     ) -> SpelResult {
-        Ok(handlers::initialize_merkle_tree(
-            tree_main,
-            merkle_program_id,
-            tree_id,
-        ))
+        Ok(handlers::initialize_merkle_tree(config, tree_main, tree_id))
     }
 
     #[instruction]
@@ -327,26 +325,36 @@ pub mod rln_registration {
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
         membership: AccountWithMetadata,
+        #[account(signer)] payer_holding: AccountWithMetadata,
+        treasury_holding: AccountWithMetadata,
         clock_account: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
     ) -> SpelResult {
         let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
-        Ok(handlers::extend(config, membership, clock_account, tree_id))
+        Ok(handlers::extend(
+            config,
+            membership,
+            payer_holding,
+            treasury_holding,
+            clock_account,
+            tree_id,
+        ))
     }
 
     #[instruction]
     pub fn initialize_payment_token(
-        #[account(pda = [literal("payment"), arg("tree_id")])] payment_token: AccountWithMetadata,
-        #[account(pda = [literal("payment_supply"), arg("tree_id")])]
+        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
+        #[account(init, pda = [literal("payment"), arg("tree_id")])]
+        payment_token: AccountWithMetadata,
+        #[account(init, pda = [literal("payment_supply"), arg("tree_id")])]
         payment_supply: AccountWithMetadata,
-        token_program_id: [u8; 32],
         tree_id: [u8; 32],
     ) -> SpelResult {
         Ok(handlers::initialize_payment_token(
+            config,
             payment_token,
             payment_supply,
-            token_program_id,
             tree_id,
         ))
     }

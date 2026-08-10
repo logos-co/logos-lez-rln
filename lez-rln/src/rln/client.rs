@@ -10,15 +10,13 @@ use nssa::{
     program_deployment_transaction,
     public_transaction::{Message, WitnessSet},
 };
-use rln::{
-    hashers::poseidon_hash,
-    prelude::{Fr, seeded_keygen},
-    utils::{IdSecret, fr_to_bytes_le},
-};
+use rand_chacha::ChaCha20Rng;
+use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
 use sequencer_service_rpc::RpcClient as _;
 use wallet::{WalletCore, program_facades::token::Token};
 
 use crate::{
+    fr_bytes::fr_to_bytes_le,
     merkle_tree::SUBTREE_LEAVES,
     rln::{
         CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction,
@@ -132,14 +130,18 @@ pub const DATA_DIR: &str = ".logos-lez-rln";
 /// An existing `wallet_config.json` is preserved (lets callers point the
 /// wallet at a non-default sequencer, e.g. the public LEZ testnet); with
 /// none present, a fresh local-dev default is written.
-pub fn init_wallet() -> WalletCore {
+pub async fn init_wallet() -> WalletCore {
     let config_path = wallet::helperfunctions::fetch_config_path().unwrap();
     let storage_path = wallet::helperfunctions::fetch_persistent_storage_path().unwrap();
+    let statistics_path = wallet::helperfunctions::fetch_statistics_path().unwrap();
     if storage_path.exists() {
-        WalletCore::new_update_chain(config_path, storage_path, None).unwrap()
+        WalletCore::new_update_chain(config_path, storage_path, statistics_path, None)
+            .await
+            .unwrap()
     } else {
         println!("First run: initializing wallet storage at {storage_path:?}");
-        WalletCore::new_init_storage(config_path, storage_path, None, "")
+        WalletCore::new_init_storage(config_path, storage_path, statistics_path, None, "")
+            .await
             .unwrap()
             .0
     }
@@ -305,13 +307,14 @@ pub fn load_payment_account(tree_id: &[u8; 32]) -> Option<AccountId> {
 /// Single source of truth for the leaf value shared by identity creation and
 /// CSV-driven bulk registration.
 pub fn rate_commitment_from_fr(id_commitment_fr: &Fr, rate_limit: u64) -> [u8; 32] {
-    let rate_commitment = poseidon_hash(&[*id_commitment_fr, Fr::from(rate_limit)]);
-    fr_to_bytes_le(&rate_commitment).try_into().unwrap()
+    let rate_commitment =
+        Hasher::<PoseidonHash>::hash_pair(*id_commitment_fr, Fr::from(rate_limit));
+    fr_to_bytes_le(&rate_commitment)
 }
 
 /// Outputs of `create_identity`: the RLN identity plus the on-chain leaf (rate commitment).
 pub struct RlnIdentity {
-    pub identity_secret: IdSecret,
+    pub identity_secret: SecretFr,
     pub id_commitment_fr: Fr,
     pub id_commitment_bytes: [u8; 32],
     pub leaf_bytes: [u8; 32],
@@ -331,16 +334,18 @@ pub async fn create_identity(wallet_core: &mut WalletCore, user_message_limit: u
         .expect("Account should be self-owned public");
 
     let seed = signing_key.value();
-    let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(seed);
+    let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(seed);
+    let identity_secret = identity_keys.identity_secret();
+    let id_commitment_fr = identity_keys.id_commitment();
 
-    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
+    // Deliberate secret leak: this hex is the IDENTITY_SECRET_HASH recovery path.
+    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret);
     let id_secret_hash_hex: String = id_secret_hash_bytes
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect();
 
-    let identity_secret = IdSecret::from(&mut identity_secret_fr);
-    let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+    let id_commitment_bytes = fr_to_bytes_le(&id_commitment_fr);
 
     let leaf_bytes = rate_commitment_from_fr(&id_commitment_fr, user_message_limit);
 
@@ -377,7 +382,7 @@ async fn send_deploy_tx(
     let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
 
     match wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
         .await
     {
@@ -470,7 +475,7 @@ async fn send_init_tx(
     let witness = WitnessSet::for_message(&msg, &[]);
     let tx = PublicTransaction::new(msg, witness);
     let hash = wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"));
@@ -611,11 +616,12 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![credit_token_id.clone(), credit_supply_id.clone()],
-        Instruction::InitializeCreditToken {
-            token_program_id: bytemuck::cast(programs::token().id()),
-            tree_id: *tree_id,
-        },
+        vec![
+            config_id.clone(),
+            credit_token_id.clone(),
+            credit_supply_id.clone(),
+        ],
+        Instruction::InitializeCreditToken { tree_id: *tree_id },
         "InitializeCreditToken",
         &credit_supply_id,
     )
@@ -624,11 +630,8 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![tree_main_id.clone()],
-        Instruction::InitializeMerkleTree {
-            merkle_program_id: bytemuck::cast(merkle_program.id()),
-            tree_id: *tree_id,
-        },
+        vec![config_id.clone(), tree_main_id.clone()],
+        Instruction::InitializeMerkleTree { tree_id: *tree_id },
         "InitializeMerkleTree",
         &tree_main_id,
     )
@@ -644,11 +647,12 @@ pub async fn run_setup(
         send_init_tx(
             wallet_core,
             registration_program,
-            vec![payment_def_id.clone(), payment_supply_id.clone()],
-            Instruction::InitializePaymentToken {
-                token_program_id: bytemuck::cast(programs::token().id()),
-                tree_id: *tree_id,
-            },
+            vec![
+                config_id.clone(),
+                payment_def_id.clone(),
+                payment_supply_id.clone(),
+            ],
+            Instruction::InitializePaymentToken { tree_id: *tree_id },
             "InitializePaymentToken",
             &payment_def_id,
         )
@@ -821,7 +825,7 @@ pub async fn register_identity(
     rate_limit: u64,
     nonce_override: Option<nssa_core::account::Nonce>,
 ) -> u64 {
-    rln::utils::bytes_le_to_fr(id_commitment)
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
@@ -869,7 +873,7 @@ pub async fn register_identity(
     let nonces = match nonce_override {
         Some(nonce) => vec![nonce],
         None => wallet_core
-            .get_accounts_nonces(vec![*user_holding_id])
+            .get_accounts_nonces(&[*user_holding_id])
             .await
             .expect("Failed to fetch account nonces"),
     };
@@ -888,7 +892,7 @@ pub async fn register_identity(
     let tx = PublicTransaction::new(message, witness_set);
 
     wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to register identity");
@@ -896,30 +900,42 @@ pub async fn register_identity(
     next_index
 }
 
-/// Renew a membership that is currently inside its grace period. The
-/// `fee_payer_id` pays the tx fee; any funded account may call this.
+/// Renew a membership that is currently inside its grace period.
+///
+/// Renewal costs the same as registering the membership's rate limit, so
+/// `payer_holding_id` must be a holding of the deployment's payment token with
+/// enough balance; it signs and is debited. Anyone may pay for anyone's
+/// renewal — the charge, not the caller's identity, is what stops a third
+/// party from pinning an abandoned membership's rate limit forever.
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
-    fee_payer_id: &AccountId,
+    payer_holding_id: &AccountId,
+    treasury_id: &AccountId,
 ) {
-    rln::utils::bytes_le_to_fr(id_commitment)
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let membership_account =
         crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
 
-    let accounts = vec![config_account, membership_account, clock_account_id()];
+    let accounts = vec![
+        config_account,
+        membership_account,
+        payer_holding_id.clone(),
+        treasury_id.clone(),
+        clock_account_id(),
+    ];
 
     let signing_key = wallet_core
-        .get_account_public_signing_key(fee_payer_id.clone())
-        .expect("Fee payer account not found in wallet");
+        .get_account_public_signing_key(payer_holding_id.clone())
+        .expect("Payer holding not found in wallet");
 
     let nonces = wallet_core
-        .get_accounts_nonces(vec![*fee_payer_id])
+        .get_accounts_nonces(&[*payer_holding_id])
         .await
         .expect("Failed to fetch account nonces");
 
@@ -935,7 +951,7 @@ pub async fn extend_membership(
     let tx = PublicTransaction::new(message, witness_set);
 
     wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to extend membership");
@@ -951,7 +967,7 @@ pub async fn erase_membership(
     leaf_index: u64,
     fee_payer_id: &AccountId,
 ) {
-    rln::utils::bytes_le_to_fr(id_commitment)
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
@@ -974,7 +990,7 @@ pub async fn erase_membership(
         .expect("Fee payer account not found in wallet");
 
     let nonces = wallet_core
-        .get_accounts_nonces(vec![*fee_payer_id])
+        .get_accounts_nonces(&[*fee_payer_id])
         .await
         .expect("Failed to fetch account nonces");
 
@@ -991,7 +1007,7 @@ pub async fn erase_membership(
     let tx = PublicTransaction::new(message, witness_set);
 
     wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(NSSATransaction::Public(tx))
         .await
         .expect("Failed to erase membership");

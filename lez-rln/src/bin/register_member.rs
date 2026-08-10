@@ -25,7 +25,7 @@ const USER_MESSAGE_LIMIT: u64 = 100;
 async fn main() {
     let count = parse_count();
 
-    let mut wallet_core = init_wallet();
+    let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
     let config_account_id = derive_config_account(&registration_program.id(), &tree_id);

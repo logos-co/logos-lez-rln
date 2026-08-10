@@ -3,17 +3,14 @@
 use std::time::Duration;
 
 use logos_lez_rln::{
+    fr_bytes::fr_to_bytes_le,
     merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf},
     rln::client::{
         RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
         register_identity, tree_id_from_env,
     },
 };
-use rln::{
-    hashers::poseidon_hash,
-    prelude::{Fr, RLN, RLNWitnessInput, hash_to_field_le},
-    utils::fr_to_bytes_le,
-};
+use rln::prelude::{Fr, Hasher, PoseidonHash, RLNBuilder, RLNWitnessInput, hash_to_field_le};
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -26,7 +23,7 @@ const RLN_IDENTIFIER: &str = "rln/logos-rln-relay/v2.0.0";
 
 #[tokio::main]
 async fn main() {
-    let mut wallet_core = init_wallet();
+    let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
 
@@ -85,7 +82,7 @@ async fn main() {
     // Step 3: Get the merkle proof from chain
     println!("\nStep 3: Fetching merkle proof...");
     let proof = get_merkle_proof(&wallet_core, &registration_program, &tree_id, leaf_index).await;
-    let (path_elements, path_indices, root) = proof_to_fr(&proof);
+    let (merkle_proof, root) = proof_to_fr(&proof);
 
     assert_eq!(
         leaf_bytes, proof.leaf,
@@ -99,31 +96,32 @@ async fn main() {
 
     let epoch_fr = hash_to_field_le(EPOCH.as_bytes());
     let rln_identifier_fr = hash_to_field_le(RLN_IDENTIFIER.as_bytes());
-    let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+    let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
 
     let x = hash_to_field_le(MESSAGE.as_bytes());
 
-    let witness = RLNWitnessInput::new(
-        identity_secret,
-        user_message_limit_fr,
-        message_id_fr,
-        path_elements.clone(),
-        path_indices.clone(),
-        x,
-        external_nullifier,
-    )
-    .expect("Failed to create RLN witness");
+    let witness = RLNWitnessInput::new_single()
+        .identity_secret(identity_secret)
+        .user_message_limit(user_message_limit_fr)
+        .merkle_proof(merkle_proof)
+        .x(x)
+        .external_nullifier(external_nullifier)
+        .message_id(message_id_fr)
+        .build()
+        .expect("Failed to create RLN witness");
 
-    let rln = RLN::new().expect("Failed to initialize RLN");
+    let rln = RLNBuilder::stateless().build();
 
     let (rln_proof, proof_values) = rln
-        .generate_rln_proof(&witness)
+        .generate_proof(&witness)
         .expect("Failed to generate RLN proof");
 
     println!("  Proof generated successfully!");
     println!(
         "  Nullifier: {}",
-        hex::encode(fr_to_bytes_le(&proof_values.nullifier()))
+        hex::encode(fr_to_bytes_le(
+            &proof_values.nullifier().expect("single-mode proof")
+        ))
     );
     println!(
         "  Root in proof: {}",

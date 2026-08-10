@@ -24,12 +24,14 @@ pub enum Instruction {
         free_quota: u64,
         faucet_claim_cap: u128,
     },
+    /// Callee program ids are deliberately absent here and on the two
+    /// initializers below: they come from the config PDA these instructions
+    /// declare. A caller-supplied program id would be handed `pda_seeds`
+    /// authorizing it to claim the registration program's own PDAs.
     InitializeCreditToken {
-        token_program_id: [u8; 32],
         tree_id: [u8; 32],
     },
     InitializeMerkleTree {
-        merkle_program_id: [u8; 32],
         tree_id: [u8; 32],
     },
     Register {
@@ -67,7 +69,6 @@ pub enum Instruction {
     /// — faucet deployments only; the mint authority is the program itself,
     /// no human key. Mirrors `InitializeCreditToken`.
     InitializePaymentToken {
-        token_program_id: [u8; 32],
         tree_id: [u8; 32],
     },
     /// Faucet: mint up to `faucet_claim_cap` payment tokens to the (signing)

@@ -24,7 +24,7 @@ const USER_FUNDING: u128 = 10_000_000_000;
 
 #[tokio::main]
 async fn main() {
-    let mut wallet_core = init_wallet();
+    let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, merkle_program) = load_programs();
 

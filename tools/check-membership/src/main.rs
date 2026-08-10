@@ -19,8 +19,8 @@ use rln_layouts::{
 use sha2::{Digest, Sha256};
 
 // Shared-faucet testnet registry (deployments/shared-faucet/deployment.json).
-const DEFAULT_TREE_ID: &str = "848f9972b73752ebaea9adbda55373089dfc5308af5293eeca9a20547b3f873b";
-const DEFAULT_PROGRAM_ID: &str = "4847b5eb87d70a6be0fddf05d248eccabf414546b3b78f14911423794be3583e";
+const DEFAULT_TREE_ID: &str = "15f5520c1648358440b73a7b11f4a8cf8e44b63b7a0ae326609863e3e2f1b6ee";
+const DEFAULT_PROGRAM_ID: &str = "65343a570616eec04387832a193b258ee48d445f1feb4d842db4f320feec3e7b";
 const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co/";
 
 // SPEL `compute_pda`: SHA-256(prefix || program_id || seed). The prefix and
@@ -242,7 +242,7 @@ mod tests {
             "commitment",
         );
         let expected = parse_hex32(
-            "cfe670632f3bb40e932c7e9bcd1528d78a62c5c4d4a607a6bb27679cf94f840c",
+            "c7326696d5f88ab2566492d6f76c0bc3eb8665dee315d786cc506186fd5d35ef",
             "account",
         );
         assert_eq!(derive_membership_account(&program, &tree, &commitment), expected);

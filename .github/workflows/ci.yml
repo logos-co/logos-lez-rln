@@ -32,6 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The v0.2.2 wallet dep (keycard_wallet -> pcsc-sys) links libpcsclite;
+      # its headers are not on the ubuntu runners.
+      - name: Install PCSC headers
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -80,6 +85,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # See the lint job: keycard_wallet -> pcsc-sys needs libpcsclite.
+      - name: Install PCSC headers
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -117,6 +126,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/install-risc0
+
+      # See the lint job: keycard_wallet -> pcsc-sys needs libpcsclite.
+      - name: Install PCSC headers
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

@@ -81,15 +81,26 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
+    /// Directory holding the guest `.bin`s under test.
+    ///
+    /// Defaults to the `docker/` dir the deploy host reads, which doubles as
+    /// the record of what is live on testnet — so testing a guest change there
+    /// means overwriting the artifacts that `verify.sh` checks the deployment
+    /// against. `LEZ_RLN_GUEST_DIR` points the suite at a fresh build instead
+    /// (e.g. the `release/` dir `cargo build` writes) and leaves them alone.
+    fn guest_binary_dir() -> std::path::PathBuf {
+        match std::env::var_os("LEZ_RLN_GUEST_DIR") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => repo_root().join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker"),
+        }
+    }
+
     fn merkle_tree_binary_path() -> std::path::PathBuf {
-        repo_root().join(
-            "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin",
-        )
+        guest_binary_dir().join("incremental_merkle_tree.bin")
     }
 
     fn rln_registration_binary_path() -> std::path::PathBuf {
-        repo_root()
-            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/rln_registration.bin")
+        guest_binary_dir().join("rln_registration.bin")
     }
 
     // ========================================================================
@@ -1060,7 +1071,7 @@ mod tests {
 
         let init_config = build_public_tx(
             registration.id(),
-            vec![config_id, credit_token_id.clone()],
+            vec![config_id.clone(), credit_token_id.clone()],
             Instruction::Initialize {
                 merkle_program_id: bytemuck::cast(merkle.id()),
                 tree_id: *tree_id,
@@ -1079,20 +1090,14 @@ mod tests {
 
         let init_credit_token = build_public_tx(
             registration.id(),
-            vec![credit_token_id, credit_supply_id],
-            Instruction::InitializeCreditToken {
-                token_program_id: bytemuck::cast(programs::token().id()),
-                tree_id: *tree_id,
-            },
+            vec![config_id.clone(), credit_token_id, credit_supply_id],
+            Instruction::InitializeCreditToken { tree_id: *tree_id },
         );
 
         let init_merkle = build_public_tx(
             registration.id(),
-            vec![tree_main_id],
-            Instruction::InitializeMerkleTree {
-                merkle_program_id: bytemuck::cast(merkle.id()),
-                tree_id: *tree_id,
-            },
+            vec![config_id, tree_main_id],
+            Instruction::InitializeMerkleTree { tree_id: *tree_id },
         );
 
         [init_config, init_credit_token, init_merkle]
@@ -1276,11 +1281,12 @@ mod tests {
         // 4th init tx: create RLNTOK as a program-owned PDA definition.
         let init_payment = build_public_tx(
             registration.id(),
-            vec![payment_def_id, payment_supply_id],
-            Instruction::InitializePaymentToken {
-                token_program_id: bytemuck::cast(programs::token().id()),
-                tree_id: TREE_ID,
-            },
+            vec![
+                derive_config_pda(registration.id(), &TREE_ID),
+                payment_def_id,
+                payment_supply_id,
+            ],
+            Instruction::InitializePaymentToken { tree_id: TREE_ID },
         );
         state
             .transition_from_public_transaction(&init_payment, 1, 0)
@@ -1481,14 +1487,13 @@ mod tests {
     /// Derive id_commitment from identity_secret using Poseidon hash.
     /// Matches the single-input `hash_single` used by the guest's slash path.
     fn derive_id_commitment_from_secret(identity_secret: &[u8; 32]) -> [u8; 32] {
-        use rln::{
-            hashers::poseidon_hash,
-            utils::{bytes_le_to_fr, fr_to_bytes_le},
-        };
+        use rln::prelude::{Hasher, PoseidonHash};
 
-        let (secret_fr, _) = bytes_le_to_fr(identity_secret).expect("Invalid identity_secret");
-        let hash_fr = poseidon_hash(&[secret_fr]);
-        fr_to_bytes_le(&hash_fr).try_into().unwrap()
+        use crate::fr_bytes::{bytes_le_to_fr, fr_to_bytes_le};
+
+        let secret_fr = bytes_le_to_fr(identity_secret).expect("Invalid identity_secret");
+        let hash_fr = Hasher::<PoseidonHash>::hash_single(secret_fr);
+        fr_to_bytes_le(&hash_fr)
     }
 
     /// Creates a slashable identity (identity_secret and derived id_commitment).
@@ -1599,6 +1604,34 @@ mod tests {
     /// - pre_states[4]: CLOCK_50 system account
     /// - pre_states[5]: Membership PDA (init)
     #[allow(dead_code)]
+    /// Make the registrar a program-owned account.
+    ///
+    /// `register_free` requires this, and LEZ is why: the registrar is a
+    /// declared account, so it is echoed into the program output, and rule 7
+    /// only tolerates echoing a DEFAULT-owned account while it is pristine.
+    /// Signing bumps the nonce, so a plain-wallet registrar would pass once
+    /// and then have every later RegisterFree silently dropped at inclusion.
+    /// Deployments seed the registrar by claiming tokens into it before first
+    /// use; tests do it directly.
+    fn seed_program_owned_registrar(
+        state: &mut V03State,
+        payment_def_id: &AccountId,
+        registrar_id: &AccountId,
+    ) {
+        let holding = token_core::TokenHolding::Fungible {
+            definition_id: payment_def_id.clone(),
+            balance: 0,
+        };
+        state.force_insert_account(
+            registrar_id.clone(),
+            Account {
+                program_owner: programs::token().id(),
+                data: Data::from(&holding),
+                ..Account::default()
+            },
+        );
+    }
+
     fn build_register_free_tx(
         registration: &Program,
         tree_id: &[u8; 32],
@@ -2051,6 +2084,136 @@ mod tests {
         assert!(
             result.is_err(),
             "Re-initialization should fail (config already claimed)"
+        );
+    }
+
+    // SECURITY (callee substitution): the merkle/token program a chained init
+    // call targets comes from config, never from the caller. The instructions
+    // no longer carry a program-id argument at all, so the only way to aim an
+    // init at an attacker's program is to make config name it — which means
+    // owning the tree_id's config PDA in the first place. Before the fix,
+    // InitializeMerkleTree took merkle_program_id as an arg and handed it
+    // pda_seeds authorizing it to claim this program's `main` PDA.
+    #[test]
+    fn test_init_merkle_uses_config_program_not_caller_arg() {
+        let (mut state, merkle, registration) =
+            state_with_programs().expect("Programs should load");
+
+        let payment_token_id = AccountId::new([10; 32]);
+        let treasury_id = AccountId::new([11; 32]);
+        let init_txs = build_registration_init_txs(
+            &registration,
+            &merkle,
+            &TREE_ID,
+            &payment_token_id,
+            PRICE_PER_UNIT,
+            &treasury_id,
+        );
+        apply_registration_init(&mut state, &init_txs).expect("Init should succeed");
+
+        // Config binds the tree to `merkle`, so a second tree_id whose config
+        // was never initialized has nothing to read: the init must fail rather
+        // than fall back to a caller-named program.
+        let other_tree_id = [0x99u8; 32];
+        let orphan_tx = build_public_tx(
+            registration.id(),
+            vec![
+                derive_config_pda(registration.id(), &other_tree_id),
+                derive_tree_main_pda(registration.id(), &other_tree_id),
+            ],
+            Instruction::InitializeMerkleTree {
+                tree_id: other_tree_id,
+            },
+        );
+        assert!(
+            state
+                .transition_from_public_transaction(&orphan_tx, 1, 0)
+                .is_err(),
+            "InitializeMerkleTree without an initialized config must fail"
+        );
+    }
+
+    // SECURITY (tree reset): replaying InitializeMerkleTree alone must not
+    // reset a live tree. The batch test above stops at the first tx and never
+    // reaches the merkle one; this exercises that tx on its own, which is what
+    // an attacker submits. Public transactions carry no signature, so the only
+    // thing standing between anyone and a tree wipe is the init check on
+    // tree_main (plus initialize_tree's own uninitialized assert). A reset
+    // would zero next_index and the root history — invalidating every member's
+    // proof — while the membership PDAs survive, so nobody could re-register.
+    #[test]
+    fn test_initialize_merkle_tree_cannot_reset_a_live_tree() {
+        let mut setup = state_with_initialized_registration().expect("Setup should succeed");
+
+        // Put a real member in the tree, so a successful reset would be
+        // observably destructive rather than a no-op on an empty tree.
+        let (user_credit_key, user_credit_id) = create_test_keypair(10);
+        let buy_tx = build_buy_credits_tx(
+            &setup,
+            &TREE_ID,
+            &user_credit_id,
+            &user_credit_key,
+            300,
+            Nonce(0),
+            Nonce(0),
+        );
+        setup
+            .state
+            .transition_from_public_transaction(&buy_tx, 1, 0)
+            .expect("Buy should succeed");
+        let register_tx = build_register_with_credits_tx(
+            &setup,
+            &TREE_ID,
+            &user_credit_id,
+            &user_credit_key,
+            valid_field_element(0x42),
+            300,
+            Nonce(1),
+            0,
+        );
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("Register should succeed");
+
+        let tree_main_id = derive_tree_main_pda(setup.registration.id(), &TREE_ID);
+        let before = setup
+            .state
+            .get_account_by_id(tree_main_id.clone())
+            .data
+            .as_ref()
+            .to_vec();
+        assert_eq!(
+            u64::from_le_bytes(before[1..9].try_into().unwrap()),
+            1,
+            "the member should be in the tree before the reset attempt"
+        );
+
+        let attack_tx = build_public_tx(
+            setup.registration.id(),
+            vec![
+                derive_config_pda(setup.registration.id(), &TREE_ID),
+                tree_main_id.clone(),
+            ],
+            Instruction::InitializeMerkleTree { tree_id: TREE_ID },
+        );
+        let result = setup
+            .state
+            .transition_from_public_transaction(&attack_tx, 1, 0);
+        assert!(
+            result.is_err(),
+            "Re-initializing a live tree must fail, got: {result:?}"
+        );
+
+        let after = setup
+            .state
+            .get_account_by_id(tree_main_id)
+            .data
+            .as_ref()
+            .to_vec();
+        assert_eq!(
+            before, after,
+            "the rejected reset must leave the tree byte-identical"
         );
     }
 
@@ -3084,6 +3247,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 2)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let tx = build_register_free_tx(
             &setup.registration,
@@ -3134,6 +3298,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 1)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let tx1 = build_register_free_tx(
             &setup.registration,
@@ -3167,6 +3332,74 @@ mod tests {
         );
     }
 
+    // SECURITY (registrar reuse): the registrar signs, so LEZ increments its
+    // nonce after every free registration. Because the registrar is a declared
+    // account and therefore echoed into the program output, rule 7
+    // (NonDefaultAccountWithDefaultOwner) rejects the echo of a DEFAULT-owned
+    // account that is no longer pristine — a plain-wallet registrar works
+    // exactly ONCE and then every RegisterFree is dropped at block inclusion,
+    // visible only in the sequencer log. A program-owned registrar is exempt
+    // (rule 7 is skipped) and must keep working indefinitely.
+    //
+    // test_register_free_quota_exhaustion cannot catch this: it sets
+    // free_quota = 1, so its second tx panics inside the guest on the quota
+    // assert before validation is reached, and it only asserts is_err().
+    #[test]
+    fn test_register_free_works_repeatedly_for_one_registrar() {
+        let (registrar_key, registrar_id) = create_test_keypair(35);
+        let mut setup =
+            state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 3)
+                .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
+
+        for (i, commitment) in [0x61u8, 0x62, 0x63].iter().enumerate() {
+            let tx = build_register_free_tx(
+                &setup.registration,
+                &TREE_ID,
+                &registrar_id,
+                &registrar_key,
+                valid_field_element(*commitment),
+                300,
+                Nonce(i as u128),
+                i as u64,
+            );
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 1, 0)
+                .unwrap_or_else(|e| panic!("free registration #{} must succeed, got {e:?}", i + 1));
+        }
+    }
+
+    // The same trap, asserted from the other side: a DEFAULT-owned (plain
+    // wallet) registrar is refused up front with a clear message, rather than
+    // succeeding once and then failing opaquely forever.
+    #[test]
+    fn test_register_free_rejects_a_plain_wallet_registrar() {
+        let (registrar_key, registrar_id) = create_test_keypair(36);
+        let mut setup =
+            state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 2)
+                .expect("Setup should succeed");
+        // Deliberately NOT seeded as program-owned.
+
+        let tx = build_register_free_tx(
+            &setup.registration,
+            &TREE_ID,
+            &registrar_id,
+            &registrar_key,
+            valid_field_element(0x64),
+            300,
+            Nonce(0),
+            0,
+        );
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 1, 0)
+                .is_err(),
+            "a plain-wallet registrar must be rejected on the FIRST call"
+        );
+    }
+
     #[test]
     fn test_register_free_rejects_wrong_signer() {
         let (_registrar_key, registrar_id) = create_test_keypair(33);
@@ -3174,6 +3407,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 5)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let tx = build_register_free_tx(
             &setup.registration,
@@ -3219,6 +3453,7 @@ mod tests {
         let mut setup =
             state_with_policy_registration(DEFAULT_MAX_TOTAL_RATE_LIMIT, *registrar_id.value(), 5)
                 .expect("Setup should succeed");
+        seed_program_owned_registrar(&mut setup.state, &setup.payment_def_id, &registrar_id);
 
         let register_tx = build_register_tx(
             &setup,
@@ -3353,24 +3588,27 @@ mod tests {
     // The flow mirrors run_rln_proof.rs but operates directly on V03State
     // instead of fetching from a live network.
 
-    use rln::{
-        hashers::poseidon_hash,
-        prelude::{Fr, RLN, RLNWitnessInput, hash_to_field_le, seeded_keygen},
-        utils::{IdSecret, bytes_le_to_fr, fr_to_bytes_le},
+    use rand_chacha::ChaCha20Rng;
+    use rln::prelude::{
+        Fr, Hasher, IdentityKeys, PoseidonHash, RLNBuilder, RLNMerkleProof, RLNWitnessInput,
+        hash_to_field_le,
     };
 
-    use crate::merkle_tree::{
-        OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA, TOP_DEPTH,
-        read_sparse_node,
+    use crate::{
+        fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
+        merkle_tree::{
+            OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA, TOP_DEPTH,
+            read_sparse_node,
+        },
     };
 
     /// Computes rate_commitment = poseidon(id_commitment, rate_limit).
     /// This is the leaf value stored in the merkle tree.
     fn compute_rate_commitment(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] {
-        let (id_fr, _) = bytes_le_to_fr(id_commitment).expect("Invalid id_commitment");
+        let id_fr = bytes_le_to_fr(id_commitment).expect("Invalid id_commitment");
         let rate_fr = Fr::from(rate_limit);
-        let hash_fr = poseidon_hash(&[id_fr, rate_fr]);
-        fr_to_bytes_le(&hash_fr).try_into().unwrap()
+        let hash_fr = Hasher::<PoseidonHash>::hash_pair(id_fr, rate_fr);
+        fr_to_bytes_le(&hash_fr)
     }
 
     /// Fetches a node hash from on-chain state using the subtree model.
@@ -3490,10 +3728,10 @@ mod tests {
         path_elements: &[[u8; 32]],
         path_indices: &[u8],
     ) -> [u8; 32] {
-        let (mut current, _) = bytes_le_to_fr(leaf).expect("Invalid leaf");
+        let mut current = bytes_le_to_fr(leaf).expect("Invalid leaf");
 
         for (sibling_bytes, &path_index) in path_elements.iter().zip(path_indices.iter()) {
-            let (sibling, _) = bytes_le_to_fr(sibling_bytes).expect("Invalid sibling");
+            let sibling = bytes_le_to_fr(sibling_bytes).expect("Invalid sibling");
 
             let (left, right) = if path_index == 0 {
                 (current, sibling)
@@ -3501,10 +3739,10 @@ mod tests {
                 (sibling, current)
             };
 
-            current = poseidon_hash(&[left, right]);
+            current = Hasher::<PoseidonHash>::hash_pair(left, right);
         }
 
-        fr_to_bytes_le(&current).try_into().unwrap()
+        fr_to_bytes_le(&current)
     }
 
     #[test]
@@ -3556,12 +3794,12 @@ mod tests {
     fn test_rln_proof_generation_and_verification() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
 
-        // Create identity using zerokit's seeded_keygen (like run_rln_proof does)
+        // Create identity using zerokit's seeded keygen (like run_rln_proof does)
         let seed = [0x42u8; 32]; // deterministic seed for testing
-        let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(&seed);
-        let identity_secret = IdSecret::from(&mut identity_secret_fr);
+        let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed);
+        let identity_secret = identity_keys.identity_secret();
 
-        let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+        let id_commitment: [u8; 32] = fr_to_bytes_le(&identity_keys.id_commitment());
         let rate_limit = 300u64;
 
         // Register the identity
@@ -3579,9 +3817,9 @@ mod tests {
         // Convert to Fr types for zerokit
         let path_elements: Vec<Fr> = path_elements_bytes
             .iter()
-            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let (root, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
 
         // Verify the leaf matches what we expect
         let expected_leaf = compute_rate_commitment(&id_commitment, rate_limit);
@@ -3597,34 +3835,33 @@ mod tests {
         // Compute external nullifier = poseidon(epoch, rln_identifier)
         let epoch_fr = hash_to_field_le(b"test-epoch");
         let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
 
         // Compute signal hash (x) = hash of message
         let x = hash_to_field_le(b"Hello, RLN!");
 
         // Create RLN witness input
-        let witness = RLNWitnessInput::new(
-            identity_secret,
-            user_message_limit,
-            message_id,
-            path_elements.clone(),
-            path_indices.clone(),
-            x,
-            external_nullifier,
-        )
-        .expect("Failed to create RLN witness");
+        let witness = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret)
+            .user_message_limit(user_message_limit)
+            .merkle_proof(RLNMerkleProof::new(path_elements, path_indices))
+            .x(x)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create RLN witness");
 
         // Initialize RLN instance
-        let rln = RLN::new().expect("Failed to initialize RLN");
+        let rln = RLNBuilder::stateless().build();
 
         // Generate the proof
         let (rln_proof, proof_values) = rln
-            .generate_rln_proof(&witness)
+            .generate_proof(&witness)
             .expect("Failed to generate RLN proof");
 
         // Verify proof values match
         assert_eq!(
-            *proof_values.root(),
+            proof_values.root(),
             root,
             "Proof root should match on-chain root"
         );
@@ -3646,9 +3883,8 @@ mod tests {
 
         // Register first identity
         let seed1 = [0x01u8; 32];
-        let (mut identity_secret_fr1, id_commitment_fr1) = seeded_keygen(&seed1);
-        let _identity_secret1 = IdSecret::from(&mut identity_secret_fr1);
-        let id_commitment1: [u8; 32] = fr_to_bytes_le(&id_commitment_fr1).try_into().unwrap();
+        let identity_keys1 = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed1);
+        let id_commitment1: [u8; 32] = fr_to_bytes_le(&identity_keys1.id_commitment());
 
         let register_tx1 = build_register_tx(&setup, &TREE_ID, id_commitment1, 100, Nonce(0), 0);
         setup
@@ -3658,9 +3894,9 @@ mod tests {
 
         // Register second identity (this is the one we'll prove)
         let seed2 = [0x02u8; 32];
-        let (mut identity_secret_fr2, id_commitment_fr2) = seeded_keygen(&seed2);
-        let identity_secret2 = IdSecret::from(&mut identity_secret_fr2);
-        let id_commitment2: [u8; 32] = fr_to_bytes_le(&id_commitment_fr2).try_into().unwrap();
+        let identity_keys2 = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed2);
+        let identity_secret2 = identity_keys2.identity_secret();
+        let id_commitment2: [u8; 32] = fr_to_bytes_le(&identity_keys2.id_commitment());
         let rate_limit2 = 100u64;
 
         let register_tx2 =
@@ -3672,9 +3908,8 @@ mod tests {
 
         // Register third identity
         let seed3 = [0x03u8; 32];
-        let (mut identity_secret_fr3, id_commitment_fr3) = seeded_keygen(&seed3);
-        let _identity_secret3 = IdSecret::from(&mut identity_secret_fr3);
-        let id_commitment3: [u8; 32] = fr_to_bytes_le(&id_commitment_fr3).try_into().unwrap();
+        let identity_keys3 = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed3);
+        let id_commitment3: [u8; 32] = fr_to_bytes_le(&identity_keys3.id_commitment());
 
         let register_tx3 = build_register_tx(&setup, &TREE_ID, id_commitment3, 100, Nonce(2), 2);
         setup
@@ -3689,9 +3924,9 @@ mod tests {
         // Convert to Fr types
         let path_elements: Vec<Fr> = path_elements_bytes
             .iter()
-            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let (root, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
 
         // Verify the leaf
         let expected_leaf = compute_rate_commitment(&id_commitment2, rate_limit2);
@@ -3702,27 +3937,26 @@ mod tests {
         let message_id = Fr::from(0u64);
         let epoch_fr = hash_to_field_le(b"test-epoch-2");
         let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
         let x = hash_to_field_le(b"Another message");
 
-        let witness = RLNWitnessInput::new(
-            identity_secret2,
-            user_message_limit,
-            message_id,
-            path_elements,
-            path_indices,
-            x,
-            external_nullifier,
-        )
-        .expect("Failed to create RLN witness");
+        let witness = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret2)
+            .user_message_limit(user_message_limit)
+            .merkle_proof(RLNMerkleProof::new(path_elements, path_indices))
+            .x(x)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create RLN witness");
 
-        let rln = RLN::new().expect("Failed to initialize RLN");
+        let rln = RLNBuilder::stateless().build();
         let (rln_proof, proof_values) = rln
-            .generate_rln_proof(&witness)
+            .generate_proof(&witness)
             .expect("Failed to generate RLN proof");
 
         assert_eq!(
-            *proof_values.root(),
+            proof_values.root(),
             root,
             "Proof root should match on-chain root"
         );
@@ -3785,8 +4019,8 @@ mod tests {
         );
 
         // Verify root changed to empty tree root (since this was the only member)
-        let (root_fr, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
-        let (root_before_register_fr, _) = bytes_le_to_fr(&root_after).expect("Invalid root");
+        let root_fr = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root_before_register_fr = bytes_le_to_fr(&root_after).expect("Invalid root");
         assert_eq!(
             root_fr, root_before_register_fr,
             "Root should match empty tree root"
@@ -3799,9 +4033,9 @@ mod tests {
 
         // Create identity
         let seed = [0x99u8; 32];
-        let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(&seed);
-        let identity_secret = IdSecret::from(&mut identity_secret_fr);
-        let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+        let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed);
+        let identity_secret = identity_keys.identity_secret();
+        let id_commitment: [u8; 32] = fr_to_bytes_le(&identity_keys.id_commitment());
         let rate_limit = 300u64;
 
         // Register
@@ -3818,9 +4052,9 @@ mod tests {
 
         let path_elements: Vec<Fr> = path_elements_bytes
             .iter()
-            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let (root, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
 
         // Same epoch and message_id but different messages
         let user_message_limit = Fr::from(rate_limit);
@@ -3828,42 +4062,42 @@ mod tests {
 
         let epoch_fr = hash_to_field_le(b"epoch-1");
         let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
+
+        let merkle_proof = RLNMerkleProof::new(path_elements, path_indices);
 
         // First message
         let x1 = hash_to_field_le(b"First message");
-        let witness1 = RLNWitnessInput::new(
-            identity_secret.clone(),
-            user_message_limit,
-            message_id,
-            path_elements.clone(),
-            path_indices.clone(),
-            x1,
-            external_nullifier,
-        )
-        .expect("Failed to create witness 1");
+        let witness1 = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret.clone())
+            .user_message_limit(user_message_limit)
+            .merkle_proof(merkle_proof.clone())
+            .x(x1)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create witness 1");
 
         // Second message (different content, same message_id)
         let x2 = hash_to_field_le(b"Second message");
-        let witness2 = RLNWitnessInput::new(
-            identity_secret,
-            user_message_limit,
-            message_id,
-            path_elements,
-            path_indices,
-            x2,
-            external_nullifier,
-        )
-        .expect("Failed to create witness 2");
+        let witness2 = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret)
+            .user_message_limit(user_message_limit)
+            .merkle_proof(merkle_proof)
+            .x(x2)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create witness 2");
 
-        let rln = RLN::new().expect("Failed to initialize RLN");
+        let rln = RLNBuilder::stateless().build();
 
         // Generate both proofs
         let (proof1, values1) = rln
-            .generate_rln_proof(&witness1)
+            .generate_proof(&witness1)
             .expect("Failed to generate proof 1");
         let (proof2, values2) = rln
-            .generate_rln_proof(&witness2)
+            .generate_proof(&witness2)
             .expect("Failed to generate proof 2");
 
         // Both proofs should be individually valid
@@ -3878,8 +4112,8 @@ mod tests {
 
         // But they should have the SAME nullifier (since same identity, epoch, message_id)
         assert_eq!(
-            values1.nullifier(),
-            values2.nullifier(),
+            values1.nullifier().expect("single-mode proof"),
+            values2.nullifier().expect("single-mode proof"),
             "Same identity + epoch + message_id should produce same nullifier"
         );
 
@@ -4123,10 +4357,14 @@ mod tests {
     // Expiration — transaction builders
     // ========================================================================
 
+    /// Renewal is PAID (same price as registering the membership's rate
+    /// limit), so the payer holding signs and is debited — extend is no longer
+    /// a zero-signer transaction.
     fn build_extend_tx(
         setup: &TestSetup,
         tree_id: &[u8; 32],
         id_commitment: [u8; 32],
+        payer_nonce: Nonce,
     ) -> PublicTransaction {
         let config_id = derive_config_pda(setup.registration.id(), tree_id);
         let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
@@ -4134,6 +4372,8 @@ mod tests {
         let account_ids = vec![
             config_id,
             membership_id,
+            setup.user_payment_id.clone(),
+            setup.treasury_id.clone(),
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
@@ -4142,10 +4382,18 @@ mod tests {
             id_commitment,
         };
 
-        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
-            .expect("valid message");
+        let message = Message::try_new(
+            setup.registration.id(),
+            account_ids,
+            vec![payer_nonce], // nonce for the payer holding (index 2)
+            instruction,
+        )
+        .expect("valid message");
 
-        PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
+        PublicTransaction::new(
+            message.clone(),
+            WitnessSet::for_message(&message, &[&setup.user_payment_key]),
+        )
     }
 
     fn build_erase_tx(
@@ -4245,7 +4493,7 @@ mod tests {
         let in_grace = grace_start + (DEFAULT_GRACE_PERIOD_DURATION as u64 / 2);
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0)
@@ -4270,7 +4518,7 @@ mod tests {
 
         set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 10, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         let result = setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0);
@@ -4296,7 +4544,7 @@ mod tests {
             + DEFAULT_GRACE_PERIOD_DURATION as u64;
         set_clock_50(&mut setup.state, expiration + 1, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         let result = setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0);
@@ -4307,10 +4555,15 @@ mod tests {
         );
     }
 
+    // SECURITY (rate-limit pinning): extend deliberately does NOT check caller
+    // identity — a membership records no owner, and letting a third party pay
+    // for someone's renewal is harmless. What stops the grief is the PRICE.
+    // While renewal was free, anyone could keep an abandoned membership alive
+    // one cheap tx per grace window; `erase` only reclaims rate_limit once a
+    // membership expires, so an attacker could pin current_total_rate_limit at
+    // max_total_rate_limit and block every new registration indefinitely.
     #[test]
-    fn test_extend_by_any_caller_succeeds_in_grace() {
-        // Sanity: Extend carries no authorization — the builder signs with no keys.
-        // If this test fails, something is asserting caller identity.
+    fn test_extend_by_a_third_party_is_allowed_but_charged() {
         let Some(mut setup) = setup_with_expiration() else {
             return;
         };
@@ -4322,11 +4575,63 @@ mod tests {
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
         set_clock_50(&mut setup.state, in_grace, 100);
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment);
+        let paid_before = get_token_balance(&setup.state, &setup.user_payment_id);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0)
-            .expect("extend with no signer must succeed");
+            .expect("a paying third party may renew");
+
+        let paid_after = get_token_balance(&setup.state, &setup.user_payment_id);
+        let expected = EXP_RATE_LIMIT as u128 * PRICE_PER_UNIT;
+        assert_eq!(
+            paid_before - paid_after,
+            expected,
+            "renewal must cost the same as registering that rate limit"
+        );
+        assert!(
+            expected > 0,
+            "a zero-priced renewal would restore the grief"
+        );
+    }
+
+    /// The grief itself: without funds the renewal fails, so pinning a
+    /// membership's rate limit forever is no longer free.
+    #[test]
+    fn test_extend_fails_when_payer_cannot_cover_the_price() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        let id_commitment = valid_field_element(0xA7);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        // Empty the payer's holding (keeping it a valid token-owned holding),
+        // then try to renew.
+        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
+        set_clock_50(&mut setup.state, in_grace, 100);
+        let empty = token_core::TokenHolding::Fungible {
+            definition_id: setup.payment_def_id.clone(),
+            balance: 0,
+        };
+        let prior = setup.state.get_account_by_id(setup.user_payment_id.clone());
+        setup.state.force_insert_account(
+            setup.user_payment_id.clone(),
+            Account {
+                data: Data::from(&empty),
+                ..prior
+            },
+        );
+
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&extend_tx, 2, 0)
+                .is_err(),
+            "an unfunded renewal must fail"
+        );
     }
 
     #[test]

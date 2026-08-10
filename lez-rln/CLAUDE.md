@@ -38,7 +38,94 @@ owner equals it, and use the config value as the ChainedCall target — never
 `account.program_owner`. Regression tests:
 `test_*_rejects_*foreign_program` in state_tests.rs (added at 0780862).
 
+## Init handlers must carry `init`
+Public transactions need no signature (`build_public_tx` passes empty nonces
+and keys), so any instruction that writes a PDA is submittable by anyone.
+`#[account(init, pda = ...)]` — which expands to an `Account::default()`
+check — is what makes an initializer one-shot; a bare `pda` constraint is
+not an authorization. Authorization (`is_authorized`) only says the caller
+may write the account, never that the account is unclaimed.
+
+`initialize_merkle_tree` shipped with a bare `pda` constraint and the merkle
+program's `initialize_tree` checked only authorization, so replaying
+`InitializeMerkleTree` against a live tree reset `next_index` and the root
+history — invalidating every member's proof while their membership PDAs
+survived, leaving them unable to re-register. Regressions:
+`test_initialize_merkle_tree_cannot_reset_a_live_tree` (state) and
+`merkle_tree::tests::test_initialize_rejects_live_tree` (guest unit). Note
+`test_registration_init_prevents_reinit` does NOT cover this: it replays the
+whole init batch and short-circuits on the first tx.
+
+The token initializers are additionally covered by
+`token_core::new_fungible_definition`, which asserts both accounts are
+`Account::default()` — the merkle program had no equivalent. When adding a
+program that owns accounts, give it one.
+
+## Chained-call targets come from config, never from instruction args
+The same rule the token-holding convention below states, generalized: a
+`ChainedCall::program_id` must be read from `config_state`, because these
+handlers attach `pda_seeds` that authorize the callee to claim the
+registration program's own PDAs (`main`, `receipt`, `supply`, `payment`,
+`payment_supply`). A caller-named program id would be handed those seeds.
+
+`InitializeMerkleTree` / `InitializeCreditToken` / `InitializePaymentToken`
+originally took `merkle_program_id` / `token_program_id` as instruction args
+and never loaded config. They now declare the config PDA and read the target
+from it via `require_config` (which also binds `tree_id`), and the args are
+gone from `rln_layouts::Instruction` entirely — the wire cannot express the
+attack. This makes config a prerequisite for those three instructions, which
+is satisfied because `Initialize` runs first (it only reads
+`credit_token.account_id`, never its contents). Regression:
+`test_init_merkle_uses_config_program_not_caller_arg`.
+
+## A declared plain-wallet account breaks the program on its second use
+LEZ rule 7 (`NonDefaultAccountWithDefaultOwner`) rejects any account in a
+program's output that is DEFAULT-owned and no longer `Account::default()`.
+Every declared account IS echoed into the output — v0.2.2's
+`DeclaredAccountMissingFromOutput` leaves no way to omit one, and the
+rc6-era spel filter that used to strip these echoes was deleted for exactly
+that reason. Signing increments the nonce, so a declared plain-wallet signer
+works ONCE and is then rejected forever, with the reason visible only in the
+sequencer's log.
+
+`register_free`'s registrar is the case in point, and it now asserts the
+registrar is program-owned so the misconfiguration fails loudly on the first
+call instead. Deployments must seed the registrar (e.g. claim tokens into it)
+before its first registration. Regressions:
+`test_register_free_works_repeatedly_for_one_registrar` and
+`test_register_free_rejects_a_plain_wallet_registrar` — note that
+`test_register_free_quota_exhaustion` CANNOT catch this, since its second tx
+dies on the quota assert before validation runs.
+
+`claim_tokens`' `dest_holding` is the benign version: its first claim needs a
+pristine account anyway, and the token program then owns it, so rule 7 is
+skipped from then on. Only a plain wallet that has already transacted is
+permanently unusable as a claim destination.
+
+## Renewal is priced, not permissioned
+`extend` deliberately does not check caller identity — `MembershipState`
+records no owner, and a third party paying for someone's renewal is
+harmless. The griefing vector was that renewal was FREE: `erase` reclaims a
+membership's `rate_limit` only once it expires, so anyone could keep
+abandoned memberships alive one cheap tx per grace window and pin
+`current_total_rate_limit` at `max_total_rate_limit`, blocking all new
+registrations. `extend` now charges `rate_limit * price_per_unit` — the same
+as registering — which also gives `active_duration` economic force. Both
+payment accounts are token-owned, so this is rule-7 safe.
+
 ## Testnet operations
+
+- A program-deploy tx larger than the sequencer's max_block_size is deferred
+  in the mempool FOREVER with zero client feedback (submission returns a
+  hash; the tx never includes). Measured on testnet 2026-08-05: the ~266KB
+  merkle deploy included, the ~459KB registration deploy never did — the
+  operative cap sits somewhere between, while local debug configs allow
+  1 MiB, so local provisioning hides the problem. Downstream symptom: the
+  one-shot InitializeConfig then fails the execution check ("program
+  missing", visible only in the sequencer's own log) and is silently left
+  out of the block, so run_setup times out waiting for the config account.
+  Check the deploy landed (scan recent blocks for a ~600KB base64 getBlock
+  result) before believing any InitializeConfig diagnosis.
 - register_member's "Timeout waiting for leaf N" panic is often a FALSE
   negative: `wait_for_leaf` polls a hardcoded 30 × 500 ms
   (register_member.rs:66) and testnet confirmation regularly exceeds 15 s.
@@ -60,5 +147,13 @@ owner equals it, and use the config value as the ChainedCall target — never
   `test_register_same_commitment_twice_fails`.
 - Deploying new program instances to https://testnet.lez.logos.co/ is
   normal, routine development practice (`tools/deployments/provision.sh`).
+- `deployments/shared-faucet` records a DEAD deployment: the chain it was
+  provisioned against no longer exists, and its program predates both
+  security fixes above. Its ids (registry, tree, program) are stale — expect
+  to re-provision from scratch rather than to verify against it.
+- `state_tests` reads the guest `.bin`s from the same `docker/` dir the
+  deploy host uses, which is also the record of what is live. Set
+  `LEZ_RLN_GUEST_DIR` to a fresh build's `release/` dir to test guest changes
+  without overwriting the artifacts `verify.sh` compares against.
 - Wallet sync is only required for tree insertion (registration); claims and
   reads work against an unsynced wallet (measured pre-0780862).
