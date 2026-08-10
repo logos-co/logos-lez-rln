@@ -6,6 +6,7 @@
 //! - `src/bin/` — host CLIs (`run_setup`, `register_member`, `run_rln_proof`) that drive a live
 //!   sequencer using the helpers in this library.
 
+pub mod fr_bytes;
 pub mod merkle_tree;
 pub mod rln;
 pub mod spel_seeds;

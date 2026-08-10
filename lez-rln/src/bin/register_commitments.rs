@@ -10,6 +10,7 @@
 use std::{fs, time::Duration};
 
 use logos_lez_rln::{
+    fr_bytes::bytes_le_to_fr,
     merkle_tree::wait_for_leaf,
     rln::{
         client::{
@@ -19,7 +20,6 @@ use logos_lez_rln::{
         derive_config_account,
     },
 };
-use rln::utils::bytes_le_to_fr;
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -35,7 +35,7 @@ fn hex_to_bytes32(hex: &str) -> [u8; 32] {
 }
 
 fn compute_rate_commitment(id_commitment_bytes: &[u8; 32], rate_limit: u64) -> [u8; 32] {
-    let (id_commitment_fr, _) =
+    let id_commitment_fr =
         bytes_le_to_fr(id_commitment_bytes).expect("Invalid id_commitment bytes");
     rate_commitment_from_fr(&id_commitment_fr, rate_limit)
 }

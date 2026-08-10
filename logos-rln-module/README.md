@@ -1,25 +1,29 @@
-# logos-rln-module — the RLN module (Rust)
+# logos-rln-module — the RLN registry provider (Rust)
 
-`liblogos_rln_module`, built on logos-rust-sdk / logos-module-builder. It is
-wire-compatible with the C++/Qt module it replaced — same module name, same
-11 methods (register/proof/identity + the funding methods
-`mint_tokens`/`claim_tokens`/`get_token_balance`), same two broadcast events —
-so existing consumers (delivery module, sim) work unchanged. The RLN
-register / proof / funding logic lives in-crate (`rust-lib/src/rln_core.rs`,
-plain Rust); there is no C ABI. Acceptance gate: the mix_lez_chat sim (see
-"Sim acceptance" below).
+`liblogos_rln_module`, built on logos-rust-sdk / logos-module-builder. It
+serves the membership stack's chain access: registry reads (roots, merkle
+proofs, membership PDA + lifecycle state, registry bounds), the Register tx,
+and the faucet funding flow (`claim_tokens`/`get_token_balance`). Its two
+consumers are the membership module's registry provider and the membership
+UI's funding flow; identity/credential generation lives in the membership
+module, so this module never handles secrets. The chain logic lives in-crate
+(`rust-lib/src/rln_core.rs`, plain Rust); there is no C ABI.
+
+v2.0.0 dropped the C++-era frozen wire surface: `generate_identity`,
+`compute_rate_commitment`, `is_member_registered`, `mint_tokens`, the two
+`start_*_broadcast` methods and the `valid_roots`/`merkle_proof` events
+(the membership module polls the getter methods instead).
 
 ## Layout
 
 - `metadata.json` — module manifest: `codegen.rust` drives logos-module-builder
   (lidl scaffold + typed `logos_execution_zone` client + Qt cdylib glue).
-- `rust-lib/liblogos_rln_module.lidl` — the module contract (13 methods + 2
-  events): the 11 C++-wire-compatible methods plus the additive v1.1
-  `get_membership` / `get_registry_bounds`.
+- `rust-lib/liblogos_rln_module.lidl` — the module contract (7 methods, no
+  events).
 - `rust-lib/deps/logos_execution_zone.lidl` — hand-maintained dependency
   contract for the wallet module, wired via `dependency_overrides`.
 - `rust-lib/src/lib.rs` — the provider implementation (wallet lp client + the
-  11 handlers).
+  7 handlers).
 - `rust-lib/src/rln_core.rs` — the RLN core (tree/proof/register/funding logic),
   depending only on the shared `rln-layouts` crate.
 - `rust-lib/generated/provider_gen.rs` — checked-in scaffold for local
@@ -78,39 +82,26 @@ The registry comes from `../deployments/<name>/deployment.json`. These
 catch what unit pins can't: layout drift against the pinned guest image,
 PDA-derivation divergence, tree-encoding drift, chain-clock unit changes.
 
-## Sim acceptance
-
-This is the default RLN module in the mix_lez_chat sim (the parent
-`flake.nix` `logos-rln-module` attr resolves to it). Run the sim per its
-README — `ALL 15 CHECKS PASSED` on local and testnet (faucet). To force a
-specific build via env: `RLN_LGX=<lgx>/logos-rln-module.lgx
-RLN_PLUGIN_OVERRIDE=$PWD/result/lib/liblogos_rln_module_plugin.dylib`.
-
 ## Design constraints (read before changing)
 
-- **`concurrency` is `single`, deliberately.** The delivery module's pinned
-  logos-cpp-sdk predates the deferred-result sentinel (`resolveDeferred` /
-  `__logos_call_complete__`), so multi-concurrency provider replies read as
-  instant failures there. Flip to multi only after the delivery module's SDK
-  pin is bumped — acceptance: sim still 15/15 with `concurrency: "multi"`.
+- **`concurrency` is `single`, deliberately.** Dispatch runs on the module's
+  own event loop and the blocking `lp_invoke`'s QtRO wait loop pumps that
+  same loop, so wallet round-trips do not deadlock; multi-concurrency has
+  never been validated against this module's callers.
 - **The wallet lp client is created in `on_context_ready` (main Qt thread)**
   and never lazily in handlers: the creating thread owns the client and must
   run a Qt event loop (lp owner-thread contract). `wallet_call` picks sync
-  `lp_invoke` on the owner thread and `lp_invoke_async` + channel from
-  broadcast threads.
-- **`REG_IN_FLIGHT` dedup in `register_member`**: the delivery module fires
-  register_member twice ~2s apart (sync selfRegisterRln + async rln_fetcher).
-  An on-chain idempotency pre-check cannot see a tx that is still confirming
-  (60-90s on testnet), and the double submit reuses the payer nonce — the
-  second tx is silently dropped and, on a virgin tree, poisoned the gifter.
-  The in-session (config_account, id_commitment) map returns the first
-  submission's reply to duplicates.
-- **Funding methods** (`mint_tokens`/`claim_tokens`/`get_token_balance`) mirror
-  the tx-account order + signing flags of the deployed programs exactly:
-  mint `[definition(signer), dest(signer)]` under the Token program; claim
+  `lp_invoke` on the owner thread and `lp_invoke_async` + channel off it.
+- **`REG_IN_FLIGHT` dedup in `register_member`**: callers can fire
+  register_member twice within seconds for the same membership. An on-chain
+  idempotency pre-check cannot see a tx that is still confirming (60-90s on
+  testnet), and the double submit reuses the payer nonce — the second tx is
+  silently dropped and, on a virgin tree, poisoned the submitting wallet's
+  nonce sequence. The in-session (config_account, id_commitment) map returns
+  the first submission's reply to duplicates.
+- **Funding methods** (`claim_tokens`/`get_token_balance`) mirror the
+  tx-account order + signing flags of the deployed programs exactly: claim
   `[config, payment_def, dest(signer)]` under the registration program;
   `get_token_balance` is tri-state (`""`=error, `{exists:false}`=absent,
   `{exists:true,…}`=present) so the faucet poller can distinguish "unreachable"
   from "not credited yet".
-- lidl `void` methods must return `true` (`Value::Null` reads as
-  METHOD_FAILED through the Qt glue).

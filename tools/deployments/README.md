@@ -29,8 +29,9 @@ Policy is set at `Initialize` and recorded in `deployment.json`:
   per-call only — repeat claims are unbounded by design (test tokens).
 - **`"funding": "wallet-key"`** (and every pre-policy descriptor) — the legacy
   model: fixed pre-minted supply, definition keypair in the wallet, funding via
-  transfers or the rln module's `mint_tokens(config, dest, amount)`. These
-  profiles stay self-replenishing because the wallet carries the mint key.
+  wallet transfers (the rln module's `mint_tokens` wire method was removed in
+  its v2.0.0 contract). These profiles stay self-replenishing because the
+  wallet carries the mint key.
 - **`"membership": {"mode": "free-quota", "registrar": <hex>, "quota": N}`**
   (optional, additive) — the registrar account may create up to N memberships
   without paying via the `RegisterFree` instruction; the normal paid path keeps

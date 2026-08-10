@@ -214,17 +214,24 @@ impl RateLimitProof {
             bytes
         };
 
+        // Two accepted encodings of the same epoch: the spec's epoch[32]
+        // LE hex, and the u64 index generate_proof's reply carries.
         let epoch = match value.get("epoch") {
             None => None,
             Some(v) => {
-                let hex = v
-                    .as_str()
-                    .ok_or_else(|| ProofError::BadInput("epoch: expected 32-byte hex".into()))?;
-                let bytes = hex_to_bytes32(hex)
-                    .ok_or_else(|| ProofError::BadInput("epoch: expected 32-byte hex".into()))?;
-                Some(epoch_from_bytes(&bytes).ok_or_else(|| {
-                    ProofError::BadInput("epoch: non-canonical padding".into())
-                })?)
+                if let Some(index) = v.as_u64() {
+                    Some(index)
+                } else {
+                    let hex = v.as_str().ok_or_else(|| {
+                        ProofError::BadInput("epoch: expected 32-byte hex or u64 index".into())
+                    })?;
+                    let bytes = hex_to_bytes32(hex).ok_or_else(|| {
+                        ProofError::BadInput("epoch: expected 32-byte hex or u64 index".into())
+                    })?;
+                    Some(epoch_from_bytes(&bytes).ok_or_else(|| {
+                        ProofError::BadInput("epoch: non-canonical padding".into())
+                    })?)
+                }
             }
         };
 
@@ -733,6 +740,27 @@ mod tests {
 
         let restored = RateLimitProof::from_json(&proof.to_json()).expect("from_json");
         assert_eq!(restored.epoch(), Some(42));
+    }
+
+    // The generate_proof handler rewrites "epoch" to the u64 index (its lidl
+    // reply shape), and verify_proof accepts that object as-is — so from_json
+    // must decode a numeric epoch identically to the epoch[32] hex form.
+    #[test]
+    fn from_json_accepts_numeric_epoch_from_the_handler_reply() {
+        let material = material_from_seed(&[3u8; 32], 100, 1);
+        let rln_id = [4u8; 32];
+        let proof = generate(&material, b"signal", 42, &rln_id).expect("generate");
+
+        let mut wire = proof.to_json();
+        wire["epoch"] = serde_json::json!(42u64);
+        let restored = RateLimitProof::from_json(&wire).expect("from_json");
+        assert_eq!(restored.epoch(), Some(42));
+
+        wire["epoch"] = serde_json::json!(-1);
+        assert!(matches!(
+            RateLimitProof::from_json(&wire).unwrap_err(),
+            ProofError::BadInput(_)
+        ));
     }
 
     // The double-signal path: two proofs from the SAME identity, epoch, and slot

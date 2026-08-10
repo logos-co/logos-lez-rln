@@ -1,6 +1,6 @@
 [package]
 name    = "lez_rln_module"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
 
 [lib]
@@ -28,7 +28,6 @@ panic = "abort"
 # also verifies the staged copies and holds the SDK rev pin.
 rln-layouts = { path = "lez-rln-src/rln-layouts" }
 token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc6" }
-rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
 risc0-zkvm = { version = "3.0", default-features = false, features = ["std"] }
 sha2 = "0.10"
 borsh = { version = "1", default-features = false, features = ["derive"] }
@@ -38,3 +37,10 @@ serde = { version = "1", features = ["derive"] }
 # path from the same logos-rust-sdk rev its generator came from.
 logos-rust-sdk = { path = "../logos-rust-sdk-src" }
 serde_json = "1"
+
+# zerokit is test-only: testnet_tests recomputes tree roots (Poseidon) and
+# derives a deterministic throwaway identity. The shipped staticlib does not
+# link it — identity/credential work lives in the membership module.
+[dev-dependencies]
+rln = { version = "3.0.0", default-features = false }
+rand_chacha = "0.3"

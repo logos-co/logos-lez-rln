@@ -1487,14 +1487,13 @@ mod tests {
     /// Derive id_commitment from identity_secret using Poseidon hash.
     /// Matches the single-input `hash_single` used by the guest's slash path.
     fn derive_id_commitment_from_secret(identity_secret: &[u8; 32]) -> [u8; 32] {
-        use rln::{
-            hashers::poseidon_hash,
-            utils::{bytes_le_to_fr, fr_to_bytes_le},
-        };
+        use rln::prelude::{Hasher, PoseidonHash};
 
-        let (secret_fr, _) = bytes_le_to_fr(identity_secret).expect("Invalid identity_secret");
-        let hash_fr = poseidon_hash(&[secret_fr]);
-        fr_to_bytes_le(&hash_fr).try_into().unwrap()
+        use crate::fr_bytes::{bytes_le_to_fr, fr_to_bytes_le};
+
+        let secret_fr = bytes_le_to_fr(identity_secret).expect("Invalid identity_secret");
+        let hash_fr = Hasher::<PoseidonHash>::hash_single(secret_fr);
+        fr_to_bytes_le(&hash_fr)
     }
 
     /// Creates a slashable identity (identity_secret and derived id_commitment).
@@ -3367,9 +3366,7 @@ mod tests {
             setup
                 .state
                 .transition_from_public_transaction(&tx, 1, 0)
-                .unwrap_or_else(|e| {
-                    panic!("free registration #{} must succeed, got {e:?}", i + 1)
-                });
+                .unwrap_or_else(|e| panic!("free registration #{} must succeed, got {e:?}", i + 1));
         }
     }
 
@@ -3591,24 +3588,27 @@ mod tests {
     // The flow mirrors run_rln_proof.rs but operates directly on V03State
     // instead of fetching from a live network.
 
-    use rln::{
-        hashers::poseidon_hash,
-        prelude::{Fr, RLN, RLNWitnessInput, hash_to_field_le, seeded_keygen},
-        utils::{IdSecret, bytes_le_to_fr, fr_to_bytes_le},
+    use rand_chacha::ChaCha20Rng;
+    use rln::prelude::{
+        Fr, Hasher, IdentityKeys, PoseidonHash, RLNBuilder, RLNMerkleProof, RLNWitnessInput,
+        hash_to_field_le,
     };
 
-    use crate::merkle_tree::{
-        OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA, TOP_DEPTH,
-        read_sparse_node,
+    use crate::{
+        fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
+        merkle_tree::{
+            OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_ROOT, OFFSET_TOP_TREE_DATA, TOP_DEPTH,
+            read_sparse_node,
+        },
     };
 
     /// Computes rate_commitment = poseidon(id_commitment, rate_limit).
     /// This is the leaf value stored in the merkle tree.
     fn compute_rate_commitment(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] {
-        let (id_fr, _) = bytes_le_to_fr(id_commitment).expect("Invalid id_commitment");
+        let id_fr = bytes_le_to_fr(id_commitment).expect("Invalid id_commitment");
         let rate_fr = Fr::from(rate_limit);
-        let hash_fr = poseidon_hash(&[id_fr, rate_fr]);
-        fr_to_bytes_le(&hash_fr).try_into().unwrap()
+        let hash_fr = Hasher::<PoseidonHash>::hash_pair(id_fr, rate_fr);
+        fr_to_bytes_le(&hash_fr)
     }
 
     /// Fetches a node hash from on-chain state using the subtree model.
@@ -3728,10 +3728,10 @@ mod tests {
         path_elements: &[[u8; 32]],
         path_indices: &[u8],
     ) -> [u8; 32] {
-        let (mut current, _) = bytes_le_to_fr(leaf).expect("Invalid leaf");
+        let mut current = bytes_le_to_fr(leaf).expect("Invalid leaf");
 
         for (sibling_bytes, &path_index) in path_elements.iter().zip(path_indices.iter()) {
-            let (sibling, _) = bytes_le_to_fr(sibling_bytes).expect("Invalid sibling");
+            let sibling = bytes_le_to_fr(sibling_bytes).expect("Invalid sibling");
 
             let (left, right) = if path_index == 0 {
                 (current, sibling)
@@ -3739,10 +3739,10 @@ mod tests {
                 (sibling, current)
             };
 
-            current = poseidon_hash(&[left, right]);
+            current = Hasher::<PoseidonHash>::hash_pair(left, right);
         }
 
-        fr_to_bytes_le(&current).try_into().unwrap()
+        fr_to_bytes_le(&current)
     }
 
     #[test]
@@ -3794,12 +3794,12 @@ mod tests {
     fn test_rln_proof_generation_and_verification() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
 
-        // Create identity using zerokit's seeded_keygen (like run_rln_proof does)
+        // Create identity using zerokit's seeded keygen (like run_rln_proof does)
         let seed = [0x42u8; 32]; // deterministic seed for testing
-        let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(&seed);
-        let identity_secret = IdSecret::from(&mut identity_secret_fr);
+        let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed);
+        let identity_secret = identity_keys.identity_secret();
 
-        let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+        let id_commitment: [u8; 32] = fr_to_bytes_le(&identity_keys.id_commitment());
         let rate_limit = 300u64;
 
         // Register the identity
@@ -3817,9 +3817,9 @@ mod tests {
         // Convert to Fr types for zerokit
         let path_elements: Vec<Fr> = path_elements_bytes
             .iter()
-            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let (root, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
 
         // Verify the leaf matches what we expect
         let expected_leaf = compute_rate_commitment(&id_commitment, rate_limit);
@@ -3835,34 +3835,33 @@ mod tests {
         // Compute external nullifier = poseidon(epoch, rln_identifier)
         let epoch_fr = hash_to_field_le(b"test-epoch");
         let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
 
         // Compute signal hash (x) = hash of message
         let x = hash_to_field_le(b"Hello, RLN!");
 
         // Create RLN witness input
-        let witness = RLNWitnessInput::new(
-            identity_secret,
-            user_message_limit,
-            message_id,
-            path_elements.clone(),
-            path_indices.clone(),
-            x,
-            external_nullifier,
-        )
-        .expect("Failed to create RLN witness");
+        let witness = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret)
+            .user_message_limit(user_message_limit)
+            .merkle_proof(RLNMerkleProof::new(path_elements, path_indices))
+            .x(x)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create RLN witness");
 
         // Initialize RLN instance
-        let rln = RLN::new().expect("Failed to initialize RLN");
+        let rln = RLNBuilder::stateless().build();
 
         // Generate the proof
         let (rln_proof, proof_values) = rln
-            .generate_rln_proof(&witness)
+            .generate_proof(&witness)
             .expect("Failed to generate RLN proof");
 
         // Verify proof values match
         assert_eq!(
-            *proof_values.root(),
+            proof_values.root(),
             root,
             "Proof root should match on-chain root"
         );
@@ -3884,9 +3883,8 @@ mod tests {
 
         // Register first identity
         let seed1 = [0x01u8; 32];
-        let (mut identity_secret_fr1, id_commitment_fr1) = seeded_keygen(&seed1);
-        let _identity_secret1 = IdSecret::from(&mut identity_secret_fr1);
-        let id_commitment1: [u8; 32] = fr_to_bytes_le(&id_commitment_fr1).try_into().unwrap();
+        let identity_keys1 = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed1);
+        let id_commitment1: [u8; 32] = fr_to_bytes_le(&identity_keys1.id_commitment());
 
         let register_tx1 = build_register_tx(&setup, &TREE_ID, id_commitment1, 100, Nonce(0), 0);
         setup
@@ -3896,9 +3894,9 @@ mod tests {
 
         // Register second identity (this is the one we'll prove)
         let seed2 = [0x02u8; 32];
-        let (mut identity_secret_fr2, id_commitment_fr2) = seeded_keygen(&seed2);
-        let identity_secret2 = IdSecret::from(&mut identity_secret_fr2);
-        let id_commitment2: [u8; 32] = fr_to_bytes_le(&id_commitment_fr2).try_into().unwrap();
+        let identity_keys2 = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed2);
+        let identity_secret2 = identity_keys2.identity_secret();
+        let id_commitment2: [u8; 32] = fr_to_bytes_le(&identity_keys2.id_commitment());
         let rate_limit2 = 100u64;
 
         let register_tx2 =
@@ -3910,9 +3908,8 @@ mod tests {
 
         // Register third identity
         let seed3 = [0x03u8; 32];
-        let (mut identity_secret_fr3, id_commitment_fr3) = seeded_keygen(&seed3);
-        let _identity_secret3 = IdSecret::from(&mut identity_secret_fr3);
-        let id_commitment3: [u8; 32] = fr_to_bytes_le(&id_commitment_fr3).try_into().unwrap();
+        let identity_keys3 = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed3);
+        let id_commitment3: [u8; 32] = fr_to_bytes_le(&identity_keys3.id_commitment());
 
         let register_tx3 = build_register_tx(&setup, &TREE_ID, id_commitment3, 100, Nonce(2), 2);
         setup
@@ -3927,9 +3924,9 @@ mod tests {
         // Convert to Fr types
         let path_elements: Vec<Fr> = path_elements_bytes
             .iter()
-            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let (root, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
 
         // Verify the leaf
         let expected_leaf = compute_rate_commitment(&id_commitment2, rate_limit2);
@@ -3940,27 +3937,26 @@ mod tests {
         let message_id = Fr::from(0u64);
         let epoch_fr = hash_to_field_le(b"test-epoch-2");
         let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
         let x = hash_to_field_le(b"Another message");
 
-        let witness = RLNWitnessInput::new(
-            identity_secret2,
-            user_message_limit,
-            message_id,
-            path_elements,
-            path_indices,
-            x,
-            external_nullifier,
-        )
-        .expect("Failed to create RLN witness");
+        let witness = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret2)
+            .user_message_limit(user_message_limit)
+            .merkle_proof(RLNMerkleProof::new(path_elements, path_indices))
+            .x(x)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create RLN witness");
 
-        let rln = RLN::new().expect("Failed to initialize RLN");
+        let rln = RLNBuilder::stateless().build();
         let (rln_proof, proof_values) = rln
-            .generate_rln_proof(&witness)
+            .generate_proof(&witness)
             .expect("Failed to generate RLN proof");
 
         assert_eq!(
-            *proof_values.root(),
+            proof_values.root(),
             root,
             "Proof root should match on-chain root"
         );
@@ -4023,8 +4019,8 @@ mod tests {
         );
 
         // Verify root changed to empty tree root (since this was the only member)
-        let (root_fr, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
-        let (root_before_register_fr, _) = bytes_le_to_fr(&root_after).expect("Invalid root");
+        let root_fr = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root_before_register_fr = bytes_le_to_fr(&root_after).expect("Invalid root");
         assert_eq!(
             root_fr, root_before_register_fr,
             "Root should match empty tree root"
@@ -4037,9 +4033,9 @@ mod tests {
 
         // Create identity
         let seed = [0x99u8; 32];
-        let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(&seed);
-        let identity_secret = IdSecret::from(&mut identity_secret_fr);
-        let id_commitment: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+        let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&seed);
+        let identity_secret = identity_keys.identity_secret();
+        let id_commitment: [u8; 32] = fr_to_bytes_le(&identity_keys.id_commitment());
         let rate_limit = 300u64;
 
         // Register
@@ -4056,9 +4052,9 @@ mod tests {
 
         let path_elements: Vec<Fr> = path_elements_bytes
             .iter()
-            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+            .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let (root, _) = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
 
         // Same epoch and message_id but different messages
         let user_message_limit = Fr::from(rate_limit);
@@ -4066,42 +4062,42 @@ mod tests {
 
         let epoch_fr = hash_to_field_le(b"epoch-1");
         let rln_identifier_fr = hash_to_field_le(b"lssa-rln-test");
-        let external_nullifier = poseidon_hash(&[epoch_fr, rln_identifier_fr]);
+        let external_nullifier = Hasher::<PoseidonHash>::hash_pair(epoch_fr, rln_identifier_fr);
+
+        let merkle_proof = RLNMerkleProof::new(path_elements, path_indices);
 
         // First message
         let x1 = hash_to_field_le(b"First message");
-        let witness1 = RLNWitnessInput::new(
-            identity_secret.clone(),
-            user_message_limit,
-            message_id,
-            path_elements.clone(),
-            path_indices.clone(),
-            x1,
-            external_nullifier,
-        )
-        .expect("Failed to create witness 1");
+        let witness1 = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret.clone())
+            .user_message_limit(user_message_limit)
+            .merkle_proof(merkle_proof.clone())
+            .x(x1)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create witness 1");
 
         // Second message (different content, same message_id)
         let x2 = hash_to_field_le(b"Second message");
-        let witness2 = RLNWitnessInput::new(
-            identity_secret,
-            user_message_limit,
-            message_id,
-            path_elements,
-            path_indices,
-            x2,
-            external_nullifier,
-        )
-        .expect("Failed to create witness 2");
+        let witness2 = RLNWitnessInput::new_single()
+            .identity_secret(identity_secret)
+            .user_message_limit(user_message_limit)
+            .merkle_proof(merkle_proof)
+            .x(x2)
+            .external_nullifier(external_nullifier)
+            .message_id(message_id)
+            .build()
+            .expect("Failed to create witness 2");
 
-        let rln = RLN::new().expect("Failed to initialize RLN");
+        let rln = RLNBuilder::stateless().build();
 
         // Generate both proofs
         let (proof1, values1) = rln
-            .generate_rln_proof(&witness1)
+            .generate_proof(&witness1)
             .expect("Failed to generate proof 1");
         let (proof2, values2) = rln
-            .generate_rln_proof(&witness2)
+            .generate_proof(&witness2)
             .expect("Failed to generate proof 2");
 
         // Both proofs should be individually valid
@@ -4116,8 +4112,8 @@ mod tests {
 
         // But they should have the SAME nullifier (since same identity, epoch, message_id)
         assert_eq!(
-            values1.nullifier(),
-            values2.nullifier(),
+            values1.nullifier().expect("single-mode proof"),
+            values2.nullifier().expect("single-mode proof"),
             "Same identity + epoch + message_id should produce same nullifier"
         );
 
@@ -4593,7 +4589,10 @@ mod tests {
             expected,
             "renewal must cost the same as registering that rate limit"
         );
-        assert!(expected > 0, "a zero-priced renewal would restore the grief");
+        assert!(
+            expected > 0,
+            "a zero-priced renewal would restore the grief"
+        );
     }
 
     /// The grief itself: without funds the renewal fails, so pinning a

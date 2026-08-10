@@ -232,7 +232,8 @@ module liblogos_rln_membership_module {
   ; returns (canonical "proof" bytes trusted, other fields ignored) OR the
   ; spec's decomposed RateLimitProof struct — "proof" as the bare 128-byte
   ; Groth16 hex plus root/external_nullifier/share_x/share_y/nullifier —
-  ; the shape a consumer reassembles from its own network message. Checks,
+  ; the shape a consumer reassembles from its own network message. In both,
+  ; "epoch" may be the u64 index (generate_proof's reply) or epoch[32] LE hex. Checks,
   ; in order: the proof's external nullifier equals the scope's expected
   ; poseidon(hash_to_field_le(epoch[32]), hash_to_field_le(rln_identifier)) —
   ; epoch[32] = the epoch index as 32-byte LE (logos-delivery's toEpoch) — for

@@ -33,7 +33,8 @@ rln-layouts = { path = "rln-layouts" }
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
 hex = "0.4.3"
 bytemuck = "1.24.0"
-rln = { version = "2.0.2", default-features = false, features = ["stateless"] }
+rln = { version = "3.0.0", default-features = false }
+rand_chacha = "0.3"
 
 [features]
 rc5-state-tests = []

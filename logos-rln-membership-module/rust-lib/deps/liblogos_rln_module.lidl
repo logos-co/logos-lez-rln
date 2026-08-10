@@ -4,11 +4,10 @@
 ; update BOTH files in the same PR when either side changes. Wired via
 ; metadata.json dependency_overrides; logos-lidl-gen turns it into the typed
 ; LiblogosRlnModuleClient — unused at runtime (provider.rs speaks raw lp_*
-; for per-call timeouts, like the sibling's wallet path) but the generated
-; event decoders serve the pass-2 subscription surface and the client
+; for per-call timeouts, like the sibling's wallet path) but the client
 ; documents the consumed wire.
 module liblogos_rln_module {
-  version "1.1.0"
+  version "2.0.0"
 
   ; All replies are compact JSON strings; "" is the error value.
 
@@ -35,9 +34,4 @@ module liblogos_rln_module {
   ; Compact JSON array of 32-byte lowercase-hex roots (current + non-zero
   ; history).
   method get_valid_roots(rln_account_id_hex: tstr) -> tstr
-
-  ; Broadcast events (single-target on the provider side; the membership
-  ; module polls instead — declared for the pass-2 decoders).
-  event valid_roots(roots_json: tstr)
-  event merkle_proof(proof_json: tstr)
 }

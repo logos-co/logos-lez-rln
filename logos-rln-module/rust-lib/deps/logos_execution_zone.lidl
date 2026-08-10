@@ -6,7 +6,7 @@
 ;
 ; Call sites (rust-lib/src/lib.rs): resolve_account_id ->
 ; account_id_from_base58; fetch_account_data* -> get_account_public;
-; register_member / mint_tokens / claim_tokens ->
+; register_member / claim_tokens ->
 ; send_generic_public_transaction. The caller passes
 ; account_ids/signing_requirements/instruction as QVariant-wrapped
 ; QVariantLists and treats an EMPTY string return as failure.

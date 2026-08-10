@@ -10,15 +10,13 @@ use nssa::{
     program_deployment_transaction,
     public_transaction::{Message, WitnessSet},
 };
-use rln::{
-    hashers::poseidon_hash,
-    prelude::{Fr, seeded_keygen},
-    utils::{IdSecret, fr_to_bytes_le},
-};
+use rand_chacha::ChaCha20Rng;
+use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
 use sequencer_service_rpc::RpcClient as _;
 use wallet::{WalletCore, program_facades::token::Token};
 
 use crate::{
+    fr_bytes::fr_to_bytes_le,
     merkle_tree::SUBTREE_LEAVES,
     rln::{
         CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction,
@@ -309,13 +307,14 @@ pub fn load_payment_account(tree_id: &[u8; 32]) -> Option<AccountId> {
 /// Single source of truth for the leaf value shared by identity creation and
 /// CSV-driven bulk registration.
 pub fn rate_commitment_from_fr(id_commitment_fr: &Fr, rate_limit: u64) -> [u8; 32] {
-    let rate_commitment = poseidon_hash(&[*id_commitment_fr, Fr::from(rate_limit)]);
-    fr_to_bytes_le(&rate_commitment).try_into().unwrap()
+    let rate_commitment =
+        Hasher::<PoseidonHash>::hash_pair(*id_commitment_fr, Fr::from(rate_limit));
+    fr_to_bytes_le(&rate_commitment)
 }
 
 /// Outputs of `create_identity`: the RLN identity plus the on-chain leaf (rate commitment).
 pub struct RlnIdentity {
-    pub identity_secret: IdSecret,
+    pub identity_secret: SecretFr,
     pub id_commitment_fr: Fr,
     pub id_commitment_bytes: [u8; 32],
     pub leaf_bytes: [u8; 32],
@@ -335,16 +334,18 @@ pub async fn create_identity(wallet_core: &mut WalletCore, user_message_limit: u
         .expect("Account should be self-owned public");
 
     let seed = signing_key.value();
-    let (mut identity_secret_fr, id_commitment_fr) = seeded_keygen(seed);
+    let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(seed);
+    let identity_secret = identity_keys.identity_secret();
+    let id_commitment_fr = identity_keys.id_commitment();
 
-    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret_fr);
+    // Deliberate secret leak: this hex is the IDENTITY_SECRET_HASH recovery path.
+    let id_secret_hash_bytes = fr_to_bytes_le(&identity_secret);
     let id_secret_hash_hex: String = id_secret_hash_bytes
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect();
 
-    let identity_secret = IdSecret::from(&mut identity_secret_fr);
-    let id_commitment_bytes: [u8; 32] = fr_to_bytes_le(&id_commitment_fr).try_into().unwrap();
+    let id_commitment_bytes = fr_to_bytes_le(&id_commitment_fr);
 
     let leaf_bytes = rate_commitment_from_fr(&id_commitment_fr, user_message_limit);
 
@@ -824,7 +825,7 @@ pub async fn register_identity(
     rate_limit: u64,
     nonce_override: Option<nssa_core::account::Nonce>,
 ) -> u64 {
-    rln::utils::bytes_le_to_fr(id_commitment)
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
@@ -914,7 +915,7 @@ pub async fn extend_membership(
     payer_holding_id: &AccountId,
     treasury_id: &AccountId,
 ) {
-    rln::utils::bytes_le_to_fr(id_commitment)
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);
@@ -966,7 +967,7 @@ pub async fn erase_membership(
     leaf_index: u64,
     fee_payer_id: &AccountId,
 ) {
-    rln::utils::bytes_le_to_fr(id_commitment)
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config_account = derive_config_account(&registration_program.id(), tree_id);

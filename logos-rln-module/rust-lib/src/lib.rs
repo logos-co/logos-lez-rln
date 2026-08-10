@@ -1,34 +1,24 @@
-//! liblogos_rln_module — Rust port of the C++ RLN module.
+//! liblogos_rln_module — the LEZ RLN registry provider.
 //!
-//! Same wire contract as the (now-removed) C++ logos-rln-module: the module
-//! name, all Q_INVOKABLE method names and QString/int wire types (the 8
-//! register/proof/identity methods plus the 3 funding methods mint_tokens /
-//! claim_tokens / get_token_balance), JSON output shapes, empty-string errors,
-//! and the valid_roots / merkle_proof broadcast events. The RLN register /
-//! proof / funding logic lives in-crate (`mod rln_core`, plain Rust — no C
-//! ABI), and wallet access is over raw `lp_*` protocol calls to the C++
-//! wallet module (`logos_execution_zone`) with the C++ module's per-call
-//! timeouts (60s reads, 180s registration tx) — the SDK's generated typed
-//! client has no per-call timeout and would cap every call at the 20s
-//! protocol default.
+//! Serves the membership stack's chain access: registry reads (roots, merkle
+//! proofs, membership PDA + lifecycle state, registry bounds), the Register
+//! tx, and the faucet funding flow (claim_tokens / get_token_balance). The
+//! chain logic lives in-crate (`mod rln_core`, plain Rust — no C ABI), and
+//! wallet access is over raw `lp_*` protocol calls to the wallet module
+//! (`logos_execution_zone`) with per-call timeouts (60s reads, 180s
+//! registration tx) — the SDK's generated typed client has no per-call
+//! timeout and would cap every call at the 20s protocol default.
 //!
-//! Deliberately NOT ported:
-//! - initLogos(LogosAPI*): in-process injection hack, not wire-callable.
-//! - The QCoreApplication::processEvents keep-alive before each blocking
-//!   wallet RPC: single-mode dispatch blocks inside lp_invoke, whose QtRO
-//!   wait loop pumps the same events processEvents did.
-//! - QTimer phase-reset on re-target: the broadcast threads keep their 10s
-//!   cadence; a re-target still fires one broadcast synchronously (matching
-//!   the C++ immediate onBroadcastTimer() call).
+//! Identity and credential generation deliberately live in the membership
+//! module (secrets never cross the module wire); this module only ever sees
+//! the public id_commitment.
 //!
-//! Concurrency is SINGLE (like the C++ module), not "multi": a multi provider
-//! answers callers with a deferred-result sentinel that only protocol builds
-//! with resolveDeferred (remote_transport.cpp) can consume — the delivery
-//! module's pinned logos-cpp-sdk predates that and reads the sentinel as an
-//! instant failure. Revisit multi once delivery's sdk pin is bumped.
+//! Concurrency is SINGLE: dispatch runs on the module's own event loop, and
+//! the blocking lp_invoke's QtRO wait loop pumps that same loop, so wallet
+//! round-trips do not deadlock the process.
 
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 mod rln_core;
@@ -51,11 +41,9 @@ mod generated {
 pub(crate) use generated::*;
 
 const WALLET_MODULE: &str = "logos_execution_zone";
-/// C++ BROADCAST_INTERVAL_MS.
-const BROADCAST_INTERVAL: Duration = Duration::from_millis(10_000);
-/// C++ Timeout(60000) on account_id_from_base58 / get_account_public.
+/// Timeout on account_id_from_base58 / get_account_public.
 const READ_TIMEOUT_MS: c_int = 60_000;
-/// C++ Timeout(180000) on send_generic_public_transaction.
+/// Timeout on send_generic_public_transaction.
 const TX_TIMEOUT_MS: c_int = 180_000;
 
 // ---------------------------------------------------------------- lp raw ABI
@@ -163,7 +151,7 @@ static WALLET_CLIENT: Mutex<Option<WalletHandle>> = Mutex::new(None);
 static WALLET_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
 
 /// Lock a mutex, recovering the guard from a poisoned lock (a panicked
-/// broadcast tick must not wedge every later handler).
+/// handler must not wedge every later one).
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -274,10 +262,10 @@ fn lp_result_to_string(raw: &str) -> String {
 /// (logos_protocol.h):
 /// - On the owner thread (single-concurrency dispatch runs there): the
 ///   synchronous lp_invoke — its internal QtRO wait loop keeps pumping the
-///   owner loop, which is exactly the C++ module's blocking-invoke behavior.
-/// - Off the owner thread (the broadcast ticks): lp_invoke_async ("safe to
-///   call from any thread") + a channel wait; the reply is delivered from
-///   the owner thread whenever it pumps.
+///   owner loop, so wallet round-trips do not deadlock dispatch.
+/// - Off the owner thread: lp_invoke_async ("safe to call from any thread")
+///   + a channel wait; the reply is delivered from the owner thread
+///   whenever it pumps.
 fn wallet_call(method: &str, args: &serde_json::Value, timeout_ms: c_int) -> String {
     let client = {
         let slot = lock(&WALLET_CLIENT);
@@ -579,7 +567,7 @@ fn send_generic_tx(
     Some(send_result)
 }
 
-/// Shared mint_tokens / claim_tokens entry: reject negative amounts, resolve
+/// Funding-method entry (claim_tokens): reject negative amounts, resolve
 /// the config context and the destination account. `None` = failed, already
 /// logged. Returns `(amount as u128, config context, dest 64-hex)`.
 fn funding_prologue(
@@ -663,9 +651,6 @@ fn proofs_with_roots_json(proofs: &[native::ProofJson], roots_array: &serde_json
 }
 
 // ------------------------------------------------------------- method bodies
-//
-// Free functions rather than trait-method bodies so the broadcast threads
-// share them with inbound dispatch.
 
 fn get_valid_roots_impl(rln_account_id_hex: &str) -> String {
     let Some(ctx) = resolve_config_context(rln_account_id_hex, "get_valid_roots") else {
@@ -836,51 +821,6 @@ fn get_merkle_proofs_impl(config_account_id: &str, leaf_indices_json: &str) -> S
     proofs_with_roots_json(&proofs, &roots_to_json_array(&stable_roots))
 }
 
-// ------------------------------------------------------------ broadcast loops
-//
-// C++ used two QTimers on the module's event loop; here two detached threads
-// (spawned once, on the first start_* call) tick every 10s. start_* re-targets
-// the shared state and fires one broadcast synchronously, mirroring the C++
-// QTimer restart + immediate onBroadcastTimer() call.
-
-static ROOT_BCAST_TARGET: Mutex<Option<String>> = Mutex::new(None);
-static ROOT_BCAST_THREAD: Once = Once::new();
-static PROOF_BCAST_TARGET: Mutex<Option<(String, i64)>> = Mutex::new(None);
-static PROOF_BCAST_THREAD: Once = Once::new();
-
-fn root_broadcast_tick() {
-    let target = lock(&ROOT_BCAST_TARGET).clone();
-    let Some(account_id) = target else { return };
-    let roots = get_valid_roots_impl(&account_id);
-    if roots.is_empty() {
-        eprintln!("root broadcast: failed to fetch roots");
-        return;
-    }
-    emit_valid_roots(&roots);
-}
-
-fn proof_broadcast_tick() {
-    let target = lock(&PROOF_BCAST_TARGET).clone();
-    let Some((config_account, leaf_index)) = target else { return };
-    let indices_json = format!("[{leaf_index}]");
-    let proofs_json = get_merkle_proofs_impl(&config_account, &indices_json);
-    if proofs_json.is_empty() {
-        eprintln!("proof broadcast: failed to fetch proof for index {leaf_index}");
-        return;
-    }
-    let arr = serde_json::from_str::<serde_json::Value>(&proofs_json)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    if arr.is_empty() {
-        eprintln!("proof broadcast: empty proof array");
-        return;
-    }
-    // C++ QJsonValue::toObject(): non-objects become empty objects.
-    let single = serde_json::Value::Object(arr[0].as_object().cloned().unwrap_or_default());
-    emit_merkle_proof(&single.to_string());
-}
-
 // -------------------------------------------------------------------- module
 
 #[derive(Default)]
@@ -895,71 +835,8 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         get_valid_roots_impl(&rln_account_id_hex)
     }
 
-    fn start_root_broadcast(&mut self, rln_account_id: String) -> serde_json::Value {
-        *lock(&ROOT_BCAST_TARGET) = Some(rln_account_id);
-        ROOT_BCAST_THREAD.call_once(|| {
-            std::thread::spawn(|| loop {
-                std::thread::sleep(BROADCAST_INTERVAL);
-                root_broadcast_tick();
-            });
-        });
-        root_broadcast_tick();
-        // The C++ void method surfaces as QVariant(true) through the glue;
-        // a null QVariant reads as METHOD_FAILED at the caller.
-        serde_json::Value::Bool(true)
-    }
-
     fn get_merkle_proofs(&mut self, config_account_id: String, leaf_indices_json: String) -> String {
         get_merkle_proofs_impl(&config_account_id, &leaf_indices_json)
-    }
-
-    fn start_merkle_proof_broadcast(
-        &mut self,
-        config_account_id: String,
-        leaf_index: i64,
-    ) -> serde_json::Value {
-        *lock(&PROOF_BCAST_TARGET) = Some((config_account_id, leaf_index));
-        PROOF_BCAST_THREAD.call_once(|| {
-            std::thread::spawn(|| loop {
-                std::thread::sleep(BROADCAST_INTERVAL);
-                proof_broadcast_tick();
-            });
-        });
-        proof_broadcast_tick();
-        serde_json::Value::Bool(true)
-    }
-
-    fn generate_identity(&mut self, wallet_account_id: String) -> String {
-        // C++ passes hexToBytes' output through unchecked; a malformed seed
-        // there reads unowned memory (UB). The port pins that case to an
-        // all-zero seed — deterministic, and identical for every well-formed
-        // 32-byte input.
-        let seed = hex_to_bytes32(&wallet_account_id).unwrap_or_else(|| {
-            eprintln!(
-                "generate_identity: input is not 64-hex; falling back to the all-zero seed"
-            );
-            [0u8; 32]
-        });
-        let (id_commitment, id_secret_hash) = native::generate_identity(&seed);
-        serde_json::json!({
-            "id_commitment": bytes_to_hex(&id_commitment),
-            "id_secret_hash": bytes_to_hex(&id_secret_hash),
-        })
-        .to_string()
-    }
-
-    fn compute_rate_commitment(&mut self, id_commitment_hex: String, rate_limit: i64) -> String {
-        let Some(id_commitment) = hex_to_bytes32(&id_commitment_hex) else {
-            eprintln!("compute_rate_commitment: invalid id_commitment hex");
-            return String::new();
-        };
-        match native::compute_rate_commitment(&id_commitment, rate_limit as u64) {
-            Ok(leaf) => bytes_to_hex(&leaf),
-            Err(e) => {
-                eprintln!("compute_rate_commitment: FFI error: {e}");
-                String::new()
-            }
-        }
     }
 
     fn register_member(
@@ -1086,8 +963,8 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
 
         // Return once the sequencer accepts the submission; don't block on
         // confirmation — next_leaf_index is only a pre-submit estimate.
-        // Callers poll is_member_registered() for the authoritative
-        // leaf_index from the membership PDA.
+        // Callers poll get_membership() for the authoritative leaf_index
+        // from the membership PDA.
         let reply = serde_json::json!({
             "leaf_index": plan.next_leaf_index as i64,
             "tx_result": send_result,
@@ -1096,82 +973,6 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
         .to_string();
         reg_in_flight(|m| m.insert(reg_key, (reply.clone(), Instant::now())));
         reply
-    }
-
-    fn is_member_registered(
-        &mut self,
-        config_account_id: String,
-        id_commitment_hex: String,
-    ) -> String {
-        let Some(id_commitment) = hex_to_bytes32(&id_commitment_hex) else {
-            eprintln!("is_member_registered: invalid id_commitment hex");
-            return String::new();
-        };
-
-        // Reuse the same derivation path as register_member so the
-        // membership PDA address is computed identically.
-        let Some(ctx) = resolve_config_context(&config_account_id, "is_member_registered") else {
-            return String::new();
-        };
-        let Some(plan) = derive_register_plan(&ctx, &id_commitment, "is_member_registered")
-        else {
-            return String::new();
-        };
-
-        let membership_pda_hex = bytes_to_hex(&plan.membership_account_id);
-        if let Some(data) = fetch_account_data_quiet(&membership_pda_hex) {
-            if data.len() >= 64 {
-                if let Ok(membership) = native::decode_membership(&data) {
-                    return serde_json::json!({
-                        "registered": true,
-                        "leaf_index": membership.leaf_index as i64,
-                    })
-                    .to_string();
-                }
-            }
-        }
-        serde_json::json!({ "registered": false }).to_string()
-    }
-
-    fn mint_tokens(
-        &mut self,
-        config_account_id: String,
-        dest_account_id: String,
-        amount: i64,
-    ) -> String {
-        let Some((amount_u128, ctx, dest_hex)) =
-            funding_prologue("mint_tokens", &config_account_id, &dest_account_id, amount)
-        else {
-            return String::new();
-        };
-        let (definition_id, token_program_id, instruction) =
-            match native::token_mint_plan(&ctx.config_data, amount_u128) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("mint_tokens: plan error: {e}");
-                    return String::new();
-                }
-            };
-        let definition_hex = bytes_to_hex(&definition_id);
-        // Token program's Mint contract: [definition (mint authority, signer),
-        // destination holder]. Both sign — a fresh destination is claimed
-        // Claim::Authorized, and the wallet drops signer flags for keys it
-        // doesn't hold (so already-initialized external destinations still work).
-        let Some(send_result) = send_generic_tx(
-            "mint_tokens",
-            vec![definition_hex.clone(), dest_hex],
-            vec![true, true],
-            words_to_json(&instruction),
-            bytes_to_hex(&token_program_id),
-        ) else {
-            return String::new();
-        };
-        serde_json::json!({
-            "tx_result": send_result,
-            "definition": definition_hex,
-            "pending": true,
-        })
-        .to_string()
     }
 
     fn claim_tokens(
@@ -1252,8 +1053,8 @@ impl LiblogosRlnModule for LogosRlnModuleImpl {
             return String::new();
         };
 
-        // Same derivation path as register_member / is_member_registered so
-        // the membership PDA address is computed identically.
+        // Same derivation path as register_member so the membership PDA
+        // address is computed identically.
         let Some(ctx) = resolve_config_context(&config_account_id, "get_membership") else {
             return String::new();
         };
@@ -1369,30 +1170,6 @@ mod tests {
         assert!(hex_to_bytes32("zz").is_none());
         assert!(hex_to_bytes("abc", None).is_none());
         assert_eq!(hex_to_bytes(" 00ff ", None).unwrap(), vec![0x00, 0xff]);
-    }
-
-    #[test]
-    fn generate_identity_shape_and_determinism() {
-        let mut imp = LogosRlnModuleImpl;
-        let seed_hex = "11".repeat(32);
-        let a = imp.generate_identity(seed_hex.clone());
-        let b = imp.generate_identity(seed_hex);
-        assert_eq!(a, b);
-        let v: serde_json::Value = serde_json::from_str(&a).unwrap();
-        assert_eq!(v["id_commitment"].as_str().unwrap().len(), 64);
-        assert_eq!(v["id_secret_hash"].as_str().unwrap().len(), 64);
-        // Keys serialize alphabetically (QJsonObject parity).
-        assert!(a.starts_with("{\"id_commitment\":"));
-    }
-
-    #[test]
-    fn compute_rate_commitment_valid_and_invalid() {
-        let mut imp = LogosRlnModuleImpl;
-        let idc = "22".repeat(32);
-        let leaf = imp.compute_rate_commitment(idc.clone(), 100);
-        assert_eq!(leaf.len(), 64);
-        assert_eq!(leaf, imp.compute_rate_commitment(idc, 100));
-        assert_eq!(imp.compute_rate_commitment("nothex".into(), 100), "");
     }
 
     // TTL eviction: a stale entry (Failed registration awaiting retry) must

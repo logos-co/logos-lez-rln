@@ -43,20 +43,6 @@ fn emit_event(name: &str, payload: &serde_json::Value) {
     }
 }
 
-/// Typed emitter for the `valid_roots` event.
-pub fn emit_valid_roots(roots_json: &str) {
-    let mut payload: Vec<serde_json::Value> = Vec::new();
-    payload.push(serde_json::Value::from(roots_json));
-    emit_event("valid_roots", &serde_json::Value::Array(payload));
-}
-
-/// Typed emitter for the `merkle_proof` event.
-pub fn emit_merkle_proof(proof_json: &str) {
-    let mut payload: Vec<serde_json::Value> = Vec::new();
-    payload.push(serde_json::Value::from(proof_json));
-    emit_event("merkle_proof", &serde_json::Value::Array(payload));
-}
-
 pub trait LiblogosRlnModule: 'static {
     /// One-time setup hook: fires after the host has stamped the module
     /// context (path / instance id / persistence path) and before the
@@ -65,14 +51,8 @@ pub trait LiblogosRlnModule: 'static {
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
     fn get_valid_roots(&mut self, rln_account_id_hex: String) -> String;
-    fn start_root_broadcast(&mut self, rln_account_id: String) -> serde_json::Value;
     fn get_merkle_proofs(&mut self, config_account_id: String, leaf_indices_json: String) -> String;
-    fn start_merkle_proof_broadcast(&mut self, config_account_id: String, leaf_index: i64) -> serde_json::Value;
-    fn generate_identity(&mut self, wallet_account_id: String) -> String;
-    fn compute_rate_commitment(&mut self, id_commitment_hex: String, rate_limit: i64) -> String;
     fn register_member(&mut self, config_account_id: String, user_holding_account_id: String, id_commitment_hex: String, rate_limit: i64) -> String;
-    fn is_member_registered(&mut self, config_account_id: String, id_commitment_hex: String) -> String;
-    fn mint_tokens(&mut self, config_account_id: String, dest_account_id: String, amount: i64) -> String;
     fn get_token_balance(&mut self, account_id: String) -> String;
     fn claim_tokens(&mut self, config_account_id: String, dest_account_id: String, amount: i64) -> String;
     fn get_membership(&mut self, config_account_id: String, id_commitment_hex: String) -> String;
@@ -136,44 +116,14 @@ pub fn install<T: LiblogosRlnModule + Default>() {
                 let result = imp.get_valid_roots(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
                 Some(serde_json::Value::from(result))
             }
-            "start_root_broadcast" => {
-                if args.len() < 1 { return None; }
-                let result = imp.start_root_broadcast(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
-                Some(serde_json::Value::from(result))
-            }
             "get_merkle_proofs" => {
                 if args.len() < 2 { return None; }
                 let result = imp.get_merkle_proofs(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(1).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
                 Some(serde_json::Value::from(result))
             }
-            "start_merkle_proof_broadcast" => {
-                if args.len() < 2 { return None; }
-                let result = imp.start_merkle_proof_broadcast(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(1).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
-                Some(serde_json::Value::from(result))
-            }
-            "generate_identity" => {
-                if args.len() < 1 { return None; }
-                let result = imp.generate_identity(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
-                Some(serde_json::Value::from(result))
-            }
-            "compute_rate_commitment" => {
-                if args.len() < 2 { return None; }
-                let result = imp.compute_rate_commitment(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(1).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
-                Some(serde_json::Value::from(result))
-            }
             "register_member" => {
                 if args.len() < 4 { return None; }
                 let result = imp.register_member(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(1).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(2).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(3).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
-                Some(serde_json::Value::from(result))
-            }
-            "is_member_registered" => {
-                if args.len() < 2 { return None; }
-                let result = imp.is_member_registered(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(1).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
-                Some(serde_json::Value::from(result))
-            }
-            "mint_tokens" => {
-                if args.len() < 3 { return None; }
-                let result = imp.mint_tokens(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(1).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(2).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
                 Some(serde_json::Value::from(result))
             }
             "get_token_balance" => {
@@ -265,7 +215,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"get_valid_roots\",\"parameters\":[{\"name\":\"rln_account_id_hex\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_valid_roots(QString)\"},{\"isInvokable\":true,\"name\":\"start_root_broadcast\",\"parameters\":[{\"name\":\"rln_account_id\",\"type\":\"QString\"}],\"returnType\":\"QVariant\",\"signature\":\"start_root_broadcast(QString)\"},{\"isInvokable\":true,\"name\":\"get_merkle_proofs\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"leaf_indices_json\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_merkle_proofs(QString,QString)\"},{\"isInvokable\":true,\"name\":\"start_merkle_proof_broadcast\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"leaf_index\",\"type\":\"int\"}],\"returnType\":\"QVariant\",\"signature\":\"start_merkle_proof_broadcast(QString,int)\"},{\"isInvokable\":true,\"name\":\"generate_identity\",\"parameters\":[{\"name\":\"wallet_account_id\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"generate_identity(QString)\"},{\"isInvokable\":true,\"name\":\"compute_rate_commitment\",\"parameters\":[{\"name\":\"id_commitment_hex\",\"type\":\"QString\"},{\"name\":\"rate_limit\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"compute_rate_commitment(QString,int)\"},{\"isInvokable\":true,\"name\":\"register_member\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"user_holding_account_id\",\"type\":\"QString\"},{\"name\":\"id_commitment_hex\",\"type\":\"QString\"},{\"name\":\"rate_limit\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"register_member(QString,QString,QString,int)\"},{\"isInvokable\":true,\"name\":\"is_member_registered\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"id_commitment_hex\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"is_member_registered(QString,QString)\"},{\"isInvokable\":true,\"name\":\"mint_tokens\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"dest_account_id\",\"type\":\"QString\"},{\"name\":\"amount\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"mint_tokens(QString,QString,int)\"},{\"isInvokable\":true,\"name\":\"get_token_balance\",\"parameters\":[{\"name\":\"account_id\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_token_balance(QString)\"},{\"isInvokable\":true,\"name\":\"claim_tokens\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"dest_account_id\",\"type\":\"QString\"},{\"name\":\"amount\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"claim_tokens(QString,QString,int)\"},{\"isInvokable\":true,\"name\":\"get_membership\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"id_commitment_hex\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_membership(QString,QString)\"},{\"isInvokable\":true,\"name\":\"get_registry_bounds\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_registry_bounds(QString)\"},{\"name\":\"valid_roots\",\"parameters\":[{\"name\":\"roots_json\",\"type\":\"QString\"}],\"signature\":\"valid_roots(QString)\",\"type\":\"event\"},{\"name\":\"merkle_proof\",\"parameters\":[{\"name\":\"proof_json\",\"type\":\"QString\"}],\"signature\":\"merkle_proof(QString)\",\"type\":\"event\"}]".to_string())
+    to_c_string("[{\"isInvokable\":true,\"name\":\"get_valid_roots\",\"parameters\":[{\"name\":\"rln_account_id_hex\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_valid_roots(QString)\"},{\"isInvokable\":true,\"name\":\"get_merkle_proofs\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"leaf_indices_json\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_merkle_proofs(QString,QString)\"},{\"isInvokable\":true,\"name\":\"register_member\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"user_holding_account_id\",\"type\":\"QString\"},{\"name\":\"id_commitment_hex\",\"type\":\"QString\"},{\"name\":\"rate_limit\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"register_member(QString,QString,QString,int)\"},{\"isInvokable\":true,\"name\":\"get_token_balance\",\"parameters\":[{\"name\":\"account_id\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_token_balance(QString)\"},{\"isInvokable\":true,\"name\":\"claim_tokens\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"dest_account_id\",\"type\":\"QString\"},{\"name\":\"amount\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"claim_tokens(QString,QString,int)\"},{\"isInvokable\":true,\"name\":\"get_membership\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"},{\"name\":\"id_commitment_hex\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_membership(QString,QString)\"},{\"isInvokable\":true,\"name\":\"get_registry_bounds\",\"parameters\":[{\"name\":\"config_account_id\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"get_registry_bounds(QString)\"}]".to_string())
 }
 
 #[no_mangle]

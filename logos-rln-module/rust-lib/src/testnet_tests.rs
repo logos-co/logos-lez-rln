@@ -26,9 +26,29 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rand_chacha::ChaCha20Rng;
+use rln::prelude::{
+    CanonicalDeserialize, CanonicalSerialize, Fr, Hasher, IdentityKeys, PoseidonHash,
+};
+
 use crate::hex_to_bytes32;
 use crate::rln_core as native;
 use native::bytes_to_hex;
+
+/// 32-byte little-endian canonical form of a field element — the node/leaf
+/// wire format the tree accounts store.
+fn fr_to_bytes_le(fr: &Fr) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    fr.serialize_compressed(bytes.as_mut_slice())
+        .expect("Fr canonical form is exactly 32 bytes");
+    bytes
+}
+
+/// Parses a 32-byte little-endian value as a field element; None if
+/// non-canonical (>= the BN254 scalar field modulus).
+fn bytes_le_to_fr(bytes: &[u8; 32]) -> Option<Fr> {
+    Fr::deserialize_compressed(bytes.as_slice()).ok()
+}
 
 struct Deployment {
     sequencer: String,
@@ -344,18 +364,18 @@ fn testnet_merkle_proof_recomputes_the_live_root() {
 
     let fr_of = |hex: &str| {
         let bytes = hex_to_bytes32(hex).expect("32-byte node hex");
-        rln::utils::bytes_le_to_fr(&bytes).expect("field element").0
+        bytes_le_to_fr(&bytes).expect("field element")
     };
     let mut node = fr_of(&proof.leaf);
     for (sibling_hex, &is_right) in proof.path_elements.iter().zip(&proof.path_indices) {
         let sibling = fr_of(sibling_hex);
         node = if is_right == 1 {
-            rln::hashers::poseidon_hash(&[sibling, node])
+            Hasher::<PoseidonHash>::hash_pair(sibling, node)
         } else {
-            rln::hashers::poseidon_hash(&[node, sibling])
+            Hasher::<PoseidonHash>::hash_pair(node, sibling)
         };
     }
-    let recomputed = bytes_to_hex(&rln::utils::fr_to_bytes_le(&node));
+    let recomputed = bytes_to_hex(&fr_to_bytes_le(&node));
     assert_eq!(recomputed, proof.root, "path must hash back to the tree root");
 
     let roots = native::get_valid_roots(&tree_main_data).unwrap();
@@ -379,7 +399,8 @@ fn testnet_membership_read_absent_or_decodes_with_live_state() {
     let (tree_main_data, _) =
         get_account(&dep.sequencer, &plan0.main_account_id).expect("tree main");
 
-    let (id_commitment, _) = native::generate_identity(&[0x5A; 32]);
+    let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&[0x5A; 32]);
+    let id_commitment = fr_to_bytes_le(&identity_keys.id_commitment());
     let plan =
         native::register_plan(&config_data, &tree_main_data, &owner, &id_commitment).unwrap();
 

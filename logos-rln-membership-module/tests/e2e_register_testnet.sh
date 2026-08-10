@@ -232,7 +232,9 @@ for line in sys.stdin:
         continue
     if d.get("status") == "ok" and "result" in d:
         r = d["result"]
-        print(r if isinstance(r, str) else json.dumps(r))
+        # Compact separators: the case-glob checks below match the modules
+        # own compact JSON, so re-serialized values must not add spaces.
+        print(r if isinstance(r, str) else json.dumps(r, separators=(",", ":")))
         break
 '
 }
@@ -264,7 +266,8 @@ if isinstance(d, str):
         print(d); sys.exit()
 if isinstance(d, dict) and "success" in d and ("value" in d or "error" in d):
     out = d.get("value") if d.get("success") else d.get("error")
-    print(out if isinstance(out, str) else json.dumps(out))
+    # Compact separators — see jres.
+    print(out if isinstance(out, str) else json.dumps(out, separators=(",", ":")))
 else:
     print(raw)
 '; }
@@ -409,8 +412,10 @@ log "generate_proof over the registered membership"
 # timestamp: the consumer's Unix-seconds clock — the module derives the proof's
 # epoch from it (not its own clock). `date +%s` == now, so the epoch lands in
 # the start()'d window.
+# str: forces a literal string — a bare or @file numeric arg is coerced to a
+# JSON number by the CLI, which the tstr dispatch then reads as "".
 PROOF_JSON=$(call_json liblogos_rln_membership_module generate_proof \
-    "$REGISTRY_ID" "$(argfile rlnid2 "$RLN_ID")" "$(argfile sig "$SIGNAL_HEX")" "$(date +%s)" | jres | jval) || PROOF_JSON=""
+    "$REGISTRY_ID" "$(argfile rlnid2 "$RLN_ID")" "$(argfile sig "$SIGNAL_HEX")" "str:$(date +%s)" | jres | jval) || PROOF_JSON=""
 case "$PROOF_JSON" in
     *'"proof"'*'"nullifier"'*|*'"nullifier"'*'"proof"'*) ;;
     *) die "generate_proof failed: ${PROOF_JSON:-<empty>}" ;;

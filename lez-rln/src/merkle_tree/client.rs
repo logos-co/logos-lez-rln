@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use nssa::program::Program;
-use rln::{prelude::Fr, utils::bytes_le_to_fr};
+use rln::prelude::{Fr, RLNMerkleProof};
 use tokio::time::sleep;
 use wallet::WalletCore;
 
@@ -19,6 +19,7 @@ use super::{
     OFFSET_TOP_TREE_DATA, ROOT_HISTORY_SIZE, TOP_DEPTH, TREE_DEPTH, derive_main_account,
     derive_subtree_account,
 };
+use crate::fr_bytes::bytes_le_to_fr;
 
 // ============================================================================
 // Parsed Tree State
@@ -342,14 +343,19 @@ pub async fn get_merkle_proof(
     }
 }
 
-pub fn proof_to_fr(proof: &MerkleProof) -> (Vec<Fr>, Vec<u8>, Fr) {
+/// Converts an on-chain [`MerkleProof`] into zerokit's witness inputs: the
+/// [`RLNMerkleProof`] plus the root as a field element.
+pub fn proof_to_fr(proof: &MerkleProof) -> (RLNMerkleProof, Fr) {
     let path_elements: Vec<Fr> = proof
         .path_elements
         .iter()
-        .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element").0)
+        .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
         .collect();
 
-    let (root, _) = bytes_le_to_fr(&proof.root).expect("Invalid root");
+    let root = bytes_le_to_fr(&proof.root).expect("Invalid root");
 
-    (path_elements, proof.path_indices.clone(), root)
+    (
+        RLNMerkleProof::new(path_elements, proof.path_indices.clone()),
+        root,
+    )
 }

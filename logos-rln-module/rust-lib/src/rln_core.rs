@@ -58,6 +58,9 @@ pub struct RlnRegisterPlan {
 /// against both pre-policy (240-byte) and policy (296-byte) deployments,
 /// where an exact-size borsh decode would reject the other version.
 pub const CONFIG_OFFSET_TREE_ID: usize = 32;
+// Not read at runtime; kept so the offset table stays complete and the
+// layout-pin test covers the full append-only layout.
+#[allow(dead_code)]
 pub const CONFIG_OFFSET_PAYMENT_TOKEN_ID: usize = 64;
 pub const CONFIG_OFFSET_PRICE_PER_UNIT: usize = 128;
 pub const CONFIG_OFFSET_TREASURY_ACCOUNT_ID: usize = 144;
@@ -66,6 +69,8 @@ pub const CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT: usize = 184;
 pub const CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT: usize = 192;
 pub const CONFIG_OFFSET_ACTIVE_DURATION: usize = 200;
 pub const CONFIG_OFFSET_GRACE_DURATION: usize = 204;
+// Not read at runtime; see CONFIG_OFFSET_PAYMENT_TOKEN_ID.
+#[allow(dead_code)]
 pub const CONFIG_OFFSET_TOKEN_PROGRAM_ID: usize = 208;
 /// Minimum (pre-policy) ConfigState size — the precheck floor. NOT the full
 /// policy-era size (296, the host's `CONFIG_SIZE`); accepting 240 is what
@@ -115,7 +120,6 @@ pub enum RlnError {
     InvalidConfig,
     InvalidLeafIndex,
     SerializationError,
-    HashFailed,
 }
 
 impl core::fmt::Display for RlnError {
@@ -125,7 +129,6 @@ impl core::fmt::Display for RlnError {
             RlnError::InvalidConfig => "invalid config account data",
             RlnError::InvalidLeafIndex => "invalid leaf index",
             RlnError::SerializationError => "serialization error",
-            RlnError::HashFailed => "hash failed",
         };
         write!(f, "{msg}")
     }
@@ -365,37 +368,6 @@ pub fn merkle_proofs_exec(
     Ok(proofs)
 }
 
-/// Generate an RLN identity from a 32-byte seed. Returns `(id_commitment, id_secret_hash)`.
-pub fn generate_identity(seed: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let (identity_secret_fr, id_commitment_fr) = rln::prelude::seeded_keygen(seed);
-
-    let mut id_commitment = [0u8; 32];
-    id_commitment.copy_from_slice(&rln::utils::fr_to_bytes_le(&id_commitment_fr));
-
-    let mut id_secret_hash = [0u8; 32];
-    id_secret_hash.copy_from_slice(&rln::utils::fr_to_bytes_le(&identity_secret_fr));
-
-    (id_commitment, id_secret_hash)
-}
-
-/// Compute rate_commitment = poseidon(id_commitment, rate_limit).
-pub fn compute_rate_commitment(
-    id_commitment: &[u8; 32],
-    rate_limit: u64,
-) -> Result<[u8; 32], RlnError> {
-    let (id_commitment_fr, _) =
-        rln::utils::bytes_le_to_fr(id_commitment).map_err(|_| RlnError::HashFailed)?;
-
-    let rate_limit_fr = rln::prelude::Fr::from(rate_limit);
-
-    let rate_commitment_fr = rln::hashers::poseidon_hash(&[id_commitment_fr, rate_limit_fr]);
-
-    let mut leaf = [0u8; 32];
-    leaf.copy_from_slice(&rln::utils::fr_to_bytes_le(&rate_commitment_fr));
-
-    Ok(leaf)
-}
-
 /// Plan a registration transaction by deriving all required account IDs.
 pub fn register_plan(
     config_data: &[u8],
@@ -519,28 +491,6 @@ pub fn token_holding_info(data: &[u8]) -> Result<([u8; 32], u128), RlnError> {
         token_core::TokenHolding::NftMaster { .. }
         | token_core::TokenHolding::NftPrintedCopy { .. } => Err(RlnError::InvalidConfig),
     }
-}
-
-/// Plan a Token-program `Mint` transaction from the RLN config account.
-///
-/// The config records the payment token's definition account (the mint
-/// authority, whose key lives in the deployment wallet) and the Token program
-/// id. Returns `(definition_id, token_program_id, instruction_words)`; the two
-/// tx accounts are `[definition (signer), destination holder]`.
-pub fn token_mint_plan(
-    config_data: &[u8],
-    amount: u128,
-) -> Result<([u8; 32], [u8; 32], Vec<u32>), RlnError> {
-    if config_data.len() < CONFIG_STATE_MIN_SIZE {
-        return Err(RlnError::InvalidConfig);
-    }
-    let instruction = token_core::Instruction::Mint {
-        amount_to_mint: amount,
-    };
-    let instr = serialize_instruction(&instruction)?;
-    let definition_id = config_field_32(config_data, CONFIG_OFFSET_PAYMENT_TOKEN_ID);
-    let token_program_id = config_field_32(config_data, CONFIG_OFFSET_TOKEN_PROGRAM_ID);
-    Ok((definition_id, token_program_id, instr))
 }
 
 /// Plan a faucet `ClaimTokens` transaction (faucet-funded deployments: the
