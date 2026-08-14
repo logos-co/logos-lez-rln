@@ -54,7 +54,11 @@ jq '.last_synced_block = 0' "$WALLET" > "$OUT/storage.json.seed"
 # Dual-shape sequencer field: lez >= v0.2.1 reads `sequencers` (multi-client),
 # the rc6-era wallet module still reads flat `sequencer_addr`. Neither struct
 # denies unknown fields, so one file serves both during the transition.
-jq -n --arg s "$SEQ" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100}' > "$OUT/wallet_config.json"
+# multi_sequencer_client_config: v0.2.2's open calibrates each sequencer with
+# calibration_limit sequential getLastBlockId probes (default 100) when no
+# statistics file exists — minutes against a slow chain, wedging every caller
+# behind the open. One sequencer needs no leader election; 3 probes suffice.
+jq -n --arg s "$SEQ" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$OUT/wallet_config.json"
 cat > "$OUT/env.sh" <<EOF
 #!/usr/bin/env bash
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"

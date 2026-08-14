@@ -57,8 +57,9 @@ if [ -n "$ADOPT" ]; then
   cp "$ADOPT" "$WS/storage.json"; echo "provision: adopting wallet $ADOPT"
 fi
 # Dual-shape sequencer field — see stage.sh: `sequencers` for lez >= v0.2.1,
-# flat `sequencer_addr` for the rc6-era wallet module.
-jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100}' > "$WS/wallet_config.json"
+# flat `sequencer_addr` for the rc6-era wallet module. calibration_limit: see
+# stage.sh — v0.2.2 open probes calibration_limit times (default 100).
+jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
 echo "provision: tree=$TREE sequencer=$SEQUENCER funding=$FUNDING (deploying via run_setup — several min)"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS" NSSA_WALLET_HOME_DIR="$WS"
