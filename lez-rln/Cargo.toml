@@ -58,6 +58,12 @@ path = "src/bin/register_member.rs"
 nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2", features = ["test-utils"] }
 token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
 clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.2" }
+# Cycle harness (src/cycle_harness.rs) drives the guest through the same
+# risc0 executor the sequencer uses, to measure per-execution user cycles
+# against the 2^25 session cap. Pinned to the version nssa already resolves.
+# Only the `client` executor is needed (default_executor); dropping default
+# features avoids pulling bonsai-sdk into the dev build.
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["client"] }
 
 [workspace.dependencies]
 rln-layouts = { path = "rln-layouts", default-features = false }

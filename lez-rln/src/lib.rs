@@ -12,4 +12,6 @@ pub mod rln;
 pub mod spel_seeds;
 
 #[cfg(all(test, feature = "rc5-state-tests"))]
+mod cycle_harness;
+#[cfg(all(test, feature = "rc5-state-tests"))]
 mod state_tests;

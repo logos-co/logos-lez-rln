@@ -177,10 +177,10 @@ pub async fn is_initialized(
 }
 
 /// Sleep long enough for the sequencer to seal a block, between back-to-back
-/// program deployments. Two ~500 KiB ELFs in one block exceed the bedrock
-/// inscription cap (~896 KiB = MAX_BLOCK_SIZE * 7/8) and panic the sequencer.
-/// Default 90 s covers both local dev (~15 s blocks) and testnet (~60 s);
-/// override via `LEZ_RLN_BLOCK_SEAL_SECS`.
+/// program deployments. Two ~455 KiB program-deploy txs cannot share one block:
+/// each block is capped at `max_block_size` (512,000 B on testnet, 1 MiB local),
+/// so the second is deferred to a later block. Default 90 s covers both local
+/// dev (~15 s blocks) and testnet (~60 s); override via `LEZ_RLN_BLOCK_SEAL_SECS`.
 pub async fn wait_for_block_seal() {
     let secs = std::env::var("LEZ_RLN_BLOCK_SEAL_SECS")
         .ok()
@@ -417,6 +417,23 @@ pub async fn ensure_program_deployed(
     program_name: &str,
     check_account: &AccountId,
 ) {
+    // Skip the program-deploy tx when the caller knows the image id is already
+    // on-chain — e.g. initializing a config for an additional tree_id against
+    // programs a prior run deployed. `is_program_deployed` can't detect this: it
+    // keys on the tree-scoped `check_account`, which is empty for a fresh tree_id,
+    // so it would re-upload the ~400 KB bytecode. That re-deploy tx is dropped as
+    // `ProgramAlreadyExists`, and the wallet's send-and-wait then times out. If
+    // the program is NOT actually deployed, the init chained calls below fail
+    // loudly instead.
+    if std::env::var_os("LEZ_RLN_SKIP_PROGRAM_DEPLOY").is_some() {
+        println!(
+            "  {} deploy skipped (LEZ_RLN_SKIP_PROGRAM_DEPLOY; assumed on-chain, ID: {:?})",
+            program_name,
+            program.id()
+        );
+        return;
+    }
+
     if is_program_deployed(wallet_core, program, check_account).await {
         println!(
             "  {} already deployed (program ID: {:?})",

@@ -43,7 +43,7 @@ fn main() {
         for name in ["rln_registration.bin", "incremental_merkle_tree.bin"] {
             let path = bin_dir.join(name);
             if path.exists() {
-                strip_program_binary_user_elf(&path, &strip);
+                strip_program_binary(&path, &strip);
             }
         }
     }
@@ -83,57 +83,80 @@ fn locate_llvm_strip() -> Option<PathBuf> {
     None
 }
 
-/// Strip the user ELF inside a risc0 `R0BF` binary in place. Format is:
+/// Strip both ELFs inside a risc0 `R0BF` binary in place. Format is:
 /// `b"R0BF" | u32 version | u32 header_len | header | u32 user_len | user_elf | kernel_elf`.
-/// We unpack the user ELF, run `llvm-strip --strip-all` on it, and re-pack.
-fn strip_program_binary_user_elf(path: &Path, strip: &Path) {
+/// We unpack the user and kernel ELFs, run `llvm-strip --strip-all` on each,
+/// and re-pack. Both carry non-loadable sections (symtab/strtab/comment) the
+/// zkVM never maps into its image, so stripping them removes deploy-tx bytes
+/// without changing one executed instruction — the kernel ELF alone sheds
+/// ~11 KB (its ~15 KB of section/string tables). risc0's `ProgramBinary::decode`
+/// re-parses both ELFs on deploy, so the stripped kernel must still decode;
+/// `cycle_harness::tests::stripped_kernel_binary_still_loads` verifies that.
+fn strip_program_binary(path: &Path, strip: &Path) {
     let blob = std::fs::read(path).expect("read program binary");
-    let mut cur = 0usize;
+    let (header, user_elf, kernel_elf) = split_r0bf(&blob, path);
+
+    let stripped_user = strip_elf(user_elf, strip, &path.with_extension("user.elf.tmp"));
+    let stripped_kernel = strip_elf(kernel_elf, strip, &path.with_extension("kernel.elf.tmp"));
+
+    let ver: u32 = 1;
+    let mut out: Vec<u8> = Vec::with_capacity(blob.len());
+    out.extend_from_slice(b"R0BF");
+    out.extend_from_slice(&ver.to_le_bytes());
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(header);
+    out.extend_from_slice(&(stripped_user.len() as u32).to_le_bytes());
+    out.extend_from_slice(&stripped_user);
+    out.extend_from_slice(&stripped_kernel);
+    std::fs::write(path, &out).expect("write stripped binary");
+    println!(
+        "cargo:warning=stripped {} : {} -> {} B (user {}->{}, kernel {}->{})",
+        path.file_name().unwrap().to_string_lossy(),
+        blob.len(),
+        out.len(),
+        user_elf.len(),
+        stripped_user.len(),
+        kernel_elf.len(),
+        stripped_kernel.len(),
+    );
+}
+
+/// Split an `R0BF` v1 blob into `(header, user_elf, kernel_elf)` slices.
+fn split_r0bf<'a>(blob: &'a [u8], path: &Path) -> (&'a [u8], &'a [u8], &'a [u8]) {
     let read_u32 = |b: &[u8], off: usize| -> u32 {
         u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
     };
-
+    let mut cur = 0usize;
     assert_eq!(&blob[cur..cur + 4], b"R0BF", "expected R0BF magic in {path:?}");
     cur += 4;
-    // The parse below assumes the v1 container layout; refuse anything else
-    // rather than silently repacking (and version-clobbering) a future format.
-    let ver = read_u32(&blob, cur);
+    // The parse assumes the v1 container layout; refuse anything else rather
+    // than silently repacking (and version-clobbering) a future format.
+    let ver = read_u32(blob, cur);
     assert_eq!(ver, 1, "unsupported R0BF version {ver} in {path:?}");
     cur += 4;
-    let header_len = read_u32(&blob, cur) as usize;
+    let header_len = read_u32(blob, cur) as usize;
     cur += 4;
     let header_end = cur + header_len;
     let header = &blob[cur..header_end];
     cur = header_end;
-    let user_len = read_u32(&blob, cur) as usize;
+    let user_len = read_u32(blob, cur) as usize;
     cur += 4;
     let user_elf = &blob[cur..cur + user_len];
     cur += user_len;
     let kernel_elf = &blob[cur..];
+    (header, user_elf, kernel_elf)
+}
 
-    let tmp = path.with_extension("user.elf.tmp");
-    std::fs::write(&tmp, user_elf).expect("write tmp elf");
+/// Run `llvm-strip --strip-all` on `elf` bytes via a temp file, returning the
+/// stripped bytes.
+fn strip_elf(elf: &[u8], strip: &Path, tmp: &Path) -> Vec<u8> {
+    std::fs::write(tmp, elf).expect("write tmp elf");
     let status = Command::new(strip)
         .args(["--strip-all", tmp.to_str().unwrap()])
         .status()
         .expect("invoke llvm-strip");
     assert!(status.success(), "llvm-strip failed on {tmp:?}");
-    let stripped = std::fs::read(&tmp).expect("read stripped elf");
-    std::fs::remove_file(&tmp).ok();
-
-    let mut out: Vec<u8> = Vec::with_capacity(blob.len());
-    out.extend_from_slice(b"R0BF");
-    out.extend_from_slice(&ver.to_le_bytes());
-    out.extend_from_slice(&(header_len as u32).to_le_bytes());
-    out.extend_from_slice(header);
-    out.extend_from_slice(&(stripped.len() as u32).to_le_bytes());
-    out.extend_from_slice(&stripped);
-    out.extend_from_slice(kernel_elf);
-    std::fs::write(path, &out).expect("write stripped binary");
-    println!(
-        "cargo:warning=stripped {} : {} -> {} B",
-        path.file_name().unwrap().to_string_lossy(),
-        blob.len(),
-        out.len(),
-    );
+    let stripped = std::fs::read(tmp).expect("read stripped elf");
+    std::fs::remove_file(tmp).ok();
+    stripped
 }
