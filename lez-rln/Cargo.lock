@@ -4859,6 +4859,7 @@ dependencies = [
  "lee_core",
  "programs",
  "rand_chacha 0.3.1",
+ "risc0-zkvm",
  "rln",
  "rln-layouts",
  "sequencer_service_rpc",

@@ -2,17 +2,21 @@
 resolver = "3"
 members = ["."]
 
-# Do NOT add a custom [profile.release] for the guest until precompile-
-# patched crates (substrate-bn / sha2 / crypto-bigint, see
-# https://dev.risczero.com/api/zkvm/precompiles) are in place. With
-# only software field-mul via rust-poseidon-bn254-pure, the Initialize
-# instruction sits very close to the sequencer's 2^25-cycle session
-# limit, and *any* opt-level / lto / codegen-units / strip change has
-# been observed to push it over the limit (sequencer logs
-# "ProgramExecutionFailed: Session limit exceeded"). Default profile is
-# the only currently-working configuration; the resulting 648 KiB ELF
-# does not fit the public testnet's 511 KiB per-tx cap, but it works
-# locally and against any sequencer that raises that cap.
+# Guest [profile.release]: the binding constraint is the executed cycle budget,
+# not binary size. Measured via src/cycle_harness.rs (gated rc5-state-tests):
+# merkle Initialize 18.2M and Insert 18.7M user cycles — ~55% of the sequencer's
+# 2^25 (33.55M) per-execution session limit, i.e. ~1.8x headroom. A codegen
+# change that pushes cycles past that ceiling is silently dropped from blocks
+# (reason only in the sequencer log). `strip` and `debug=false` touch only
+# non-loaded sections and are cycle-neutral; `opt-level="s"/"z"` is the one
+# genuinely cycle-risky knob. Rule: gate every profile change on the cycle
+# harness, and land the risc0-bigint2 Poseidon precompile (field::modmul_256)
+# before opt-level=z — that is what buys back the headroom.
+#
+# The deploy artifact is the llvm-stripped R0BF .bin the build.rs post-step
+# produces (~455 KB for registration), not the unstripped ~648 KB ELF. The
+# binding size limit is the operator's max_block_size — measured on the public
+# testnet between ~266 KB and ~459 KB — not a fixed 511 KB.
 
 [package]
 name = "logos_lez_rln_guest"
@@ -21,6 +25,19 @@ edition = "2024"
 
 [lib]
 path = "src/lib.rs"
+
+# Gated on cycle_harness (src/cycle_harness.rs). Measured effects vs default:
+#   lto=fat + codegen-units=1  : -34 KB, cycles SLIGHTLY LOWER (Insert 18.69M->18.58M) — SAFE.
+#   + opt-level="z"            : a further -123 KB, but BLOWS the 2^25 cycle cap
+#                               (Init/Insert both exceed 33,554,432 -> guest dropped
+#                               on-chain; 52/81 tests fail). opt-level=z de-optimizes
+#                               the software Poseidon field arithmetic despite the
+#                               source-level unroll hints. It is unlocked ONLY after the
+#                               risc0-bigint2 Poseidon precompile buys ~5-7x cycle
+#                               headroom (see plan Phase 3A). Do NOT re-add it before then.
+[profile.release]
+lto = "fat"
+codegen-units = 1
 
 [lints]
 workspace = true
@@ -50,7 +67,16 @@ spel-framework = { git = "https://github.com/adklempner/spel.git", rev = "6e8c7d
 # `cargo risczero build` fails resolving 1.88-incompatible versions:
 #   enum-ordinalize / enum-ordinalize-derive pinned to 4.3.2 (4.4.x needs 1.89)
 #   ruint pinned to 1.17.0 (1.18+ needs 1.90)
+#   sha2 pinned to 0.10.8 so the risc0 SHA-256 accelerator patch below applies
+#     (risc0's patch table covers 0.10.8/0.10.7/0.10.6/0.9.9, not 0.10.9)
 # Re-pin after any `cargo update` that bumps them.
+
+# risc0's drop-in SHA-256 replaces the ~17 KB software compress256 with the
+# rv32im SHA circuit ecall: fewer bytes AND fewer cycles, with byte-identical
+# output so every PDA/account-id is unchanged. Engaged by the RISC0_FEATURE_*
+# env risc0-build sets for the guest. https://dev.risczero.com/api/zkvm/precompiles
+[patch.crates-io]
+sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8-risczero.0" }
 
 [[bin]]
 name = "incremental_merkle_tree"
