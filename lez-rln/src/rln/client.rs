@@ -19,17 +19,17 @@ use crate::{
     fr_bytes::fr_to_bytes_le,
     merkle_tree::SUBTREE_LEAVES,
     rln::{
-        CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction,
-        derive_config_account, derive_payment_supply_account, derive_payment_token_account,
+        CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, CONFIG_SIZE,
+        Instruction, MEMBERSHIP_OFFSET_HOLDER, MEMBERSHIP_OFFSET_LEAF_INDEX, derive_config_account,
+        derive_escrow_account, derive_payment_supply_account, derive_payment_token_account,
         derive_subtree_account, derive_tree_main_account,
     },
 };
 
 pub const PRICE_PER_UNIT: u128 = 10_000;
-/// 100 B RLNTOK minted per tree deploy. At PRICE_PER_UNIT=10_000 and the
-/// demo's rateLimit=100, each registration burns 1 M tokens, so this supply
-/// funds roughly 100K registrations across the tree's lifetime before
-/// depletion forces a fresh deploy.
+/// Pre-minted supply for wallet-key deployments (faucet ones mint on demand).
+/// Deposits are escrowed, not spent, so this bounds concurrent memberships —
+/// and `max_total_rate_limit` binds first.
 pub const TOKEN_SUPPLY: u128 = 100_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
@@ -512,10 +512,6 @@ pub async fn run_setup(
 ) -> AccountId {
     let config_id = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_id = derive_tree_main_account(&registration_program.id(), tree_id);
-    let credit_token_id =
-        crate::rln::derive_credit_token_account(&registration_program.id(), tree_id);
-    let credit_supply_id =
-        crate::rln::derive_credit_supply_account(&registration_program.id(), tree_id);
 
     println!("Setup Step 1: Checking/deploying programs...");
 
@@ -602,12 +598,12 @@ pub async fn run_setup(
     };
 
     println!("Setup Step 5: Initializing registration program...");
-    // Split across 3 txs: a fused Initialize+token+merkle blows the 32M
-    // per-session cycle cap when all chained calls execute inline.
+    // Split across 2 txs: a fused Initialize+merkle blows the 32M per-call
+    // cycle cap when the chained call executes inline.
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![config_id.clone(), credit_token_id.clone()],
+        vec![config_id.clone()],
         Instruction::Initialize {
             merkle_program_id: bytemuck::cast(merkle_program.id()),
             tree_id: *tree_id,
@@ -633,20 +629,6 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![
-            config_id.clone(),
-            credit_token_id.clone(),
-            credit_supply_id.clone(),
-        ],
-        Instruction::InitializeCreditToken { tree_id: *tree_id },
-        "InitializeCreditToken",
-        &credit_supply_id,
-    )
-    .await;
-
-    send_init_tx(
-        wallet_core,
-        registration_program,
         vec![config_id.clone(), tree_main_id.clone()],
         Instruction::InitializeMerkleTree { tree_id: *tree_id },
         "InitializeMerkleTree",
@@ -656,8 +638,8 @@ pub async fn run_setup(
     println!("  Registration initialized");
 
     if matches!(policy.funding, FundingPolicy::Faucet { .. }) {
-        // 4th init tx (32M-cycle split discipline): create RLNTOK as the
-        // program's own PDA definition — mirror of InitializeCreditToken.
+        // 3rd init tx (32M-cycle split discipline): create RLNTOK as the
+        // program's own PDA definition.
         println!("Setup Step 5b: Creating payment token (program-owned PDA)...");
         let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
         let payment_supply_id = derive_payment_supply_account(&registration_program.id(), tree_id);
@@ -800,9 +782,28 @@ pub async fn create_funded_user(
     user_payment_holding_id
 }
 
-/// Read the deployment's `faucet_claim_cap` from the on-chain config
-/// (offset-based; 0 for wallet-key deployments and for pre-policy configs
-/// whose ConfigState predates the field).
+/// Read a 32-byte account id out of the config PDA at `offset`.
+async fn read_config_account_id(
+    wallet_core: &WalletCore,
+    config_account: &AccountId,
+    offset: usize,
+) -> AccountId {
+    let config_data = wallet_core
+        .get_account_public(config_account.clone())
+        .await
+        .expect("Failed to fetch config account (sequencer unreachable?)");
+    let data = config_data.data.as_ref();
+    // Absent accounts come back as Ok with empty data.
+    assert!(
+        data.len() >= offset + 32,
+        "Config account is {} bytes, too short to hold the field at offset {} — is the \
+         registration initialized, and does this host match the deployed guest?",
+        data.len(),
+        offset
+    );
+    AccountId::new(data[offset..offset + 32].try_into().expect("32-byte field"))
+}
+
 async fn fetch_faucet_claim_cap(
     wallet_core: &WalletCore,
     registration_program: &Program,
@@ -817,9 +818,18 @@ async fn fetch_faucet_claim_cap(
         .await
         .expect("Failed to fetch config account (sequencer unreachable?)");
     let data = account.data.as_ref();
-    if data.len() < CONFIG_OFFSET_FAUCET_CLAIM_CAP + 16 {
+    if data.is_empty() {
         return 0;
     }
+    // Exact, not a lower bound: an older layout is LONGER, so a lower-bound
+    // check would pass and read whichever field now occupies those bytes.
+    assert_eq!(
+        data.len(),
+        CONFIG_SIZE,
+        "Config account is {} bytes, expected {CONFIG_SIZE} — the deployed guest's \
+         ConfigState layout does not match this host",
+        data.len()
+    );
     u128::from_le_bytes(
         data[CONFIG_OFFSET_FAUCET_CLAIM_CAP..CONFIG_OFFSET_FAUCET_CLAIM_CAP + 16]
             .try_into()
@@ -848,17 +858,7 @@ pub async fn register_identity(
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
 
-    let config_data = wallet_core
-        .get_account_public(config_account.clone())
-        .await
-        .expect("Failed to fetch config account. Is the registration initialized?");
-
-    let config_bytes = config_data.data.as_ref();
-    let treasury_bytes: [u8; 32] = config_bytes
-        [CONFIG_OFFSET_TREASURY_ACCOUNT_ID..CONFIG_OFFSET_TREASURY_ACCOUNT_ID + 32]
-        .try_into()
-        .expect("Invalid treasury account ID in config");
-    let treasury_account_id = AccountId::new(treasury_bytes);
+    let escrow_account = derive_escrow_account(&registration_program.id(), tree_id);
 
     let main_account_data = wallet_core
         .get_account_public(tree_main_account.clone())
@@ -866,6 +866,10 @@ pub async fn register_identity(
         .expect("Failed to fetch tree main account");
 
     let tree_data = main_account_data.data.as_ref();
+    assert!(
+        tree_data.len() >= 9,
+        "Tree main account is empty — is the registration initialized for this tree_id?"
+    );
     let next_index = u64::from_le_bytes(tree_data[1..9].try_into().unwrap());
 
     let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
@@ -877,7 +881,7 @@ pub async fn register_identity(
         config_account,
         tree_main_account,
         user_holding_id.clone(),
-        treasury_account_id,
+        escrow_account,
         subtree_account,
         clock_account_id(),
         membership_account,
@@ -917,20 +921,123 @@ pub async fn register_identity(
     next_index
 }
 
-/// Renew a membership that is currently inside its grace period.
-///
-/// Renewal costs the same as registering the membership's rate limit, so
-/// `payer_holding_id` must be a holding of the deployment's payment token with
-/// enough balance; it signs and is debited. Anyone may pay for anyone's
-/// renewal — the charge, not the caller's identity, is what stops a third
-/// party from pinning an abandoned membership's rate limit forever.
+/// Register while displacing an EXPIRED membership, taking over its leaf
+/// index and refunding its holder. The only way in once the tree is at
+/// `max_total_rate_limit`.
+pub async fn register_identity_replacing(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 32],
+    id_commitment: &[u8; 32],
+    id_commitment_to_replace: &[u8; 32],
+    user_holding_id: &AccountId,
+    rate_limit: u64,
+) -> u64 {
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
+        .expect("id_commitment is not a valid BN254 field element");
+    assert_ne!(
+        id_commitment, id_commitment_to_replace,
+        "a membership cannot replace itself"
+    );
+
+    let config_account = derive_config_account(&registration_program.id(), tree_id);
+    let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
+    let escrow_account = derive_escrow_account(&registration_program.id(), tree_id);
+    let membership_account =
+        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
+    let old_membership_account = crate::rln::derive_membership_account(
+        &registration_program.id(),
+        tree_id,
+        id_commitment_to_replace,
+    );
+
+    // Both come from the displaced membership's own record; the guest rejects
+    // any other refund destination.
+    let old_data = wallet_core
+        .get_account_public(old_membership_account)
+        .await
+        .expect("Failed to fetch the membership being replaced (sequencer unreachable?)");
+    let old_bytes = old_data.data.as_ref();
+    assert!(
+        old_bytes.len() >= MEMBERSHIP_OFFSET_HOLDER + 32,
+        "Membership account is {} bytes — no such membership to replace",
+        old_bytes.len()
+    );
+    let old_leaf_index = u64::from_le_bytes(
+        old_bytes[MEMBERSHIP_OFFSET_LEAF_INDEX..MEMBERSHIP_OFFSET_LEAF_INDEX + 8]
+            .try_into()
+            .expect("8-byte leaf index"),
+    );
+    let old_holder_bytes: [u8; 32] = old_bytes
+        [MEMBERSHIP_OFFSET_HOLDER..MEMBERSHIP_OFFSET_HOLDER + 32]
+        .try_into()
+        .expect("32-byte holder field");
+    let old_holder_id = AccountId::new(old_holder_bytes);
+
+    // LEZ rejects duplicate account ids before the program runs, so this would
+    // otherwise surface as an opaque transport error.
+    assert_ne!(
+        &old_holder_id, user_holding_id,
+        "cannot replace a membership whose deposit is owed to the registering holding; \
+         erase it and register instead"
+    );
+
+    let subtree_id = (old_leaf_index / SUBTREE_LEAVES as u64) as u32;
+    let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
+
+    let accounts = vec![
+        config_account,
+        tree_main_account,
+        *user_holding_id,
+        escrow_account,
+        subtree_account,
+        clock_account_id(),
+        membership_account,
+        old_membership_account,
+        old_holder_id,
+    ];
+
+    let signing_key = wallet_core
+        .get_account_public_signing_key(*user_holding_id)
+        .expect("User holding account not found in wallet");
+
+    let nonces = wallet_core
+        .get_accounts_nonces(&[*user_holding_id])
+        .await
+        .expect("Failed to fetch account nonces");
+
+    let instruction = Instruction::RegisterReplacing {
+        tree_id: *tree_id,
+        id_commitment: *id_commitment,
+        rate_limit,
+        subtree_id,
+        id_commitment_to_replace: *id_commitment_to_replace,
+    };
+
+    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
+        .expect("Failed to create register-replacing message");
+
+    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
+    let tx = PublicTransaction::new(message, witness_set);
+
+    wallet_core
+        .helm_owned()
+        .send_transaction(NSSATransaction::Public(tx))
+        .await
+        .expect("Failed to register while replacing");
+
+    old_leaf_index
+}
+
+/// Renew a membership from inside its grace period. `payer_holding_id` signs
+/// and is debited the membership's rate limit at the deployment's price;
+/// anyone may pay for anyone's renewal.
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     payer_holding_id: &AccountId,
-    treasury_id: &AccountId,
 ) {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
@@ -938,12 +1045,18 @@ pub async fn extend_membership(
     let config_account = derive_config_account(&registration_program.id(), tree_id);
     let membership_account =
         crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
+    let treasury_id = read_config_account_id(
+        wallet_core,
+        &config_account,
+        CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
+    )
+    .await;
 
     let accounts = vec![
         config_account,
         membership_account,
         payer_holding_id.clone(),
-        treasury_id.clone(),
+        treasury_id,
         clock_account_id(),
     ];
 
@@ -974,6 +1087,55 @@ pub async fn extend_membership(
         .expect("Failed to extend membership");
 }
 
+/// Start a membership's wind-down, bringing its grace period forward to now.
+/// Holder only; the deposit becomes refundable via `erase_membership` once
+/// that window closes.
+pub async fn force_expire_membership(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 32],
+    id_commitment: &[u8; 32],
+    holder_holding_id: &AccountId,
+) {
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
+        .expect("id_commitment is not a valid BN254 field element");
+
+    let membership_account =
+        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
+
+    let accounts = vec![
+        membership_account,
+        holder_holding_id.clone(),
+        clock_account_id(),
+    ];
+
+    let signing_key = wallet_core
+        .get_account_public_signing_key(holder_holding_id.clone())
+        .expect("Holder holding not found in wallet");
+
+    let nonces = wallet_core
+        .get_accounts_nonces(&[*holder_holding_id])
+        .await
+        .expect("Failed to fetch account nonces");
+
+    let instruction = Instruction::ForceExpire {
+        tree_id: *tree_id,
+        id_commitment: *id_commitment,
+    };
+
+    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
+        .expect("Failed to create force-expire message");
+
+    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
+    let tx = PublicTransaction::new(message, witness_set);
+
+    wallet_core
+        .helm_owned()
+        .send_transaction(NSSATransaction::Public(tx))
+        .await
+        .expect("Failed to force-expire membership");
+}
+
 /// Erase an expired membership. Any funded account can call this; callers
 /// pre-grace-period or mid-grace-period are rejected by the guest.
 pub async fn erase_membership(
@@ -993,6 +1155,24 @@ pub async fn erase_membership(
         crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
     let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
     let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
+    let escrow_account = derive_escrow_account(&registration_program.id(), tree_id);
+
+    // The refund destination is the membership's own record, not the caller's
+    // choice: the guest rejects any other holding.
+    let membership_data = wallet_core
+        .get_account_public(membership_account.clone())
+        .await
+        .expect("Failed to fetch membership account (sequencer unreachable?)");
+    let membership_bytes = membership_data.data.as_ref();
+    assert!(
+        membership_bytes.len() >= MEMBERSHIP_OFFSET_HOLDER + 32,
+        "Membership account is {} bytes — no such membership, or it was already erased",
+        membership_bytes.len()
+    );
+    let holder_bytes: [u8; 32] = membership_bytes
+        [MEMBERSHIP_OFFSET_HOLDER..MEMBERSHIP_OFFSET_HOLDER + 32]
+        .try_into()
+        .expect("32-byte holder field");
 
     let accounts = vec![
         config_account,
@@ -1000,6 +1180,8 @@ pub async fn erase_membership(
         membership_account,
         subtree_account,
         clock_account_id(),
+        escrow_account,
+        AccountId::new(holder_bytes),
     ];
 
     let signing_key = wallet_core

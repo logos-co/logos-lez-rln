@@ -11,16 +11,15 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Borsh layout for the registration program's config account.
 ///
-/// Fixed size: 296 bytes. Field declaration order matches the byte layout
-/// (Borsh encodes fixed-width primitives + fixed arrays in declaration order
-/// with no length prefixes). New fields are only ever APPENDED so existing
-/// offsets stay stable for offset-based readers.
+/// Fixed size: 264 bytes. Borsh writes fields in declaration order with no
+/// length prefixes, so `src/rln/constants.rs` offsets are a running sum of the
+/// fields above each one — and `logos-lez-rln-module` duplicates them. Editing
+/// anywhere but the tail moves both.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct ConfigState {
     pub merkle_program_id: [u8; 32],
     pub tree_id: [u8; 32],
     pub payment_token_id: [u8; 32],
-    pub receipt_token_id: [u8; 32],
     pub price_per_unit: u128,
     pub treasury_account_id: [u8; 32],
     pub total_registrations: u64,
@@ -43,7 +42,7 @@ pub struct ConfigState {
 
 /// Borsh layout for a per-member account in the SPEL registration program.
 ///
-/// Fixed size: 64 bytes.
+/// Fixed size: 113 bytes.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct MembershipState {
     pub leaf_index: u64,
@@ -52,4 +51,11 @@ pub struct MembershipState {
     pub grace_period_start_timestamp: u64,
     pub active_duration: u32,
     pub grace_period_duration: u32,
+    /// The holding that paid the deposit — the only account `erase` refunds.
+    /// Free memberships record their registrar here, with a zero deposit.
+    pub holder: [u8; 32],
+    /// Held in the tree's `escrow` PDA: refunded by `erase`, burned by `slash`.
+    pub deposit_amount: u128,
+    /// Non-zero once `force_expire` has run; `extend` then refuses.
+    pub exiting: u8,
 }

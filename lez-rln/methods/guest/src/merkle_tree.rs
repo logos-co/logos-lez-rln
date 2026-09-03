@@ -231,24 +231,25 @@ pub fn insert_leaf(
     ]
 }
 
-/// Set a leaf at a specific index (for index reuse after removal).
+/// Overwrite the leaf at `leaf_index`, whatever it holds, without advancing
+/// `next_index`. Whether the occupant may be displaced is the caller's to
+/// decide; this only checks the index is in range.
 ///
 /// # Arguments
 /// * `pre_states` - `[main_account, bottom_subtree]`
 /// * `instruction` - `[leaf_index(8), leaf_value(32)]`
 ///
-/// # Returns
-/// Post states with updated main account and bottom subtree
-///
 /// # Panics
 /// - If `pre_states[0].is_authorized` is false
 /// - If leaf_index >= next_index
-/// - If the current leaf at leaf_index is not zero
-pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec<AccountPostState> {
+pub fn replace_leaf(
+    pre_states: Vec<AccountWithMetadata>,
+    instruction: &[u8],
+) -> Vec<AccountPostState> {
     let main_account = &pre_states[0];
 
     if !main_account.is_authorized {
-        panic!("Authorization required to set leaf");
+        panic!("Authorization required to replace leaf");
     }
 
     assert!(
@@ -259,69 +260,15 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
     let leaf_value: [u8; 32] = instruction[8..40].try_into().unwrap();
     validate_field_element(&leaf_value);
 
-    let main_data = main_account.account.data.as_ref();
-    let depth = main_data[OFFSET_DEPTH] as usize;
-    let next_index = u64::from_le_bytes(
-        main_data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
-            .try_into()
-            .unwrap(),
-    );
-
+    let next_index = read_next_index(main_account.account.data.as_ref());
     assert!(
         leaf_index < next_index,
-        "Can only set at index < next_index: index {} >= next_index {}",
+        "Cannot replace leaf at index {} when next_index is {}",
         leaf_index,
         next_index
     );
 
-    let leaf_index = leaf_index as usize;
-
-    let cached_nodes = extract_cached_nodes(main_data, depth);
-    let bottom_data_ref = pre_states[1].account.data.as_ref();
-
-    // Check that the current leaf at this index is zero
-    let local_index = leaf_index % SUBTREE_LEAVES;
-    let current_leaf = read_sparse_node(
-        bottom_data_ref,
-        BOTTOM_DEPTH,
-        local_index,
-        &cached_nodes[TREE_DEPTH],
-    );
-    assert!(
-        current_leaf == ZERO || current_leaf == cached_nodes[TREE_DEPTH],
-        "Can only set at an empty (zeroed) index"
-    );
-
-    let mut bottom_data = bottom_data_ref.to_vec();
-    let mut top_tree_data = if main_data.len() > OFFSET_TOP_TREE_DATA {
-        main_data[OFFSET_TOP_TREE_DATA..].to_vec()
-    } else {
-        Vec::new()
-    };
-
-    let new_root = compute_root_after_update(
-        leaf_value,
-        leaf_index,
-        &mut bottom_data,
-        &mut top_tree_data,
-        &cached_nodes,
-    );
-
-    // Build updated main account data (only root changes, NOT next_index)
-    let mut main_post_data = main_data[..OFFSET_TOP_TREE_DATA].to_vec();
-    push_root_history(&mut main_post_data, &new_root);
-    main_post_data.extend_from_slice(&top_tree_data);
-
-    let mut main_post_account = main_account.account.clone();
-    main_post_account.data = main_post_data.try_into().expect("Data fits");
-
-    let mut subtree_post_account = pre_states[1].account.clone();
-    subtree_post_account.data = bottom_data.try_into().expect("Data fits");
-
-    vec![
-        AccountPostState::new(main_post_account),
-        AccountPostState::new(subtree_post_account),
-    ]
+    write_leaf_at(&pre_states, leaf_index as usize, leaf_value).0
 }
 
 /// Remove a leaf from the Merkle tree by setting it to zero.
@@ -352,14 +299,7 @@ pub fn remove_leaf(
     );
     let leaf_index = u64::from_le_bytes(instruction[0..8].try_into().unwrap());
 
-    let main_data = main_account.account.data.as_ref();
-    let depth = main_data[OFFSET_DEPTH] as usize;
-    let next_index = u64::from_le_bytes(
-        main_data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
-            .try_into()
-            .unwrap(),
-    );
-
+    let next_index = read_next_index(main_account.account.data.as_ref());
     assert!(
         leaf_index < next_index,
         "Cannot remove leaf at index {} when next_index is {}",
@@ -367,7 +307,19 @@ pub fn remove_leaf(
         next_index
     );
 
-    let leaf_index = leaf_index as usize;
+    write_leaf_at(&pre_states, leaf_index as usize, ZERO)
+}
+
+/// Write `leaf_value` at `leaf_index` and rehash the path to the root,
+/// carrying `next_index` forward. Shared by `replace_leaf` and `remove_leaf`.
+fn write_leaf_at(
+    pre_states: &[AccountWithMetadata],
+    leaf_index: usize,
+    leaf_value: [u8; 32],
+) -> (Vec<AccountPostState>, [u8; 32]) {
+    let main_account = &pre_states[0];
+    let main_data = main_account.account.data.as_ref();
+    let depth = main_data[OFFSET_DEPTH] as usize;
 
     let cached_nodes = extract_cached_nodes(main_data, depth);
     let mut bottom_data = pre_states[1].account.data.as_ref().to_vec();
@@ -378,14 +330,14 @@ pub fn remove_leaf(
     };
 
     let new_root = compute_root_after_update(
-        ZERO,
+        leaf_value,
         leaf_index,
         &mut bottom_data,
         &mut top_tree_data,
         &cached_nodes,
     );
 
-    // Build updated main account data (only root changes, NOT next_index)
+    // Only the root changes, NOT next_index.
     let mut main_post_data = main_data[..OFFSET_TOP_TREE_DATA].to_vec();
     push_root_history(&mut main_post_data, &new_root);
     main_post_data.extend_from_slice(&top_tree_data);
@@ -396,12 +348,13 @@ pub fn remove_leaf(
     let mut subtree_post_account = pre_states[1].account.clone();
     subtree_post_account.data = bottom_data.try_into().expect("Data fits");
 
-    let post_states = vec![
-        AccountPostState::new(main_post_account),
-        AccountPostState::new(subtree_post_account),
-    ];
-
-    (post_states, new_root)
+    (
+        vec![
+            AccountPostState::new(main_post_account),
+            AccountPostState::new(subtree_post_account),
+        ],
+        new_root,
+    )
 }
 
 // ============================================================================
@@ -1370,5 +1323,113 @@ mod tests {
             read_next_index(current_main.data.as_ref()),
             SUBTREE_LEAVES as u64
         );
+    }
+
+    // ========================================================================
+    // Replace Tests
+    // ========================================================================
+
+    /// Insert `leaf` at index 0 and return the resulting (main, subtree) pair.
+    fn tree_with_first_leaf(leaf: [u8; 32]) -> (AccountWithMetadata, AccountWithMetadata) {
+        let (pre_states, instruction) = build_insert_first_leaf_data(
+            AccountForTests::main_initialized(),
+            AccountForTests::subtree_empty(),
+            leaf,
+        );
+        let post_states = insert_leaf(pre_states, &instruction);
+        (
+            AccountWithMetadata {
+                account_id: IdForTests::main_account_id(),
+                account: post_states[0].account().clone(),
+                is_authorized: true,
+            },
+            AccountWithMetadata {
+                account_id: IdForTests::subtree_account_id(),
+                account: post_states[1].account().clone(),
+                is_authorized: true,
+            },
+        )
+    }
+
+    fn build_replace_leaf_data(
+        main: AccountWithMetadata,
+        subtree: AccountWithMetadata,
+        leaf_index: u64,
+        leaf_value: [u8; 32],
+    ) -> (Vec<AccountWithMetadata>, Vec<u8>) {
+        let mut instruction = Vec::with_capacity(40);
+        instruction.extend_from_slice(&leaf_index.to_le_bytes());
+        instruction.extend_from_slice(&leaf_value);
+        (vec![main, subtree], instruction)
+    }
+
+    #[test]
+    fn test_replace_leaf_is_indistinguishable_from_having_inserted_the_new_leaf() {
+        // The strongest statement of "overwrote in place": a tree whose only
+        // leaf was replaced must be byte-identical in root to one where the
+        // replacement had been the original occupant. That rules out both
+        // leaving the old leaf behind and merely zeroing it.
+        let (main, subtree) = tree_with_first_leaf([42u8; 32]);
+        let (pre_states, instruction) = build_replace_leaf_data(main, subtree, 0, [7u8; 32]);
+        let post_states = replace_leaf(pre_states, &instruction);
+        let root_after_replace = read_root(post_states[0].account().data.as_ref());
+
+        let (direct_main, _) = tree_with_first_leaf([7u8; 32]);
+        let root_direct = read_root(direct_main.account.data.as_ref());
+
+        assert_eq!(
+            root_after_replace, root_direct,
+            "replacing a leaf must land the tree exactly where inserting it would have"
+        );
+    }
+
+    #[test]
+    fn test_replace_leaf_does_not_change_next_index() {
+        // The slot is already accounted for — reusing it must not consume
+        // another index, which is the whole reason replacement exists.
+        let (main, subtree) = tree_with_first_leaf([42u8; 32]);
+        assert_eq!(read_next_index(main.account.data.as_ref()), 1);
+
+        let (pre_states, instruction) = build_replace_leaf_data(main, subtree, 0, [7u8; 32]);
+        let post_states = replace_leaf(pre_states, &instruction);
+
+        assert_eq!(
+            read_next_index(post_states[0].account().data.as_ref()),
+            1,
+            "replace must not advance next_index"
+        );
+    }
+
+    #[test]
+    fn test_replace_leaf_changes_the_root() {
+        let (main, subtree) = tree_with_first_leaf([42u8; 32]);
+        let root_before = read_root(main.account.data.as_ref());
+
+        let (pre_states, instruction) = build_replace_leaf_data(main, subtree, 0, [7u8; 32]);
+        let post_states = replace_leaf(pre_states, &instruction);
+
+        assert_ne!(
+            read_root(post_states[0].account().data.as_ref()),
+            root_before,
+            "replacing a leaf must move the root"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Authorization required to replace leaf")]
+    fn test_replace_requires_authorization() {
+        let (mut main, subtree) = tree_with_first_leaf([42u8; 32]);
+        main.is_authorized = false;
+        let (pre_states, instruction) = build_replace_leaf_data(main, subtree, 0, [7u8; 32]);
+        replace_leaf(pre_states, &instruction);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot replace leaf at index")]
+    fn test_replace_rejects_an_index_the_tree_has_not_reached() {
+        // Index 1 has never been inserted, so there is no slot to reuse there.
+        let (main, subtree) = tree_with_first_leaf([42u8; 32]);
+        let (pre_states, instruction) = build_replace_leaf_data(main, subtree, 1, [7u8; 32]);
+        replace_leaf(pre_states, &instruction);
     }
 }

@@ -32,7 +32,7 @@ mod tests {
     };
     use risc0_zkvm::{ExecutorEnv, default_executor};
 
-    use crate::rln::{derive_config_account, derive_credit_token_account};
+    use crate::rln::{derive_subtree_account, derive_tree_main_account};
 
     /// The sequencer's per-execution session limit (lee `program/mod.rs`:
     /// `MAX_NUM_CYCLES_PUBLIC_EXECUTION`). An execution over this is dropped
@@ -97,11 +97,14 @@ mod tests {
     /// An authorized, uninitialized `tree_main` — the sole Initialize pre-state
     /// (`merkle_tree::initialize_tree` requires `is_authorized` and a
     /// default-valued account).
+    ///
+    /// Ids are derived under the merkle program, not the registration program
+    /// that owns these seeds: the harness only needs them distinct.
     fn tree_main_default(program: &Program) -> AccountWithMetadata {
         AccountWithMetadata {
             account: Account::default(),
             is_authorized: true,
-            account_id: derive_config_account(&program.id(), &TREE_ID),
+            account_id: derive_tree_main_account(&program.id(), &TREE_ID),
         }
     }
 
@@ -251,13 +254,13 @@ mod tests {
         let main_pre = AccountWithMetadata {
             account: main_initialized,
             is_authorized: true,
-            account_id: derive_config_account(&program.id(), &TREE_ID),
+            account_id: derive_tree_main_account(&program.id(), &TREE_ID),
         };
         // Bottom subtree for leaf 0 — starts default; a distinct id from main.
         let subtree_pre = AccountWithMetadata {
             account: Account::default(),
             is_authorized: true,
-            account_id: derive_credit_token_account(&program.id(), &TREE_ID),
+            account_id: derive_subtree_account(&program.id(), &TREE_ID, 0),
         };
 
         // opcode 1 (insert) || expected_index=0 (u64 LE) || leaf (valid BN254 fe).
@@ -275,6 +278,76 @@ mod tests {
         assert!(
             cycles < CYCLE_BUDGET,
             "merkle Insert {cycles} cycles exceeds budget {CYCLE_BUDGET} \
+             (hard session cap 2^25 = {SESSION_LIMIT})"
+        );
+    }
+
+    #[test]
+    fn merkle_replace_cycles_under_budget() {
+        // If Replace does not fit, the whole replace-on-register path is
+        // undeployable — it cannot be split into two merkle calls.
+        let Some(program) = load_merkle() else {
+            eprintln!("skipping cycle harness: merkle .bin not built");
+            return;
+        };
+
+        let (_init_cycles, init_out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
+        let main_id = derive_tree_main_account(&program.id(), &TREE_ID);
+        let subtree_id = derive_subtree_account(&program.id(), &TREE_ID, 0);
+
+        // Insert a leaf first: replace needs an occupied slot below next_index.
+        let mut insert = vec![1u8];
+        insert.extend_from_slice(&0u64.to_le_bytes());
+        let mut leaf = [0u8; 32];
+        leaf[0] = 1;
+        insert.extend_from_slice(&leaf);
+        let (_insert_cycles, insert_out) = run(
+            &program,
+            vec![
+                AccountWithMetadata {
+                    account: init_out.post_states[0].account().clone(),
+                    is_authorized: true,
+                    account_id: main_id,
+                },
+                AccountWithMetadata {
+                    account: Account::default(),
+                    is_authorized: true,
+                    account_id: subtree_id,
+                },
+            ],
+            insert,
+        );
+
+        // opcode 3 (replace) || leaf_index=0 (u64 LE) || a different leaf.
+        let mut instruction = vec![3u8];
+        instruction.extend_from_slice(&0u64.to_le_bytes());
+        let mut new_leaf = [0u8; 32];
+        new_leaf[0] = 2;
+        instruction.extend_from_slice(&new_leaf);
+
+        let (cycles, _out) = run(
+            &program,
+            vec![
+                AccountWithMetadata {
+                    account: insert_out.post_states[0].account().clone(),
+                    is_authorized: true,
+                    account_id: main_id,
+                },
+                AccountWithMetadata {
+                    account: insert_out.post_states[1].account().clone(),
+                    is_authorized: true,
+                    account_id: subtree_id,
+                },
+            ],
+            instruction,
+        );
+        println!(
+            "merkle Replace: {cycles} user cycles ({:.1}% of 2^25)",
+            cycles as f64 / SESSION_LIMIT as f64 * 100.0
+        );
+        assert!(
+            cycles < CYCLE_BUDGET,
+            "merkle Replace {cycles} cycles exceeds budget {CYCLE_BUDGET} \
              (hard session cap 2^25 = {SESSION_LIMIT})"
         );
     }

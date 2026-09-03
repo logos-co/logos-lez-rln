@@ -101,6 +101,8 @@ pub struct TokenHoldingLayout {
 }
 
 impl TokenHoldingLayout {
+    /// Offset of `balance`, for callers patching it in place.
+    pub const BALANCE_OFFSET: usize = Self::SIZE - 16;
     pub const SIZE: usize = 49;
 
     #[inline]
@@ -131,7 +133,8 @@ pub enum MerkleOpcode {
     Initialize = 0,
     Insert = 1,
     Remove = 2,
-    Set = 3,
+    /// Overwrite a leaf in place, leaving `next_index` alone.
+    Replace = 3,
 }
 
 impl MerkleOpcode {
@@ -142,7 +145,7 @@ impl MerkleOpcode {
             0 => Some(Self::Initialize),
             1 => Some(Self::Insert),
             2 => Some(Self::Remove),
-            3 => Some(Self::Set),
+            3 => Some(Self::Replace),
             _ => None,
         }
     }

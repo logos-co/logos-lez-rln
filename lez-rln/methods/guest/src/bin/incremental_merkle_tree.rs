@@ -10,7 +10,7 @@
 //! - `2`: Remove - Set a leaf to zero and recompute root (does not change next_index)
 //! - `3`: Set - Set a leaf at a specific index (for index reuse, must be zeroed first)
 
-use logos_lez_rln_guest::merkle_tree::{initialize_tree, insert_leaf, remove_leaf, set_leaf};
+use logos_lez_rln_guest::merkle_tree::{initialize_tree, insert_leaf, remove_leaf, replace_leaf};
 use nssa_core::program::{ProgramInput, ProgramOutput, read_lee_inputs as read_nssa_inputs};
 use rln_layouts::MerkleOpcode;
 
@@ -35,7 +35,7 @@ fn main() {
             let (states, _new_root) = remove_leaf(pre_states.clone(), &instruction[1..]);
             states
         }
-        MerkleOpcode::Set => set_leaf(pre_states.clone(), &instruction[1..]),
+        MerkleOpcode::Replace => replace_leaf(pre_states.clone(), &instruction[1..]),
     };
 
     ProgramOutput::new(

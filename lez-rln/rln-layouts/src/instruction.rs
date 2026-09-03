@@ -24,31 +24,25 @@ pub enum Instruction {
         free_quota: u64,
         faucet_claim_cap: u128,
     },
-    /// Callee program ids are deliberately absent here and on the two
-    /// initializers below: they come from the config PDA these instructions
-    /// declare. A caller-supplied program id would be handed `pda_seeds`
-    /// authorizing it to claim the registration program's own PDAs.
-    InitializeCreditToken {
-        tree_id: [u8; 32],
-    },
-    InitializeMerkleTree {
-        tree_id: [u8; 32],
-    },
+    /// Callee program ids are deliberately absent here and on
+    /// `InitializePaymentToken`: they come from the config PDA these
+    /// instructions declare. A caller-supplied program id would be handed
+    /// `pda_seeds` authorizing it to claim the registration program's own PDAs.
+    InitializeMerkleTree { tree_id: [u8; 32] },
     Register {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
         rate_limit: u64,
         subtree_id: u32,
     },
-    BuyCredits {
-        tree_id: [u8; 32],
-        amount: u128,
-    },
-    RegisterWithCredits {
+    /// Register while displacing an expired membership, taking over its leaf
+    /// index and refunding its holder.
+    RegisterReplacing {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
-        amount_to_burn: u64,
+        rate_limit: u64,
         subtree_id: u32,
+        id_commitment_to_replace: [u8; 32],
     },
     Slash {
         tree_id: [u8; 32],
@@ -67,15 +61,15 @@ pub enum Instruction {
     },
     /// Create the payment token ("RLNTOK") as a program-owned PDA definition
     /// — faucet deployments only; the mint authority is the program itself,
-    /// no human key. Mirrors `InitializeCreditToken`.
-    InitializePaymentToken {
-        tree_id: [u8; 32],
-    },
+    /// no human key.
+    InitializePaymentToken { tree_id: [u8; 32] },
     /// Faucet: mint up to `faucet_claim_cap` payment tokens to the (signing)
     /// destination holding. Rejected when the deployment's cap is 0.
-    ClaimTokens {
+    ClaimTokens { tree_id: [u8; 32], amount: u128 },
+    /// Bring a membership's grace period forward to now. Holder only.
+    ForceExpire {
         tree_id: [u8; 32],
-        amount: u128,
+        id_commitment: [u8; 32],
     },
     /// Create a membership without payment — only the deployment's
     /// `authorized_registrar` may call it, and only while

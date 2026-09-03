@@ -17,7 +17,6 @@ pub struct ConfigState {
     pub merkle_program_id: [u8; 32],
     pub tree_id: [u8; 32],
     pub payment_token_id: [u8; 32],
-    pub receipt_token_id: [u8; 32],
     pub price_per_unit: u128,
     pub treasury_account_id: [u8; 32],
     pub total_registrations: u64,
@@ -58,6 +57,9 @@ pub struct MembershipState {
     pub grace_period_start_timestamp: u64,
     pub active_duration: u32,
     pub grace_period_duration: u32,
+    pub holder: [u8; 32],
+    pub deposit_amount: u128,
+    pub exiting: u8,
 }
 
 const _: () = {
@@ -81,35 +83,33 @@ mod layout_equivalence {
             merkle_program_id: [1u8; 32],
             tree_id: [2u8; 32],
             payment_token_id: [3u8; 32],
-            receipt_token_id: [4u8; 32],
-            price_per_unit: 5,
-            treasury_account_id: [6u8; 32],
-            total_registrations: 7,
-            max_total_rate_limit: 8,
-            current_total_rate_limit: 9,
-            active_duration_for_new_memberships: 10,
-            grace_period_duration_for_new_memberships: 11,
-            token_program_id: [12u8; 32],
-            authorized_registrar: [13u8; 32],
-            free_quota_remaining: 14,
-            faucet_claim_cap: 15,
+            price_per_unit: 4,
+            treasury_account_id: [5u8; 32],
+            total_registrations: 6,
+            max_total_rate_limit: 7,
+            current_total_rate_limit: 8,
+            active_duration_for_new_memberships: 9,
+            grace_period_duration_for_new_memberships: 10,
+            token_program_id: [11u8; 32],
+            authorized_registrar: [12u8; 32],
+            free_quota_remaining: 13,
+            faucet_claim_cap: 14,
         };
         let shared = SharedConfigState {
             merkle_program_id: [1u8; 32],
             tree_id: [2u8; 32],
             payment_token_id: [3u8; 32],
-            receipt_token_id: [4u8; 32],
-            price_per_unit: 5,
-            treasury_account_id: [6u8; 32],
-            total_registrations: 7,
-            max_total_rate_limit: 8,
-            current_total_rate_limit: 9,
-            active_duration_for_new_memberships: 10,
-            grace_period_duration_for_new_memberships: 11,
-            token_program_id: [12u8; 32],
-            authorized_registrar: [13u8; 32],
-            free_quota_remaining: 14,
-            faucet_claim_cap: 15,
+            price_per_unit: 4,
+            treasury_account_id: [5u8; 32],
+            total_registrations: 6,
+            max_total_rate_limit: 7,
+            current_total_rate_limit: 8,
+            active_duration_for_new_memberships: 9,
+            grace_period_duration_for_new_memberships: 10,
+            token_program_id: [11u8; 32],
+            authorized_registrar: [12u8; 32],
+            free_quota_remaining: 13,
+            faucet_claim_cap: 14,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -127,6 +127,9 @@ mod layout_equivalence {
             grace_period_start_timestamp: 4,
             active_duration: 5,
             grace_period_duration: 6,
+            holder: [7u8; 32],
+            deposit_amount: 8,
+            exiting: 9,
         };
         let shared = SharedMembershipState {
             leaf_index: 1,
@@ -135,6 +138,9 @@ mod layout_equivalence {
             grace_period_start_timestamp: 4,
             active_duration: 5,
             grace_period_duration: 6,
+            holder: [7u8; 32],
+            deposit_amount: 8,
+            exiting: 9,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -152,7 +158,6 @@ pub mod rln_registration {
     #[instruction]
     pub fn initialize(
         #[account(init, pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("receipt"), arg("tree_id")])] credit_token: AccountWithMetadata,
         merkle_program_id: [u8; 32],
         token_program_id: [u8; 32],
         tree_id: [u8; 32],
@@ -168,7 +173,6 @@ pub mod rln_registration {
     ) -> SpelResult {
         Ok(handlers::initialize(
             config,
-            credit_token,
             merkle_program_id,
             token_program_id,
             tree_id,
@@ -181,23 +185,6 @@ pub mod rln_registration {
             authorized_registrar,
             free_quota,
             faucet_claim_cap,
-        ))
-    }
-
-    #[instruction]
-    pub fn initialize_credit_token(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(init, pda = [literal("receipt"), arg("tree_id")])]
-        credit_token: AccountWithMetadata,
-        #[account(init, pda = [literal("supply"), arg("tree_id")])]
-        credit_supply: AccountWithMetadata,
-        tree_id: [u8; 32],
-    ) -> SpelResult {
-        Ok(handlers::initialize_credit_token(
-            config,
-            credit_token,
-            credit_supply,
-            tree_id,
         ))
     }
 
@@ -215,7 +202,7 @@ pub mod rln_registration {
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
         #[account(signer)] user_holding: AccountWithMetadata,
-        treasury_holding: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow_holding: AccountWithMetadata,
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
         clock_account: AccountWithMetadata,
@@ -230,7 +217,7 @@ pub mod rln_registration {
             config,
             tree_main,
             user_holding,
-            treasury_holding,
+            escrow_holding,
             bottom_subtree,
             clock_account,
             membership,
@@ -242,55 +229,40 @@ pub mod rln_registration {
     }
 
     #[instruction]
-    pub fn buy_credits(
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_replacing(
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("receipt"), arg("tree_id")])]
-        credit_token_def: AccountWithMetadata,
-        #[account(signer)] user_payment_holding: AccountWithMetadata,
-        treasury_holding: AccountWithMetadata,
-        user_credit_holding: AccountWithMetadata,
-        tree_id: [u8; 32],
-        amount: u128,
-    ) -> SpelResult {
-        Ok(handlers::buy_credits(
-            config,
-            credit_token_def,
-            user_payment_holding,
-            treasury_holding,
-            user_credit_holding,
-            tree_id,
-            amount,
-        ))
-    }
-
-    #[instruction]
-    pub fn register_with_credits(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("receipt"), arg("tree_id")])]
-        credit_token_def: AccountWithMetadata,
         #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
-        #[account(signer)] user_credit_holding: AccountWithMetadata,
+        #[account(signer)] user_holding: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow_holding: AccountWithMetadata,
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
         clock_account: AccountWithMetadata,
         #[account(init, pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
         membership: AccountWithMetadata,
+        #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment_to_replace")])]
+        old_membership: AccountWithMetadata,
+        old_holder_holding: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
-        amount_to_burn: u64,
+        rate_limit: u64,
         subtree_id: u32,
+        id_commitment_to_replace: [u8; 32],
     ) -> SpelResult {
-        Ok(handlers::register_with_credits(
+        let _ = id_commitment_to_replace; // PDA seed only; consumed by the #[account] macro
+        Ok(handlers::register_replacing(
             config,
-            credit_token_def,
             tree_main,
-            user_credit_holding,
+            user_holding,
+            escrow_holding,
             bottom_subtree,
             clock_account,
             membership,
+            old_membership,
+            old_holder_holding,
             tree_id,
             id_commitment,
-            amount_to_burn,
+            rate_limit,
             subtree_id,
         ))
     }
@@ -303,6 +275,8 @@ pub mod rln_registration {
         membership: AccountWithMetadata,
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow_holding: AccountWithMetadata,
+        payment_token_def: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
         identity_secret: [u8; 32],
@@ -313,6 +287,8 @@ pub mod rln_registration {
             tree_main,
             membership,
             bottom_subtree,
+            escrow_holding,
+            payment_token_def,
             tree_id,
             id_commitment,
             identity_secret,
@@ -407,6 +383,25 @@ pub mod rln_registration {
     }
 
     #[instruction]
+    pub fn force_expire(
+        #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
+        membership: AccountWithMetadata,
+        #[account(signer)] holder_holding: AccountWithMetadata,
+        clock_account: AccountWithMetadata,
+        tree_id: [u8; 32],
+        id_commitment: [u8; 32],
+    ) -> SpelResult {
+        // Both are PDA seeds only; the membership account they derive is what
+        // binds this call to a tree, so neither reaches the handler.
+        let _ = (tree_id, id_commitment);
+        Ok(handlers::force_expire(
+            membership,
+            holder_holding,
+            clock_account,
+        ))
+    }
+
+    #[instruction]
     pub fn erase(
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
@@ -415,17 +410,21 @@ pub mod rln_registration {
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
         clock_account: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow_holding: AccountWithMetadata,
+        holder_holding: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
         subtree_id: u32,
     ) -> SpelResult {
-        let _ = id_commitment;
+        let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
         Ok(handlers::erase(
             config,
             tree_main,
             membership,
             bottom_subtree,
             clock_account,
+            escrow_holding,
+            holder_holding,
             tree_id,
             subtree_id,
         ))

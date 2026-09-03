@@ -22,14 +22,12 @@ pub fn derive_config_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> Acco
     derive_pda(program_id, &[&label_seed("config"), tree_id])
 }
 
-/// Credit (receipt) token definition: `seeds = [literal("receipt"), arg("tree_id")]`.
-pub fn derive_credit_token_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
-    derive_pda(program_id, &[&label_seed("receipt"), tree_id])
-}
-
-/// Credit supply holder: `seeds = [literal("supply"), arg("tree_id")]`.
-pub fn derive_credit_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
-    derive_pda(program_id, &[&label_seed("supply"), tree_id])
+/// Deposit escrow holding: `seeds = [literal("escrow"), arg("tree_id")]`.
+///
+/// Holds every membership's deposit for this tree. Created implicitly by the
+/// first `Register`'s chained transfer, never by an initializer.
+pub fn derive_escrow_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("escrow"), tree_id])
 }
 
 /// Payment token definition (faucet deployments): `seeds = [literal("payment"), arg("tree_id")]`.
@@ -104,8 +102,7 @@ mod tests {
         let t = tree_id_a();
         let config = derive_config_account(&p, &t);
         let main = derive_tree_main_account(&p, &t);
-        let credit = derive_credit_token_account(&p, &t);
-        let supply = derive_credit_supply_account(&p, &t);
+        let escrow = derive_escrow_account(&p, &t);
         let payment = derive_payment_token_account(&p, &t);
         let payment_supply = derive_payment_supply_account(&p, &t);
         let subtree = derive_subtree_account(&p, &t, 0);
@@ -113,8 +110,7 @@ mod tests {
         let all = [
             &config,
             &main,
-            &credit,
-            &supply,
+            &escrow,
             &payment,
             &payment_supply,
             &subtree,

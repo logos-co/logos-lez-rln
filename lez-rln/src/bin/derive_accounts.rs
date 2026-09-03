@@ -9,8 +9,7 @@
 
 use logos_lez_rln::rln::{
     client::{load_programs, tree_id_from_env},
-    derive_config_account, derive_credit_supply_account, derive_credit_token_account,
-    derive_tree_main_account,
+    derive_config_account, derive_escrow_account, derive_tree_main_account,
 };
 use nssa_core::program::ProgramId;
 
@@ -25,12 +24,11 @@ fn main() {
     let reg_id = registration.id();
     let merkle_id = merkle.id();
     println!(
-        "{{\"registration_program_id\":\"{}\",\"merkle_program_id\":\"{}\",\"config_account\":\"{}\",\"tree_main_account\":\"{}\",\"credit_token_account\":\"{}\",\"credit_supply_account\":\"{}\"}}",
+        "{{\"registration_program_id\":\"{}\",\"merkle_program_id\":\"{}\",\"config_account\":\"{}\",\"tree_main_account\":\"{}\",\"escrow_account\":\"{}\"}}",
         hex32(&reg_id),
         hex32(&merkle_id),
         derive_config_account(&reg_id, &tree_id),
         derive_tree_main_account(&reg_id, &tree_id),
-        derive_credit_token_account(&reg_id, &tree_id),
-        derive_credit_supply_account(&reg_id, &tree_id),
+        derive_escrow_account(&reg_id, &tree_id),
     );
 }

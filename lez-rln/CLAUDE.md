@@ -65,17 +65,16 @@ program that owns accounts, give it one.
 The same rule the token-holding convention below states, generalized: a
 `ChainedCall::program_id` must be read from `config_state`, because these
 handlers attach `pda_seeds` that authorize the callee to claim the
-registration program's own PDAs (`main`, `receipt`, `supply`, `payment`,
+registration program's own PDAs (`main`, `escrow`, `payment`,
 `payment_supply`). A caller-named program id would be handed those seeds.
 
-`InitializeMerkleTree` / `InitializeCreditToken` / `InitializePaymentToken`
-originally took `merkle_program_id` / `token_program_id` as instruction args
-and never loaded config. They now declare the config PDA and read the target
+`InitializeMerkleTree` / `InitializePaymentToken` originally took
+`merkle_program_id` / `token_program_id` as instruction args and never loaded
+config. They now declare the config PDA and read the target
 from it via `require_config` (which also binds `tree_id`), and the args are
 gone from `rln_layouts::Instruction` entirely — the wire cannot express the
-attack. This makes config a prerequisite for those three instructions, which
-is satisfied because `Initialize` runs first (it only reads
-`credit_token.account_id`, never its contents). Regression:
+attack. This makes config a prerequisite for those instructions, which is satisfied
+because `Initialize` runs first. Regression:
 `test_init_merkle_uses_config_program_not_caller_arg`.
 
 ## A declared plain-wallet account breaks the program on its second use
@@ -103,29 +102,73 @@ skipped from then on. Only a plain wallet that has already transacted is
 permanently unusable as a claim destination.
 
 ## Renewal is priced, not permissioned
-`extend` deliberately does not check caller identity — `MembershipState`
-records no owner, and a third party paying for someone's renewal is
-harmless. The griefing vector was that renewal was FREE: `erase` reclaims a
-membership's `rate_limit` only once it expires, so anyone could keep
-abandoned memberships alive one cheap tx per grace window and pin
-`current_total_rate_limit` at `max_total_rate_limit`, blocking all new
-registrations. `extend` now charges `rate_limit * price_per_unit` — the same
-as registering — which also gives `active_duration` economic force. Both
-payment accounts are token-owned, so this is rule-7 safe.
+`extend` deliberately does not check caller identity — a third party paying
+for someone's renewal is harmless. FREE renewal is not: `erase` reclaims a
+membership's `rate_limit` only once it expires, so anyone could keep abandoned
+memberships alive one cheap tx per grace window and pin
+`current_total_rate_limit` at `max_total_rate_limit`. Hence the non-refundable
+`rate_limit * price_per_unit` to treasury. Both payment accounts are
+token-owned, so this is rule-7 safe.
+
+With a REFUNDABLE deposit, that same permissionless renewal also freezes a
+stranger's funds. `force_expire` is the counterweight: the holder pulls
+`grace_period_start` forward via `min` (never postponing expiry) and sets
+`exiting`, which `extend` refuses. It does NOT release the deposit — the leaf
+stays in the tree until `erase`, so the wind-down window is also the interval
+in which `slash` can still burn it. Releasing on request would let a spammer
+register, spam, and withdraw before anyone reconstructed their secret.
+
+## A chained call's pre-state must match the previous call's output
+`ValidatedStateDiff` threads a `state_diff` across the call chain and checks
+every chained call's declared `pre_states` against it
+(`validated_state_diff/mod.rs:143-152`, `InconsistentAccountPreState`), so
+touching one account in two chained calls means computing what the first did
+to it. Fine for a balance: `register_replacing` credits then debits the escrow,
+and `escrow_after_credit` patches 16 bytes at
+`TokenHoldingLayout::BALANCE_OFFSET`. Impossible for a merkle root without
+duplicating the merkle guest — which is why replacing a membership is ONE
+`MerkleOpcode::Replace` (overwrite in place), not Remove-then-Insert, and why
+the new leaf lands on the displaced one's index. Index reuse is a consequence,
+not the goal.
+
+Any future instruction wanting two merkle ops in one tx therefore needs an
+opcode doing both internally, within one 32M-cycle execution.
+`merkle_replace_cycles_under_budget` measures it: Replace 18.76M (55.9%),
+essentially Insert.
+
+## Any source line shift changes the program id
+Guest builds are reproducible — identical source gives a byte-identical `.bin`
+— but they are line-sensitive: adding a single blank line to
+`methods/guest/src/merkle_tree.rs` changes the stripped `.bin` and therefore
+the program id (measured 2026-09-03, `08e29a49…` -> `92dccba2…`). Panic
+`Location` metadata embeds file:line, so a comment edit that shifts following
+lines is not a no-op to the artifact.
+
+Consequences: reformatting or re-commenting a guest invalidates every
+deployment of it (`verify.sh` on the profile starts failing, and the merkle
+program id recorded in a live config no longer resolves), and a doc-only commit
+still needs a redeploy before its profile is usable. Batch comment churn ahead
+of provisioning, not after.
 
 ## Testnet operations
 
 - A program-deploy tx larger than the sequencer's max_block_size is deferred
   in the mempool FOREVER with zero client feedback (submission returns a
-  hash; the tx never includes). Measured on testnet 2026-08-05: the ~266KB
-  merkle deploy included, the ~459KB registration deploy never did — the
-  operative cap sits somewhere between, while local debug configs allow
-  1 MiB, so local provisioning hides the problem. Downstream symptom: the
-  one-shot InitializeConfig then fails the execution check ("program
-  missing", visible only in the sequencer's own log) and is silently left
-  out of the block, so run_setup times out waiting for the config account.
-  Check the deploy landed (scan recent blocks for a ~600KB base64 getBlock
-  result) before believing any InitializeConfig diagnosis.
+  hash; the tx never includes). Local debug configs allow 1 MiB, so local
+  provisioning hides the problem entirely. Downstream symptom: the one-shot
+  InitializeConfig then fails the execution check ("program missing",
+  visible only in the sequencer's own log) and is silently left out of the
+  block, so run_setup times out waiting for the config account.
+  Measured deploys: ~266 KB ✓ and ~459 KB ✗ (2026-08-05), 404,720 B ✓
+  (2026-08-13), 415,080 B ✓ (2026-09-02, profile
+  `testnet-replace-on-register`). Cap is >415,080 and <=~459,000 — NOT the
+  512,000 B `wait_for_block_seal`'s doc still asserts.
+  DO NOT believe run_setup's diagnosis either way; it cannot tell "never
+  included" from "still confirming". Decide from chain state: `getAccount` on
+  the config PDA (`derive_accounts` prints it). Data there proves the deploy
+  landed — InitializeConfig cannot execute against a missing program — and its
+  LENGTH identifies the live ConfigState layout (264 B current).
+  `getTransaction` returns null even on success, so it proves nothing.
 - register_member's "Timeout waiting for leaf N" panic is often a FALSE
   negative: `wait_for_leaf` polls a hardcoded 30 × 500 ms
   (register_member.rs:66) and testnet confirmation regularly exceeds 15 s.

@@ -12,7 +12,7 @@ deployments/<name>/
   storage.json      # the wallet (holds payment/supply/token/treasury keypairs)
 ```
 
-`tree_id` is the single source of truth: `config`/`tree_main`/`credit_*` are **derived**
+`tree_id` is the single source of truth: `config`/`tree_main`/`escrow` are **derived**
 PDAs of `(registration_program_id, tree_id)`; `payment`/`supply` are **pointers into the
 wallet**. Nothing to keep in sync by hand — and a stale `config` can't silently disagree
 with the tree. All scripts are bash+jq (no Python) so they run in-sim and in image builds.
