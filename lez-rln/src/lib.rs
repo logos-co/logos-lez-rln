@@ -8,6 +8,7 @@
 
 pub mod fr_bytes;
 pub mod merkle_tree;
+pub mod proof_circuit;
 pub mod rln;
 pub mod spel_seeds;
 

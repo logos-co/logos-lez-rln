@@ -11,21 +11,35 @@
 //! - `3`: Set - Set a leaf at a specific index (for index reuse, must be zeroed first)
 
 use logos_lez_rln_guest::merkle_tree::{initialize_tree, insert_leaf, remove_leaf, set_leaf};
-use nssa_core::program::{ProgramInput, ProgramOutput, read_lee_inputs as read_nssa_inputs};
+use nssa_core::{
+    account::BalanceDiff,
+    program::{
+        AccountStateDiff, ProgramCall, ProgramInput, ProgramOutput, read_lee_call,
+        respond_unsupported_call,
+    },
+};
 use rln_layouts::MerkleOpcode;
 
 type Instruction = Vec<u8>;
 
 fn main() {
+    let call = read_lee_call::<Instruction>();
     let (
         ProgramInput {
-            self_program_id,
-            caller_program_id,
+            self_account_id,
+            caller_account_id,
             pre_states,
             instruction,
         },
-        instruction_words,
-    ) = read_nssa_inputs::<Instruction>();
+        instruction_data,
+    ) = match call {
+        ProgramCall::Execute(input, data) => (input, data),
+        // ProgramCall is #[non_exhaustive], so a wildcard is required; naming
+        // Unsupported alongside it is what keeps clippy::wildcard_enum_match_arm
+        // satisfied, and makes a future variant visible here rather than silently
+        // absorbed.
+        other @ ProgramCall::Unsupported(..) | other => respond_unsupported_call(other),
+    };
 
     let opcode = MerkleOpcode::from_u8(instruction[0]).expect("Invalid instruction type");
     let post_states = match opcode {
@@ -38,12 +52,27 @@ fn main() {
         MerkleOpcode::Set => set_leaf(pre_states.clone(), &instruction[1..]),
     };
 
+    // Each handler returns one post-account per declared account, in the same
+    // order, so the two zip cleanly. The tree only ever rewrites data, never
+    // balances, hence the zero balance delta throughout.
+    assert_eq!(
+        pre_states.len(),
+        post_states.len(),
+        "merkle handler returned {} accounts for {} declared",
+        post_states.len(),
+        pre_states.len(),
+    );
+    let state_diffs: Vec<AccountStateDiff> = pre_states
+        .into_iter()
+        .zip(post_states)
+        .map(|(pre, post)| AccountStateDiff::new(pre, BalanceDiff::Add(0), post.data))
+        .collect();
+
     ProgramOutput::new(
-        self_program_id,
-        caller_program_id,
-        instruction_words,
-        pre_states,
-        post_states,
+        self_account_id,
+        caller_account_id,
+        instruction_data,
+        state_diffs,
     )
     .write();
 }
