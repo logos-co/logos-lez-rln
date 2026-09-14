@@ -34,15 +34,24 @@ mod tests {
 
     use crate::rln::{derive_config_account, derive_credit_token_account};
 
-    /// The sequencer's per-execution session limit (lee `program/mod.rs`:
-    /// `MAX_NUM_CYCLES_PUBLIC_EXECUTION`). An execution over this is dropped
-    /// from the block with the reason only in the sequencer's own log.
+    /// risc0's per-execution session limit. Still the ceiling a single guest
+    /// may not cross, but no longer the binding one — see `MAX_GAS_EXEC`.
     const SESSION_LIMIT: u64 = 1 << 25; // 33,554,432
 
-    /// Early-warning budget, deliberately below the hard `SESSION_LIMIT` so a
-    /// regression that inflates cycles is caught with margin to react before it
-    /// starts dropping transactions in production.
-    const CYCLE_BUDGET: u64 = 25_000_000;
+    /// What actually rejects a transaction (`fee_core::market::MAX_GAS_EXEC`).
+    ///
+    /// v0.2.5 meters a charged transaction by its declared `gas_limit` at one
+    /// gas per cycle and refuses to include one that declares more than this,
+    /// in any block. It is a *transaction* budget, so it covers every guest in
+    /// a chained call together — which is why the number that decides the tree
+    /// depth is measured in `state_tests`, over a whole register transaction,
+    /// not here over one guest.
+    const MAX_GAS_EXEC: u64 = 10_000_000;
+
+    /// Early-warning budget, deliberately below `MAX_GAS_EXEC` so a regression
+    /// that inflates cycles is caught with margin to react, rather than when
+    /// transactions start being refused.
+    const CYCLE_BUDGET: u64 = 9_000_000;
 
     /// Arbitrary tree id — the merkle guest reads its pre-states positionally
     /// and never checks account ids, so this only needs to be stable.
@@ -62,10 +71,11 @@ mod tests {
         Program::new(bytes.into()).ok()
     }
 
-    /// Mirror lee `Program::execute` exactly: write the four LEE inputs in the
-    /// order `read_lee_inputs` expects, run the executor under the production
-    /// session limit, and return `(user_cycles, decoded_output)`. An execution
-    /// that exceeds `SESSION_LIMIT` fails here just as it would on-chain.
+    /// Mirror lee `Program::execute` exactly: write the two length-prefixed
+    /// borsh frames `read_lee_call` expects, run the executor under the
+    /// production session limit, and return `(user_cycles, decoded_output)`. An
+    /// execution that exceeds `SESSION_LIMIT` fails here just as it would
+    /// on-chain.
     fn run(
         program: &Program,
         pre_states: Vec<AccountWithMetadata>,
@@ -73,24 +83,29 @@ mod tests {
     ) -> (u64, ProgramOutput) {
         let instruction_data =
             Program::serialize_instruction(instruction).expect("serialize instruction");
-        let caller_program_id: Option<[u32; 8]> = None;
+        let envelope: nssa_core::program::ProgramInput<nssa_core::program::InstructionData> =
+            nssa_core::program::ProgramInput {
+                self_account_id: crate::spel_seeds::program_account(&program.id()),
+                caller_account_id: None,
+                pre_states,
+                instruction: instruction_data,
+            };
 
         let mut env_builder = ExecutorEnv::builder();
         env_builder.session_limit(Some(SESSION_LIMIT));
-        env_builder.write(&program.id()).expect("write program_id");
-        env_builder
-            .write(&caller_program_id)
-            .expect("write caller_program_id");
-        env_builder.write(&pre_states).expect("write pre_states");
-        env_builder
-            .write(&instruction_data)
-            .expect("write instruction_data");
+        env_builder.write_slice(&nssa_core::to_borsh_frame(
+            &nssa_core::program::CallKind::Execute,
+        ));
+        env_builder.write_slice(&nssa_core::to_borsh_frame(&envelope));
         let env = env_builder.build().expect("build executor env");
 
         let session = default_executor()
             .execute(env, program.elf())
             .expect("guest execution trapped or exceeded the 2^25-cycle session limit");
-        let output: ProgramOutput = session.journal.decode().expect("decode ProgramOutput");
+        // The guest commits a framed borsh payload, not risc0-serde.
+        let payload = nssa_core::from_frame(session.journal.as_ref())
+            .expect("journal must be a length-prefixed frame");
+        let output: ProgramOutput = borsh::from_slice(payload).expect("decode ProgramOutput");
         (session.cycles(), output)
     }
 
@@ -101,7 +116,10 @@ mod tests {
         AccountWithMetadata {
             account: Account::default(),
             is_authorized: true,
-            account_id: derive_config_account(&program.id(), &TREE_ID),
+            account_id: derive_config_account(
+                &crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+            ),
         }
     }
 
@@ -117,13 +135,13 @@ mod tests {
 
         let (cycles, _out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
         println!(
-            "merkle Initialize: {cycles} user cycles ({:.1}% of 2^25)",
-            cycles as f64 / SESSION_LIMIT as f64 * 100.0
+            "merkle Initialize: {cycles} user cycles ({:.1}% of MAX_GAS_EXEC)",
+            cycles as f64 / MAX_GAS_EXEC as f64 * 100.0
         );
         assert!(
             cycles < CYCLE_BUDGET,
             "merkle Initialize {cycles} cycles exceeds budget {CYCLE_BUDGET} \
-             (hard session cap 2^25 = {SESSION_LIMIT})"
+             (transactions are refused above MAX_GAS_EXEC = {MAX_GAS_EXEC})"
         );
     }
 
@@ -233,7 +251,7 @@ mod tests {
 
         // And it must still execute (the stripped kernel is what the sequencer runs).
         let (cycles, out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
-        assert_eq!(out.post_states.len(), 1, "Initialize yields one post-state");
+        assert_eq!(out.state_diffs.len(), 1, "Initialize yields one diff");
         println!("stripped-kernel Initialize executed: {cycles} cycles");
     }
 
@@ -246,18 +264,28 @@ mod tests {
 
         // Initialize first to obtain a live tree_main state to insert into.
         let (_init_cycles, init_out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
-        let main_initialized = init_out.post_states[0].account().clone();
+        let diff = init_out.state_diffs[0].clone();
+        let mut main_initialized = diff.pre_state.account;
+        if let Some(data) = diff.post_data {
+            main_initialized.data = data;
+        }
 
         let main_pre = AccountWithMetadata {
             account: main_initialized,
             is_authorized: true,
-            account_id: derive_config_account(&program.id(), &TREE_ID),
+            account_id: derive_config_account(
+                &crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+            ),
         };
         // Bottom subtree for leaf 0 — starts default; a distinct id from main.
         let subtree_pre = AccountWithMetadata {
             account: Account::default(),
             is_authorized: true,
-            account_id: derive_credit_token_account(&program.id(), &TREE_ID),
+            account_id: derive_credit_token_account(
+                &crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+            ),
         };
 
         // opcode 1 (insert) || expected_index=0 (u64 LE) || leaf (valid BN254 fe).
@@ -269,13 +297,13 @@ mod tests {
 
         let (cycles, _out) = run(&program, vec![main_pre, subtree_pre], instruction);
         println!(
-            "merkle Insert: {cycles} user cycles ({:.1}% of 2^25)",
-            cycles as f64 / SESSION_LIMIT as f64 * 100.0
+            "merkle Insert: {cycles} user cycles ({:.1}% of MAX_GAS_EXEC)",
+            cycles as f64 / MAX_GAS_EXEC as f64 * 100.0
         );
         assert!(
             cycles < CYCLE_BUDGET,
             "merkle Insert {cycles} cycles exceeds budget {CYCLE_BUDGET} \
-             (hard session cap 2^25 = {SESSION_LIMIT})"
+             (transactions are refused above MAX_GAS_EXEC = {MAX_GAS_EXEC})"
         );
     }
 }

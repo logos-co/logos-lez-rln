@@ -9,8 +9,8 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use nssa_core::{
-    account::AccountWithMetadata,
-    program::{AccountPostState, ChainedCall, Claim, PdaSeed},
+    account::{AccountId, AccountWithMetadata},
+    program::{ChainedCall, PdaSeed},
 };
 use rln_layouts::{
     MerkleOpcode, SUBTREE_LEAVES, combine_seeds, is_expired, is_in_grace_period, label_seed,
@@ -30,10 +30,6 @@ use crate::{
 type Output = SpelOutput;
 
 // ─── seed helpers ──────────────────────────────────────────────────────
-
-fn config_seed(tree_id: &[u8; 32]) -> [u8; 32] {
-    combine_seeds(&[&label_seed("config"), tree_id])
-}
 
 fn receipt_seed(tree_id: &[u8; 32]) -> [u8; 32] {
     combine_seeds(&[&label_seed("receipt"), tree_id])
@@ -57,16 +53,6 @@ fn main_seed(tree_id: &[u8; 32]) -> [u8; 32] {
 
 fn subtree_seed(tree_id: &[u8; 32], subtree_id: u32) -> [u8; 32] {
     combine_seeds(&[&label_seed("subtree"), tree_id, &u32_seed(subtree_id)])
-}
-
-fn membership_seed(tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> [u8; 32] {
-    combine_seeds(&[&label_seed("membership"), tree_id, id_commitment])
-}
-
-fn authorized(account: &AccountWithMetadata) -> AccountWithMetadata {
-    let mut a = account.clone();
-    a.is_authorized = true;
-    a
 }
 
 fn merkle_payload_insert(next_index: u64, leaf_value: &[u8; 32]) -> Vec<u8> {
@@ -93,9 +79,9 @@ fn merkle_chained_call(
     payload: Vec<u8>,
 ) -> ChainedCall {
     ChainedCall {
-        program_id: bytemuck::cast(merkle_program_id),
-        pre_states: vec![authorized(tree_main), authorized(bottom_subtree)],
-        instruction_data: risc0_zkvm::serde::to_vec(&payload).expect("serialize merkle payload"),
+        program_account_id: AccountId::new(merkle_program_id),
+        pre_state_ids: vec![tree_main.account_id, bottom_subtree.account_id],
+        instruction_data: borsh::to_vec(&payload).expect("serialize merkle payload"),
         pda_seeds: vec![
             PdaSeed::new(main_seed(tree_id)),
             PdaSeed::new(subtree_seed(tree_id, subtree_id)),
@@ -198,10 +184,7 @@ pub fn initialize(
     };
     write_borsh(&mut config, &config_state, "ConfigState");
 
-    let states = vec![AccountPostState::new_claimed_if_default(
-        config.account,
-        Claim::Pda(PdaSeed::new(config_seed(&tree_id))),
-    )];
+    let states = vec![config.account];
     SpelOutput::execute(states, vec![])
 }
 
@@ -213,8 +196,8 @@ pub fn initialize_credit_token(
 ) -> Output {
     let config_state = require_config(&config, &tree_id);
     let token_create = ChainedCall::new(
-        bytemuck::cast(config_state.token_program_id),
-        vec![authorized(&credit_token), authorized(&credit_supply)],
+        AccountId::new(config_state.token_program_id),
+        vec![credit_token.account_id, credit_supply.account_id],
         &token_core::Instruction::NewFungibleDefinition {
             name: "RLNREC".to_string(),
             total_supply: 0,
@@ -225,11 +208,7 @@ pub fn initialize_credit_token(
         PdaSeed::new(supply_seed(&tree_id)),
     ]);
 
-    let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(credit_token.account),
-        AccountPostState::new(credit_supply.account),
-    ];
+    let states = vec![config.account, credit_token.account, credit_supply.account];
     SpelOutput::execute(states, vec![token_create])
 }
 
@@ -241,8 +220,8 @@ pub fn initialize_payment_token(
 ) -> Output {
     let config_state = require_config(&config, &tree_id);
     let token_create = ChainedCall::new(
-        bytemuck::cast(config_state.token_program_id),
-        vec![authorized(&payment_token), authorized(&payment_supply)],
+        AccountId::new(config_state.token_program_id),
+        vec![payment_token.account_id, payment_supply.account_id],
         &token_core::Instruction::NewFungibleDefinition {
             name: "RLNTOK".to_string(),
             total_supply: 0,
@@ -254,9 +233,9 @@ pub fn initialize_payment_token(
     ]);
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(payment_token.account),
-        AccountPostState::new(payment_supply.account),
+        config.account,
+        payment_token.account,
+        payment_supply.account,
     ];
     SpelOutput::execute(states, vec![token_create])
 }
@@ -296,8 +275,8 @@ pub fn claim_tokens(
     // deployments. The destination arrives tx-signed (fresh holdings are
     // claimed Claim::Authorized by the token program).
     let mint = ChainedCall::new(
-        bytemuck::cast(config_state.token_program_id),
-        vec![authorized(&payment_token_def), dest_holding.clone()],
+        AccountId::new(config_state.token_program_id),
+        vec![payment_token_def.account_id, dest_holding.account_id],
         &token_core::Instruction::Mint {
             amount_to_mint: amount,
         },
@@ -305,9 +284,9 @@ pub fn claim_tokens(
     .with_pda_seeds(vec![PdaSeed::new(payment_seed(&tree_id))]);
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(payment_token_def.account),
-        AccountPostState::new(dest_holding.account),
+        config.account,
+        payment_token_def.account,
+        dest_holding.account,
     ];
     SpelOutput::execute(states, vec![mint])
 }
@@ -319,17 +298,14 @@ pub fn initialize_merkle_tree(
 ) -> Output {
     let config_state = require_config(&config, &tree_id);
     let merkle_init = ChainedCall {
-        program_id: bytemuck::cast(config_state.merkle_program_id),
-        pre_states: vec![authorized(&tree_main)],
-        instruction_data: risc0_zkvm::serde::to_vec(&vec![MerkleOpcode::Initialize as u8])
+        program_account_id: AccountId::new(config_state.merkle_program_id),
+        pre_state_ids: vec![tree_main.account_id],
+        instruction_data: borsh::to_vec(&vec![MerkleOpcode::Initialize as u8])
             .expect("serialize merkle init"),
         pda_seeds: vec![PdaSeed::new(main_seed(&tree_id))],
     };
 
-    let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(tree_main.account),
-    ];
+    let states = vec![config.account, tree_main.account];
     SpelOutput::execute(states, vec![merkle_init])
 }
 
@@ -380,7 +356,7 @@ pub fn register(
     // The holding's self-reported data is attacker-controllable; only the
     // owning program is not. Require it to be the configured token program so
     // the payment can't be routed to an attacker's no-op program.
-    let user_holding_owner: [u8; 32] = bytemuck::cast(user_holding.account.program_owner);
+    let user_holding_owner: [u8; 32] = *user_holding.account.program_owner.value();
     assert_eq!(
         user_holding_owner, config_state.token_program_id,
         "Payment holding not owned by the configured token program"
@@ -417,8 +393,8 @@ pub fn register(
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     let token_transfer = ChainedCall::new(
-        bytemuck::cast(config_state.token_program_id),
-        vec![authorized(&user_holding), treasury_holding.clone()],
+        AccountId::new(config_state.token_program_id),
+        vec![user_holding.account_id, treasury_holding.account_id],
         &token_core::Instruction::Transfer {
             amount_to_transfer: payment_amount,
         },
@@ -434,16 +410,13 @@ pub fn register(
     );
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(tree_main.account),
-        AccountPostState::new(user_holding.account),
-        AccountPostState::new(treasury_holding.account),
-        AccountPostState::new(bottom_subtree.account),
-        AccountPostState::new(clock_account.account),
-        AccountPostState::new_claimed_if_default(
-            membership.account,
-            Claim::Pda(PdaSeed::new(membership_seed(&tree_id, &id_commitment))),
-        ),
+        config.account,
+        tree_main.account,
+        user_holding.account,
+        treasury_holding.account,
+        bottom_subtree.account,
+        clock_account.account,
+        membership.account,
     ];
     SpelOutput::execute(states, vec![token_transfer, merkle_insert])
 }
@@ -495,7 +468,7 @@ pub fn register_free(
     // misconfiguration fails here, loudly, instead of after the fact.
     assert_ne!(
         registrar.account.program_owner,
-        nssa_core::program::DEFAULT_PROGRAM_ID,
+        nssa_core::program::DEFAULT_PROGRAM_OWNER,
         "Registrar must be a program-owned account, not a plain wallet"
     );
     assert!(
@@ -542,15 +515,12 @@ pub fn register_free(
     );
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(tree_main.account),
-        AccountPostState::new(registrar.account),
-        AccountPostState::new(bottom_subtree.account),
-        AccountPostState::new(clock_account.account),
-        AccountPostState::new_claimed_if_default(
-            membership.account,
-            Claim::Pda(PdaSeed::new(membership_seed(&tree_id, &id_commitment))),
-        ),
+        config.account,
+        tree_main.account,
+        registrar.account,
+        bottom_subtree.account,
+        clock_account.account,
+        membership.account,
     ];
     SpelOutput::execute(states, vec![merkle_insert])
 }
@@ -604,23 +574,22 @@ pub fn buy_credits(
     // The holding's owner is the only field an attacker can't forge; require it
     // to be the configured token program and dispatch to that trusted id, not
     // to whatever program the holding claims to belong to.
-    let payment_holding_owner: [u8; 32] =
-        bytemuck::cast(user_payment_holding.account.program_owner);
+    let payment_holding_owner: [u8; 32] = *user_payment_holding.account.program_owner.value();
     assert_eq!(
         payment_holding_owner, config_state.token_program_id,
         "Payment holding not owned by the configured token program"
     );
-    let token_program_id = bytemuck::cast(config_state.token_program_id);
+    let token_program_id = AccountId::new(config_state.token_program_id);
     let transfer = ChainedCall::new(
         token_program_id,
-        vec![authorized(&user_payment_holding), treasury_holding.clone()],
+        vec![user_payment_holding.account_id, treasury_holding.account_id],
         &token_core::Instruction::Transfer {
             amount_to_transfer: payment_amount,
         },
     );
     let mint = ChainedCall::new(
         token_program_id,
-        vec![authorized(&credit_token_def), user_credit_holding.clone()],
+        vec![credit_token_def.account_id, user_credit_holding.account_id],
         &token_core::Instruction::Mint {
             amount_to_mint: amount,
         },
@@ -628,11 +597,11 @@ pub fn buy_credits(
     .with_pda_seeds(vec![PdaSeed::new(receipt_seed(&tree_id))]);
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(credit_token_def.account),
-        AccountPostState::new(user_payment_holding.account),
-        AccountPostState::new(treasury_holding.account),
-        AccountPostState::new(user_credit_holding.account),
+        config.account,
+        credit_token_def.account,
+        user_payment_holding.account,
+        treasury_holding.account,
+        user_credit_holding.account,
     ];
     SpelOutput::execute(states, vec![transfer, mint])
 }
@@ -695,7 +664,7 @@ pub fn register_with_credits(
 
     // Only the owning program is unforgeable; require it to be the configured
     // token program so the burn can't be dispatched to an attacker's no-op.
-    let credit_holding_owner: [u8; 32] = bytemuck::cast(user_credit_holding.account.program_owner);
+    let credit_holding_owner: [u8; 32] = *user_credit_holding.account.program_owner.value();
     assert_eq!(
         credit_holding_owner, config_state.token_program_id,
         "Credit holding not owned by the configured token program"
@@ -726,8 +695,8 @@ pub fn register_with_credits(
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     let burn = ChainedCall::new(
-        bytemuck::cast(config_state.token_program_id),
-        vec![credit_token_def.clone(), authorized(&user_credit_holding)],
+        AccountId::new(config_state.token_program_id),
+        vec![credit_token_def.account_id, user_credit_holding.account_id],
         &token_core::Instruction::Burn {
             amount_to_burn: rate_limit as u128,
         },
@@ -742,16 +711,13 @@ pub fn register_with_credits(
     );
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(credit_token_def.account),
-        AccountPostState::new(tree_main.account),
-        AccountPostState::new(user_credit_holding.account),
-        AccountPostState::new(bottom_subtree.account),
-        AccountPostState::new(clock_account.account),
-        AccountPostState::new_claimed_if_default(
-            membership.account,
-            Claim::Pda(PdaSeed::new(membership_seed(&tree_id, &id_commitment))),
-        ),
+        config.account,
+        credit_token_def.account,
+        tree_main.account,
+        user_credit_holding.account,
+        bottom_subtree.account,
+        clock_account.account,
+        membership.account,
     ];
     SpelOutput::execute(states, vec![burn, merkle_insert])
 }
@@ -816,10 +782,10 @@ pub fn slash(
     );
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(tree_main.account),
-        AccountPostState::new(membership.account),
-        AccountPostState::new(bottom_subtree.account),
+        config.account,
+        tree_main.account,
+        membership.account,
+        bottom_subtree.account,
     ];
     SpelOutput::execute(states, vec![merkle_remove])
 }
@@ -886,7 +852,7 @@ pub fn extend(
 
     // Same reasoning as `register`: holding data is attacker-controllable, the
     // owning program is not.
-    let payer_holding_owner: [u8; 32] = bytemuck::cast(payer_holding.account.program_owner);
+    let payer_holding_owner: [u8; 32] = *payer_holding.account.program_owner.value();
     assert_eq!(
         payer_holding_owner, config_state.token_program_id,
         "Payment holding not owned by the configured token program"
@@ -905,19 +871,19 @@ pub fn extend(
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     let token_transfer = ChainedCall::new(
-        bytemuck::cast(config_state.token_program_id),
-        vec![authorized(&payer_holding), treasury_holding.clone()],
+        AccountId::new(config_state.token_program_id),
+        vec![payer_holding.account_id, treasury_holding.account_id],
         &token_core::Instruction::Transfer {
             amount_to_transfer: payment_amount,
         },
     );
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(membership.account),
-        AccountPostState::new(payer_holding.account),
-        AccountPostState::new(treasury_holding.account),
-        AccountPostState::new(clock_account.account),
+        config.account,
+        membership.account,
+        payer_holding.account,
+        treasury_holding.account,
+        clock_account.account,
     ];
     SpelOutput::execute(states, vec![token_transfer])
 }
@@ -981,11 +947,11 @@ pub fn erase(
     );
 
     let states = vec![
-        AccountPostState::new(config.account),
-        AccountPostState::new(tree_main.account),
-        AccountPostState::new(membership.account),
-        AccountPostState::new(bottom_subtree.account),
-        AccountPostState::new(clock_account.account),
+        config.account,
+        tree_main.account,
+        membership.account,
+        bottom_subtree.account,
+        clock_account.account,
     ];
     SpelOutput::execute(states, vec![merkle_remove])
 }

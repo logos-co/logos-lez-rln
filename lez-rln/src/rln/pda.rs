@@ -5,7 +5,6 @@
 //! little-endian in the first 4 bytes, 32-byte args pass through.
 
 use nssa::AccountId;
-use nssa_core::program::ProgramId;
 
 // The tree main and subtree PDAs sit under the registration program's id (the
 // merkle program never owns its own data accounts), but their canonical
@@ -18,34 +17,34 @@ pub use crate::merkle_tree::{
 pub use crate::spel_seeds::{combine_seeds, derive_pda, label_seed, u32_seed};
 
 /// Config account: `seeds = [literal("config"), arg("tree_id")]`.
-pub fn derive_config_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+pub fn derive_config_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
     derive_pda(program_id, &[&label_seed("config"), tree_id])
 }
 
 /// Credit (receipt) token definition: `seeds = [literal("receipt"), arg("tree_id")]`.
-pub fn derive_credit_token_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+pub fn derive_credit_token_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
     derive_pda(program_id, &[&label_seed("receipt"), tree_id])
 }
 
 /// Credit supply holder: `seeds = [literal("supply"), arg("tree_id")]`.
-pub fn derive_credit_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+pub fn derive_credit_supply_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
     derive_pda(program_id, &[&label_seed("supply"), tree_id])
 }
 
 /// Payment token definition (faucet deployments): `seeds = [literal("payment"), arg("tree_id")]`.
-pub fn derive_payment_token_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+pub fn derive_payment_token_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
     derive_pda(program_id, &[&label_seed("payment"), tree_id])
 }
 
 /// Payment token supply holder (faucet deployments): `seeds = [literal("payment_supply"),
 /// arg("tree_id")]`.
-pub fn derive_payment_supply_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+pub fn derive_payment_supply_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
     derive_pda(program_id, &[&label_seed("payment_supply"), tree_id])
 }
 
 /// Membership account: `seeds = [literal("membership"), arg("tree_id"), arg("id_commitment")]`.
 pub fn derive_membership_account(
-    program_id: &ProgramId,
+    program_id: &AccountId,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
 ) -> AccountId {
@@ -66,8 +65,8 @@ mod tests {
 
     use super::*;
 
-    fn mock_program_id() -> ProgramId {
-        bytemuck::cast([1u8; 32])
+    fn mock_program_id() -> AccountId {
+        AccountId::new([1u8; 32])
     }
 
     fn tree_id_a() -> [u8; 32] {

@@ -10,7 +10,7 @@ use logos_lez_rln::{
         register_identity, tree_id_from_env,
     },
 };
-use rln::prelude::{Fr, Hasher, PoseidonHash, RLNBuilder, RLNWitnessInput, hash_to_field_le};
+use rln::prelude::{Fr, Hasher, PoseidonHash, RLNWitnessInput, hash_to_field_le};
 
 const USER_FUNDING: u128 = 100_000_000;
 
@@ -47,7 +47,7 @@ async fn main() {
     } = create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
     println!(
         "  Identity commitment: {}",
-        hex::encode(&id_commitment_bytes)
+        hex::encode(id_commitment_bytes)
     );
 
     // Step 2: Register via the registration program
@@ -59,7 +59,6 @@ async fn main() {
         &id_commitment_bytes,
         &user_holding_id,
         USER_MESSAGE_LIMIT,
-        None,
     )
     .await;
     println!("  Registered at index: {}", leaf_index);
@@ -110,7 +109,7 @@ async fn main() {
         .build()
         .expect("Failed to create RLN witness");
 
-    let rln = RLNBuilder::stateless().build();
+    let rln = logos_lez_rln::proof_circuit::engine();
 
     let (rln_proof, proof_values) = rln
         .generate_proof(&witness)

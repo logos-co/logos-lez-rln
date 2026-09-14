@@ -28,7 +28,10 @@ async fn main() {
     let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
-    let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
+    let config_account_id = derive_config_account(
+        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
+        &tree_id,
+    );
 
     for i in 0..count {
         let user_holding_id = create_funded_user(
@@ -53,7 +56,6 @@ async fn main() {
             &id_commitment_bytes,
             &user_holding_id,
             USER_MESSAGE_LIMIT,
-            None,
         )
         .await;
 
@@ -89,10 +91,10 @@ async fn main() {
 fn parse_count() -> usize {
     let args: Vec<String> = std::env::args().collect();
     for i in 0..args.len() {
-        if args[i] == "--count" {
-            if let Some(n) = args.get(i + 1) {
-                return n.parse().expect("--count must be a positive integer");
-            }
+        if args[i] == "--count"
+            && let Some(n) = args.get(i + 1)
+        {
+            return n.parse().expect("--count must be a positive integer");
         }
     }
     1

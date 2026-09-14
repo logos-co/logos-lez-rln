@@ -8,12 +8,12 @@
 //! `init` constraints: `compute_pda(SHA-256(label || tree_id [|| subtree_id]))`.
 
 use nssa::AccountId;
-use nssa_core::program::{PdaSeed, ProgramId};
+use nssa_core::program::PdaSeed;
 
 use crate::spel_seeds::{combine_seeds, label_seed, u32_seed};
 
 /// Tree main account: `seeds = [literal("main"), arg("tree_id")]`.
-pub fn derive_main_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> AccountId {
+pub fn derive_main_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
     AccountId::for_public_pda(
         program_id,
         &PdaSeed::new(combine_seeds(&[&label_seed("main"), tree_id])),
@@ -22,7 +22,7 @@ pub fn derive_main_account(program_id: &ProgramId, tree_id: &[u8; 32]) -> Accoun
 
 /// Bottom subtree: `seeds = [literal("subtree"), arg("tree_id"), arg("subtree_id")]`.
 pub fn derive_subtree_account(
-    program_id: &ProgramId,
+    program_id: &AccountId,
     tree_id: &[u8; 32],
     subtree_id: u32,
 ) -> AccountId {
@@ -50,8 +50,8 @@ pub fn main_pda_seed(tree_id: &[u8; 32]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    fn mock_program_id() -> ProgramId {
-        bytemuck::cast([1u8; 32])
+    fn mock_program_id() -> AccountId {
+        AccountId::new([1u8; 32])
     }
 
     #[test]

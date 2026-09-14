@@ -41,7 +41,6 @@ mod tests {
     use nssa::{
         PrivateKey, PublicKey, PublicTransaction, V03State,
         program::Program,
-        program_deployment_transaction::{Message as DeployMessage, ProgramDeploymentTransaction},
         public_transaction::{Message, WitnessSet},
     };
     #[cfg(feature = "rc5-state-tests-privacy")]
@@ -53,7 +52,6 @@ mod tests {
     use nssa_core::{Commitment, NullifierPublicKey, NullifierSecretKey};
     #[cfg(feature = "rc5-state-tests-privacy")]
     use nssa_core::{EncryptedAccountData, InputAccountIdentity};
-    use programs;
     use token_core::{TokenDefinition, TokenHolding};
 
     use crate::rln::Instruction;
@@ -158,58 +156,36 @@ mod tests {
     // PDA Derivation Wrappers
     // ========================================================================
 
-    fn derive_tree_main_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-    ) -> AccountId {
+    fn derive_tree_main_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         derive_tree_main_account(&program_id, tree_id)
     }
 
-    fn derive_subtree_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-        subtree_id: u32,
-    ) -> AccountId {
+    fn derive_subtree_pda(program_id: AccountId, tree_id: &[u8; 32], subtree_id: u32) -> AccountId {
         derive_subtree_account(&program_id, tree_id, subtree_id)
     }
 
-    fn derive_config_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-    ) -> AccountId {
+    fn derive_config_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         derive_config_account(&program_id, tree_id)
     }
 
-    fn derive_credit_token_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-    ) -> AccountId {
+    fn derive_credit_token_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         derive_credit_token_account(&program_id, tree_id)
     }
 
-    fn derive_credit_supply_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-    ) -> AccountId {
+    fn derive_credit_supply_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         crate::rln::derive_credit_supply_account(&program_id, tree_id)
     }
 
-    fn derive_payment_token_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-    ) -> AccountId {
+    fn derive_payment_token_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         crate::rln::derive_payment_token_account(&program_id, tree_id)
     }
 
-    fn derive_payment_supply_pda(
-        program_id: nssa_core::program::ProgramId,
-        tree_id: &[u8; 32],
-    ) -> AccountId {
+    fn derive_payment_supply_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         crate::rln::derive_payment_supply_account(&program_id, tree_id)
     }
 
     fn derive_membership_pda(
-        program_id: nssa_core::program::ProgramId,
+        program_id: AccountId,
         tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> AccountId {
@@ -234,34 +210,26 @@ mod tests {
         // calls require, and seed the CLOCK_50 system account at the genesis
         // timestamp so the registration program's clock-reads succeed — both
         // were implicit in the rc5 genesis-accounts path.
-        let mut state = V03State::new().with_programs([programs::token(), programs::clock()]);
+        let mut state = V03State::new().with_programs([
+            programs::token(),
+            programs::clock(),
+            merkle_program.clone(),
+            registration_program.clone(),
+        ]);
         set_clock_50(&mut state, GENESIS_TIMESTAMP, 0);
-
-        // Deploy merkle tree program
-        let merkle_deploy_tx =
-            ProgramDeploymentTransaction::new(DeployMessage::new(merkle_bytecode));
-        state
-            .transition_from_program_deployment_transaction(&merkle_deploy_tx)
-            .ok()?;
-
-        // Deploy registration program
-        let registration_deploy_tx =
-            ProgramDeploymentTransaction::new(DeployMessage::new(registration_bytecode));
-        state
-            .transition_from_program_deployment_transaction(&registration_deploy_tx)
-            .ok()?;
 
         Some((state, merkle_program, registration_program))
     }
 
     /// Builds a public transaction for merkle tree initialization.
     fn build_merkle_init_tx(program: &Program, tree_id: &[u8; 32]) -> PublicTransaction {
-        let tree_main_id = derive_tree_main_pda(program.id(), tree_id);
+        let tree_main_id =
+            derive_tree_main_pda(crate::spel_seeds::program_account(&program.id()), tree_id);
         let instruction = vec![0u8]; // opcode 0 = init
 
         // PDA-only transaction: no nonces needed (accounts are program-derived)
         let message = Message::try_new(
-            program.id(),
+            crate::spel_seeds::program_account(&program.id()),
             vec![tree_main_id],
             vec![], // Empty nonces for PDA-only transactions
             instruction,
@@ -280,9 +248,14 @@ mod tests {
         expected_index: u64,
         leaf_value: [u8; 32],
     ) -> PublicTransaction {
-        let tree_main_id = derive_tree_main_pda(program.id(), tree_id);
+        let tree_main_id =
+            derive_tree_main_pda(crate::spel_seeds::program_account(&program.id()), tree_id);
         let sid = subtree_id_for_index(expected_index);
-        let subtree_id = derive_subtree_pda(program.id(), tree_id, sid);
+        let subtree_id = derive_subtree_pda(
+            crate::spel_seeds::program_account(&program.id()),
+            tree_id,
+            sid,
+        );
 
         let mut instruction = vec![1u8]; // opcode 1 = insert
         instruction.extend_from_slice(&expected_index.to_le_bytes());
@@ -290,7 +263,7 @@ mod tests {
 
         // PDA-only transaction: no nonces needed (accounts are program-derived)
         let message = Message::try_new(
-            program.id(),
+            crate::spel_seeds::program_account(&program.id()),
             vec![tree_main_id, subtree_id],
             vec![], // Empty nonces for PDA-only transactions
             instruction,
@@ -329,8 +302,16 @@ mod tests {
     #[test]
     fn test_subtree_pdas_vary_by_id() {
         if let Some(program) = load_merkle_tree_program() {
-            let subtree_0 = derive_subtree_pda(program.id(), &TREE_ID, 0);
-            let subtree_1 = derive_subtree_pda(program.id(), &TREE_ID, 1);
+            let subtree_0 = derive_subtree_pda(
+                crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+                0,
+            );
+            let subtree_1 = derive_subtree_pda(
+                crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+                1,
+            );
 
             assert!(
                 subtree_0 != subtree_1,
@@ -342,10 +323,19 @@ mod tests {
     #[test]
     fn test_all_registration_pdas_are_distinct() {
         if let Some(program) = load_rln_registration_program() {
-            let tree_main = derive_tree_main_pda(program.id(), &TREE_ID);
-            let config = derive_config_pda(program.id(), &TREE_ID);
-            let credit_token = derive_credit_token_pda(program.id(), &TREE_ID);
-            let subtree = derive_subtree_pda(program.id(), &TREE_ID, 0);
+            let tree_main =
+                derive_tree_main_pda(crate::spel_seeds::program_account(&program.id()), &TREE_ID);
+            let config =
+                derive_config_pda(crate::spel_seeds::program_account(&program.id()), &TREE_ID);
+            let credit_token = derive_credit_token_pda(
+                crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+            );
+            let subtree = derive_subtree_pda(
+                crate::spel_seeds::program_account(&program.id()),
+                &TREE_ID,
+                0,
+            );
 
             assert!(tree_main != config, "tree_main and config should differ");
             assert!(
@@ -501,7 +491,7 @@ mod tests {
 
     /// Serializes a token Transfer instruction for use with execute_and_prove.
     #[allow(dead_code)]
-    fn token_transfer_instruction_data(amount: u128) -> Vec<u32> {
+    fn token_transfer_instruction_data(amount: u128) -> Vec<u8> {
         let instruction = token_core::Instruction::Transfer {
             amount_to_transfer: amount,
         };
@@ -513,7 +503,7 @@ mod tests {
     #[allow(dead_code)]
     fn token_holding_account(definition_id: &AccountId, balance: u128) -> Account {
         Account {
-            program_owner: programs::token().id(),
+            program_owner: crate::spel_seeds::program_account(&programs::token().id()),
             balance: 0,
             nonce: Nonce(0),
             data: Data::try_from(create_token_holding_data(definition_id, balance)).unwrap(),
@@ -576,7 +566,7 @@ mod tests {
             .expect("Sender should have valid token holding");
         let definition_id = sender_holding.definition_id();
         let recipient_post = Account {
-            program_owner: programs::token().id(),
+            program_owner: crate::spel_seeds::program_account(&programs::token().id()),
             balance: 0,
             nonce: Nonce::private_account_nonce_init(&recipient_id),
             data: Data::try_from(create_token_holding_data(&definition_id, amount)).unwrap(),
@@ -671,7 +661,7 @@ mod tests {
             .unwrap(),
         };
         let recipient_post = Account {
-            program_owner: programs::token().id(),
+            program_owner: crate::spel_seeds::program_account(&programs::token().id()),
             balance: 0,
             nonce: Nonce::private_account_nonce_init(&recipient_id),
             data: Data::try_from(create_token_holding_data(&definition_id, amount)).unwrap(),
@@ -777,8 +767,14 @@ mod tests {
         price_per_unit: u128,
         state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account, Account) {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
         let payment_id = payment_keys.account_id(0);
         let credit_id = credit_keys.account_id(0);
 
@@ -824,7 +820,10 @@ mod tests {
 
         // Dependencies: the RLN program chains to the token program
         let mut dependencies = HashMap::new();
-        dependencies.insert(programs::token().id(), programs::token());
+        dependencies.insert(
+            crate::spel_seeds::program_account(&programs::token().id()),
+            programs::token(),
+        );
         let program_with_deps =
             ProgramWithDependencies::new(setup.registration.clone(), dependencies);
 
@@ -894,7 +893,7 @@ mod tests {
 
         // Credit token definition_id for the credit holding
         let credit_post = Account {
-            program_owner: programs::token().id(),
+            program_owner: crate::spel_seeds::program_account(&programs::token().id()),
             balance: 0,
             nonce: Nonce::private_account_nonce_init(&credit_id),
             data: Data::try_from(create_token_holding_data(&credit_token_id, amount)).unwrap(),
@@ -926,8 +925,8 @@ mod tests {
         };
 
         let message = Message::try_new(
-            programs::token().id(),
-            vec![definition_id.clone(), supply_holder_id.clone()],
+            crate::spel_seeds::program_account(&programs::token().id()),
+            vec![*definition_id, *supply_holder_id],
             vec![Nonce(0), Nonce(0)],
             instruction,
         )
@@ -960,8 +959,8 @@ mod tests {
         };
 
         let message = Message::try_new(
-            programs::token().id(),
-            vec![from_id.clone(), to_id.clone()],
+            crate::spel_seeds::program_account(&programs::token().id()),
+            vec![*from_id, *to_id],
             nonces,
             instruction,
         )
@@ -1064,16 +1063,28 @@ mod tests {
         free_quota: u64,
         faucet_claim_cap: u128,
     ) -> [PublicTransaction; 3] {
-        let config_id = derive_config_pda(registration.id(), tree_id);
-        let credit_token_id = derive_credit_token_pda(registration.id(), tree_id);
-        let credit_supply_id = derive_credit_supply_pda(registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
+        let credit_supply_id = derive_credit_supply_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
 
         let init_config = build_public_tx(
-            registration.id(),
-            vec![config_id.clone(), credit_token_id.clone()],
+            crate::spel_seeds::program_account(&registration.id()),
+            vec![config_id, credit_token_id],
             Instruction::Initialize {
-                merkle_program_id: bytemuck::cast(merkle.id()),
+                merkle_program_id: *crate::spel_seeds::program_account(&merkle.id()).value(),
                 tree_id: *tree_id,
                 payment_token_id: *payment_token_id.value(),
                 price_per_unit,
@@ -1089,13 +1100,13 @@ mod tests {
         );
 
         let init_credit_token = build_public_tx(
-            registration.id(),
-            vec![config_id.clone(), credit_token_id, credit_supply_id],
+            crate::spel_seeds::program_account(&registration.id()),
+            vec![config_id, credit_token_id, credit_supply_id],
             Instruction::InitializeCreditToken { tree_id: *tree_id },
         );
 
         let init_merkle = build_public_tx(
-            registration.id(),
+            crate::spel_seeds::program_account(&registration.id()),
             vec![config_id, tree_main_id],
             Instruction::InitializeMerkleTree { tree_id: *tree_id },
         );
@@ -1104,7 +1115,7 @@ mod tests {
     }
 
     fn build_public_tx(
-        program_id: nssa_core::program::ProgramId,
+        program_id: AccountId,
         accounts: Vec<AccountId>,
         instruction: Instruction,
     ) -> PublicTransaction {
@@ -1162,7 +1173,7 @@ mod tests {
     ) {
         let total_supply: u128 = 1_000_000_000;
         let user_amount: u128 = 10_000_000;
-        let token_id = programs::token().id();
+        let token_id = crate::spel_seeds::program_account(&programs::token().id());
 
         let token_definition = token_core::TokenDefinition::Fungible {
             name: String::from("PAYTKN"),
@@ -1170,7 +1181,7 @@ mod tests {
             metadata_id: None,
         };
         state.force_insert_account(
-            payment_def_id.clone(),
+            *payment_def_id,
             Account {
                 program_owner: token_id,
                 data: Data::from(&token_definition),
@@ -1178,11 +1189,11 @@ mod tests {
             },
         );
         let treasury_holding = token_core::TokenHolding::Fungible {
-            definition_id: payment_def_id.clone(),
+            definition_id: *payment_def_id,
             balance: total_supply - user_amount,
         };
         state.force_insert_account(
-            treasury_id.clone(),
+            *treasury_id,
             Account {
                 program_owner: token_id,
                 data: Data::from(&treasury_holding),
@@ -1190,11 +1201,11 @@ mod tests {
             },
         );
         let user_holding = token_core::TokenHolding::Fungible {
-            definition_id: payment_def_id.clone(),
+            definition_id: *payment_def_id,
             balance: user_amount,
         };
         state.force_insert_account(
-            user_payment_id.clone(),
+            *user_payment_id,
             Account {
                 program_owner: token_id,
                 data: Data::from(&user_holding),
@@ -1259,8 +1270,14 @@ mod tests {
         let (mut state, merkle, registration) = state_with_programs()?;
 
         let (_treasury_key, treasury_id) = create_test_keypair(1);
-        let payment_def_id = derive_payment_token_pda(registration.id(), &TREE_ID);
-        let payment_supply_id = derive_payment_supply_pda(registration.id(), &TREE_ID);
+        let payment_def_id = derive_payment_token_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        );
+        let payment_supply_id = derive_payment_supply_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        );
 
         let init_txs = build_registration_init_txs_with_policy(
             &registration,
@@ -1280,9 +1297,12 @@ mod tests {
 
         // 4th init tx: create RLNTOK as a program-owned PDA definition.
         let init_payment = build_public_tx(
-            registration.id(),
+            crate::spel_seeds::program_account(&registration.id()),
             vec![
-                derive_config_pda(registration.id(), &TREE_ID),
+                derive_config_pda(
+                    crate::spel_seeds::program_account(&registration.id()),
+                    &TREE_ID,
+                ),
                 payment_def_id,
                 payment_supply_id,
             ],
@@ -1356,7 +1376,10 @@ mod tests {
         registration: &Program,
         tree_id: &[u8; 32],
     ) -> u64 {
-        let config_id = derive_config_pda(registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(
             config.data.as_ref()
@@ -1373,7 +1396,10 @@ mod tests {
         registration: &Program,
         tree_id: &[u8; 32],
     ) -> u64 {
-        let config_id = derive_config_pda(registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let config = state.get_account_by_id(config_id);
         u64::from_le_bytes(
             config.data.as_ref()[CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT
@@ -1386,7 +1412,10 @@ mod tests {
     /// Gets next_index from tree main account.
     #[allow(dead_code)]
     fn get_tree_next_index(state: &V03State, registration: &Program, tree_id: &[u8; 32]) -> u64 {
-        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let tree = state.get_account_by_id(tree_main_id);
         u64::from_le_bytes(tree.data.as_ref()[1..9].try_into().unwrap())
     }
@@ -1394,7 +1423,10 @@ mod tests {
     /// Gets merkle root from tree main account.
     #[allow(dead_code)]
     fn get_tree_root(state: &V03State, registration: &Program, tree_id: &[u8; 32]) -> [u8; 32] {
-        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let tree = state.get_account_by_id(tree_main_id);
         tree.data.as_ref()[9..41].try_into().unwrap()
     }
@@ -1402,7 +1434,7 @@ mod tests {
     /// Gets token balance from a holding account.
     #[allow(dead_code)]
     fn get_token_balance(state: &V03State, account_id: &AccountId) -> u128 {
-        let account = state.get_account_by_id(account_id.clone());
+        let account = state.get_account_by_id(*account_id);
         let holding =
             TokenHolding::try_from(&account.data).expect("Failed to deserialize token holding");
         match holding {
@@ -1415,7 +1447,7 @@ mod tests {
     /// Gets token total supply from a definition account.
     #[allow(dead_code)]
     fn get_token_supply(state: &V03State, definition_id: &AccountId) -> u128 {
-        let account = state.get_account_by_id(definition_id.clone());
+        let account = state.get_account_by_id(*definition_id);
         let definition = TokenDefinition::try_from(&account.data)
             .expect("Failed to deserialize token definition");
         match definition {
@@ -1434,7 +1466,11 @@ mod tests {
         tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> bool {
-        let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            id_commitment,
+        );
         let membership = state.get_account_by_id(membership_id);
         !membership.data.as_ref().is_empty()
     }
@@ -1456,7 +1492,11 @@ mod tests {
         tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> Option<MembershipData> {
-        let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            id_commitment,
+        );
         let membership = state.get_account_by_id(membership_id);
         let data = membership.data.as_ref();
         if data.is_empty() || data.len() < MEMBERSHIP_SIZE {
@@ -1521,6 +1561,59 @@ mod tests {
     /// - pre_states[5]: CLOCK_50 system account (read-only timestamp)
     /// (membership PDA is derived internally by guest)
     #[allow(dead_code)]
+    /// What a whole register transaction costs, against the ceiling that
+    /// actually rejects it.
+    ///
+    /// LEZ v0.2.5 meters a charged transaction by its declared `gas_limit`, one
+    /// gas per cycle, and `fee_core::market::MAX_GAS_EXEC` caps that at ten
+    /// million — a transaction over it can never be included in any block. The
+    /// budget is per *transaction*, so it covers the registration guest, the
+    /// chained token transfer and the merkle insert together. Measuring the
+    /// merkle guest alone (see `cycle_harness`) understates it.
+    ///
+    /// Printed rather than only asserted: the number picks the tree depth, and
+    /// the margin is what says whether the next depth up would fit.
+    #[test]
+    fn register_transaction_fits_the_gas_ceiling() {
+        const MAX_GAS_EXEC: u64 = 10_000_000;
+
+        let Some(setup) = state_with_initialized_registration() else {
+            eprintln!("skipping gas measurement: guest .bin not built");
+            return;
+        };
+        let tx = build_register_tx(
+            &setup,
+            &TREE_ID,
+            valid_field_element(0x42),
+            100,
+            Nonce(0),
+            0,
+        );
+
+        let (_diff, outcome) = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
+            &tx,
+            &setup.state,
+            1,
+            0,
+            MAX_GAS_EXEC,
+        )
+        .expect("register should execute within the ceiling");
+
+        let used = outcome.cycles;
+        let pct = (used as f64 / MAX_GAS_EXEC as f64) * 100.0;
+        println!(
+            "register transaction: {used} cycles ({pct:.1}% of MAX_GAS_EXEC), \
+             tree depth {}",
+            crate::merkle_tree::TREE_DEPTH
+        );
+
+        assert!(
+            used <= MAX_GAS_EXEC,
+            "a register transaction costs {used} cycles against a {MAX_GAS_EXEC} ceiling — \
+             the tree is too deep to register into"
+        );
+    }
+
     fn build_register_tx(
         setup: &TestSetup,
         tree_id: &[u8; 32],
@@ -1556,17 +1649,31 @@ mod tests {
         user_nonce: Nonce,
         next_index: u64,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let sid = subtree_id_for_index(next_index);
-        let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
+        let subtree_account_id = derive_subtree_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            sid,
+        );
 
-        let membership_id = derive_membership_pda(registration.id(), tree_id, &id_commitment);
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            &id_commitment,
+        );
         let account_ids = vec![
             config_id,
             tree_main_id,
-            user_payment_id.clone(),
-            treasury_id.clone(),
+            *user_payment_id,
+            *treasury_id,
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             membership_id,
@@ -1580,7 +1687,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            registration.id(),
+            crate::spel_seeds::program_account(&registration.id()),
             account_ids,
             vec![user_nonce], // nonce for user_payment account (index 2)
             instruction,
@@ -1619,13 +1726,13 @@ mod tests {
         registrar_id: &AccountId,
     ) {
         let holding = token_core::TokenHolding::Fungible {
-            definition_id: payment_def_id.clone(),
+            definition_id: *payment_def_id,
             balance: 0,
         };
         state.force_insert_account(
-            registrar_id.clone(),
+            *registrar_id,
             Account {
-                program_owner: programs::token().id(),
+                program_owner: crate::spel_seeds::program_account(&programs::token().id()),
                 data: Data::from(&holding),
                 ..Account::default()
             },
@@ -1642,16 +1749,30 @@ mod tests {
         registrar_nonce: Nonce,
         next_index: u64,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let sid = subtree_id_for_index(next_index);
-        let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
-        let membership_id = derive_membership_pda(registration.id(), tree_id, &id_commitment);
+        let subtree_account_id = derive_subtree_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            sid,
+        );
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            &id_commitment,
+        );
 
         let account_ids = vec![
             config_id,
             tree_main_id,
-            registrar_id.clone(),
+            *registrar_id,
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             membership_id,
@@ -1665,7 +1786,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            registration.id(),
+            crate::spel_seeds::program_account(&registration.id()),
             account_ids,
             vec![registrar_nonce],
             instruction,
@@ -1689,10 +1810,16 @@ mod tests {
         amount: u128,
         dest_nonce: Nonce,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(registration.id(), tree_id);
-        let payment_def_id = derive_payment_token_pda(registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
+        let payment_def_id = derive_payment_token_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
 
-        let account_ids = vec![config_id, payment_def_id, dest_id.clone()];
+        let account_ids = vec![config_id, payment_def_id, *dest_id];
         let instruction = Instruction::ClaimTokens {
             tree_id: *tree_id,
             amount,
@@ -1703,8 +1830,13 @@ mod tests {
         } else {
             vec![]
         };
-        let message = Message::try_new(registration.id(), account_ids, nonces, instruction)
-            .expect("valid message");
+        let message = Message::try_new(
+            crate::spel_seeds::program_account(&registration.id()),
+            account_ids,
+            nonces,
+            instruction,
+        )
+        .expect("valid message");
 
         let keys: Vec<&PrivateKey> = dest_key.into_iter().collect();
         PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &keys))
@@ -1732,8 +1864,14 @@ mod tests {
         user_payment_nonce: Nonce,
         user_credit_nonce: Nonce,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
 
         let instruction = Instruction::BuyCredits {
             tree_id: *tree_id,
@@ -1741,13 +1879,13 @@ mod tests {
         };
 
         let message = Message::try_new(
-            setup.registration.id(),
+            crate::spel_seeds::program_account(&setup.registration.id()),
             vec![
                 config_id,
                 credit_token_id,
-                setup.user_payment_id.clone(),
-                setup.treasury_id.clone(),
-                user_credit_id.clone(),
+                setup.user_payment_id,
+                setup.treasury_id,
+                *user_credit_id,
             ],
             vec![user_payment_nonce, user_credit_nonce],
             instruction,
@@ -1781,18 +1919,35 @@ mod tests {
         user_credit_nonce: Nonce,
         next_index: u64,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(setup.registration.id(), tree_id);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
         let sid = subtree_id_for_index(next_index);
-        let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
+        let subtree_account_id = derive_subtree_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            sid,
+        );
 
-        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            &id_commitment,
+        );
         let account_ids = vec![
             config_id,
             credit_token_id,
             tree_main_id,
-            user_credit_id.clone(),
+            *user_credit_id,
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             membership_id,
@@ -1806,7 +1961,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            setup.registration.id(),
+            crate::spel_seeds::program_account(&setup.registration.id()),
             account_ids,
             vec![user_credit_nonce], // nonce for user_credit (index 3)
             instruction,
@@ -1834,11 +1989,25 @@ mod tests {
         id_commitment: [u8; 32],
         leaf_index: u64,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(setup.registration.id(), tree_id);
-        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            &id_commitment,
+        );
         let sid = subtree_id_for_index(leaf_index);
-        let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
+        let subtree_account_id = derive_subtree_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            sid,
+        );
 
         // Account list: config, tree_main, membership, subtree
         let account_ids = vec![config_id, tree_main_id, membership_id, subtree_account_id];
@@ -1851,7 +2020,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            setup.registration.id(),
+            crate::spel_seeds::program_account(&setup.registration.id()),
             account_ids,
             vec![], // No nonces needed - no authorization required for slash
             instruction,
@@ -1910,7 +2079,10 @@ mod tests {
         apply_registration_init(&mut state, &init_txs).expect("Init should succeed");
 
         // Verify config account was created
-        let config_id = derive_config_pda(registration.id(), &TREE_ID);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        );
         let config_account = state.get_account_by_id(config_id);
 
         // Config should exist and have data
@@ -1926,7 +2098,7 @@ mod tests {
             "Config should be at least {CONFIG_SIZE} bytes"
         );
 
-        let merkle_id_bytes: [u8; 32] = bytemuck::cast(merkle.id());
+        let merkle_id_bytes: [u8; 32] = *crate::spel_seeds::program_account(&merkle.id()).value();
         assert_eq!(
             &data[CONFIG_OFFSET_MERKLE_PROGRAM_ID..CONFIG_OFFSET_MERKLE_PROGRAM_ID + 32],
             &merkle_id_bytes,
@@ -1991,7 +2163,10 @@ mod tests {
         apply_registration_init(&mut state, &init_txs).expect("Init should succeed");
 
         // Verify tree main account was created via chained call
-        let tree_main_id = derive_tree_main_pda(registration.id(), &TREE_ID);
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        );
         let tree_main = state.get_account_by_id(tree_main_id);
 
         assert!(
@@ -2038,7 +2213,10 @@ mod tests {
         apply_registration_init(&mut state, &init_txs).expect("Init should succeed");
 
         // Verify credit token definition was created
-        let credit_token_id = derive_credit_token_pda(registration.id(), &TREE_ID);
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        );
         let credit_token = state.get_account_by_id(credit_token_id);
 
         assert!(
@@ -2116,10 +2294,16 @@ mod tests {
         // than fall back to a caller-named program.
         let other_tree_id = [0x99u8; 32];
         let orphan_tx = build_public_tx(
-            registration.id(),
+            crate::spel_seeds::program_account(&registration.id()),
             vec![
-                derive_config_pda(registration.id(), &other_tree_id),
-                derive_tree_main_pda(registration.id(), &other_tree_id),
+                derive_config_pda(
+                    crate::spel_seeds::program_account(&registration.id()),
+                    &other_tree_id,
+                ),
+                derive_tree_main_pda(
+                    crate::spel_seeds::program_account(&registration.id()),
+                    &other_tree_id,
+                ),
             ],
             Instruction::InitializeMerkleTree {
                 tree_id: other_tree_id,
@@ -2176,10 +2360,13 @@ mod tests {
             .transition_from_public_transaction(&register_tx, 1, 0)
             .expect("Register should succeed");
 
-        let tree_main_id = derive_tree_main_pda(setup.registration.id(), &TREE_ID);
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
         let before = setup
             .state
-            .get_account_by_id(tree_main_id.clone())
+            .get_account_by_id(tree_main_id)
             .data
             .as_ref()
             .to_vec();
@@ -2190,10 +2377,13 @@ mod tests {
         );
 
         let attack_tx = build_public_tx(
-            setup.registration.id(),
+            crate::spel_seeds::program_account(&setup.registration.id()),
             vec![
-                derive_config_pda(setup.registration.id(), &TREE_ID),
-                tree_main_id.clone(),
+                derive_config_pda(
+                    crate::spel_seeds::program_account(&setup.registration.id()),
+                    &TREE_ID,
+                ),
+                tree_main_id,
             ],
             Instruction::InitializeMerkleTree { tree_id: TREE_ID },
         );
@@ -2337,13 +2527,13 @@ mod tests {
         // but owned by the merkle program (any non-token program stands in for
         // the attacker's).
         let forged = TokenHolding::Fungible {
-            definition_id: setup.payment_def_id.clone(),
+            definition_id: setup.payment_def_id,
             balance: u128::MAX,
         };
         setup.state.force_insert_account(
-            setup.user_payment_id.clone(),
+            setup.user_payment_id,
             Account {
-                program_owner: setup.merkle.id(),
+                program_owner: crate::spel_seeds::program_account(&setup.merkle.id()),
                 data: Data::from(&forged),
                 ..Account::default()
             },
@@ -2480,7 +2670,10 @@ mod tests {
             "User should have 300 credits"
         );
 
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), &TREE_ID);
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
         assert_eq!(
             get_token_supply(&setup.state, &credit_token_id),
             300,
@@ -2531,13 +2724,13 @@ mod tests {
         let (user_credit_key, user_credit_id) = create_test_keypair(10);
 
         let forged = TokenHolding::Fungible {
-            definition_id: setup.payment_def_id.clone(),
+            definition_id: setup.payment_def_id,
             balance: u128::MAX,
         };
         setup.state.force_insert_account(
-            setup.user_payment_id.clone(),
+            setup.user_payment_id,
             Account {
-                program_owner: setup.merkle.id(),
+                program_owner: crate::spel_seeds::program_account(&setup.merkle.id()),
                 data: Data::from(&forged),
                 ..Account::default()
             },
@@ -2614,7 +2807,10 @@ mod tests {
     fn test_register_with_credits_rejects_credit_holding_owned_by_foreign_program() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
         let (user_credit_key, user_credit_id) = create_test_keypair(10);
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), &TREE_ID);
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
 
         // Forge the receipt holding directly (no legitimate buy): valid
         // receipt-token bytes, unlimited balance, owned by a non-token program.
@@ -2623,9 +2819,9 @@ mod tests {
             balance: u128::MAX,
         };
         setup.state.force_insert_account(
-            user_credit_id.clone(),
+            user_credit_id,
             Account {
-                program_owner: setup.merkle.id(),
+                program_owner: crate::spel_seeds::program_account(&setup.merkle.id()),
                 data: Data::from(&forged),
                 ..Account::default()
             },
@@ -2691,7 +2887,10 @@ mod tests {
             "User should have 200 credits remaining"
         );
 
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), &TREE_ID);
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
         assert_eq!(
             get_token_supply(&setup.state, &credit_token_id),
             200,
@@ -2843,8 +3042,11 @@ mod tests {
             .expect("Register should succeed");
 
         // Verify membership PDA was created
-        let membership_id =
-            derive_membership_pda(setup.registration.id(), &TREE_ID, &id_commitment);
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+            &id_commitment,
+        );
         let membership = setup.state.get_account_by_id(membership_id);
 
         assert!(
@@ -3106,7 +3308,7 @@ mod tests {
     // ========================================================================
 
     fn read_holding(state: &V03State, id: &AccountId) -> Option<token_core::TokenHolding> {
-        let account = state.get_account_by_id(id.clone());
+        let account = state.get_account_by_id(*id);
         token_core::TokenHolding::try_from(&account.data).ok()
     }
 
@@ -3115,11 +3317,14 @@ mod tests {
         let (state, registration) =
             state_with_faucet_registration(10_000_000).expect("Faucet setup should succeed");
 
-        let payment_def_id = derive_payment_token_pda(registration.id(), &TREE_ID);
+        let payment_def_id = derive_payment_token_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        );
         let def_account = state.get_account_by_id(payment_def_id);
         assert_eq!(
             def_account.program_owner,
-            programs::token().id(),
+            crate::spel_seeds::program_account(&programs::token().id()),
             "Payment token definition should be owned by the token program"
         );
         let def = token_core::TokenDefinition::try_from(&def_account.data)
@@ -3164,7 +3369,10 @@ mod tests {
                 assert_eq!(balance, 1_000_000, "Claimed amount should be credited");
                 assert_eq!(
                     definition_id,
-                    derive_payment_token_pda(registration.id(), &TREE_ID),
+                    derive_payment_token_pda(
+                        crate::spel_seeds::program_account(&registration.id()),
+                        &TREE_ID
+                    ),
                     "Holding should reference the PDA definition"
                 );
             }
@@ -3175,8 +3383,10 @@ mod tests {
         }
 
         // Total supply tracks program-authority mints.
-        let def_account =
-            state.get_account_by_id(derive_payment_token_pda(registration.id(), &TREE_ID));
+        let def_account = state.get_account_by_id(derive_payment_token_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            &TREE_ID,
+        ));
         match token_core::TokenDefinition::try_from(&def_account.data).unwrap() {
             token_core::TokenDefinition::Fungible { total_supply, .. } => {
                 assert_eq!(total_supply, 1_000_000);
@@ -3275,9 +3485,10 @@ mod tests {
             "Free registration should insert a leaf"
         );
 
-        let config = setup
-            .state
-            .get_account_by_id(derive_config_pda(setup.registration.id(), &TREE_ID));
+        let config = setup.state.get_account_by_id(derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        ));
         let data = config.data.as_ref();
         let quota = u64::from_le_bytes(
             data[CONFIG_OFFSET_FREE_QUOTA_REMAINING..CONFIG_OFFSET_FREE_QUOTA_REMAINING + 8]
@@ -3590,8 +3801,7 @@ mod tests {
 
     use rand_chacha::ChaCha20Rng;
     use rln::prelude::{
-        Fr, Hasher, IdentityKeys, PoseidonHash, RLNBuilder, RLNMerkleProof, RLNWitnessInput,
-        hash_to_field_le,
+        Fr, Hasher, IdentityKeys, PoseidonHash, RLNMerkleProof, RLNWitnessInput, hash_to_field_le,
     };
 
     use crate::{
@@ -3628,7 +3838,10 @@ mod tests {
 
         if level <= TOP_DEPTH {
             // Node is in top tree (sparse format in main account after OFFSET_TOP_TREE_DATA)
-            let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+            let tree_main_id = derive_tree_main_pda(
+                crate::spel_seeds::program_account(&registration.id()),
+                tree_id,
+            );
             let main_account = state.get_account_by_id(tree_main_id);
             let data = main_account.data.as_ref();
 
@@ -3650,7 +3863,11 @@ mod tests {
             let sid = (node_index as usize / nodes_per_subtree_at_level) as u32;
             let local_index = node_index as usize % nodes_per_subtree_at_level;
 
-            let subtree_account_id = derive_subtree_pda(registration.id(), tree_id, sid);
+            let subtree_account_id = derive_subtree_pda(
+                crate::spel_seeds::program_account(&registration.id()),
+                tree_id,
+                sid,
+            );
             let subtree_account = state.get_account_by_id(subtree_account_id);
             let data = subtree_account.data.as_ref();
 
@@ -3665,7 +3882,10 @@ mod tests {
         tree_id: &[u8; 32],
         leaf_index: u64,
     ) -> (Vec<[u8; 32]>, Vec<u8>, [u8; 32], [u8; 32]) {
-        let tree_main_id = derive_tree_main_pda(registration.id(), tree_id);
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+        );
         let tree_main = state.get_account_by_id(tree_main_id);
         let main_data = tree_main.data.as_ref();
 
@@ -3700,7 +3920,7 @@ mod tests {
             let is_right_child = (node_index % 2) as u8;
             path_indices.push(is_right_child);
 
-            let sibling_index = if node_index % 2 == 0 {
+            let sibling_index = if node_index.is_multiple_of(2) {
                 node_index + 1
             } else {
                 node_index - 1
@@ -3814,12 +4034,16 @@ mod tests {
         let (path_elements_bytes, path_indices, root_bytes, leaf_bytes) =
             get_merkle_proof_from_state(&setup.state, &setup.registration, &TREE_ID, 0);
 
-        // Convert to Fr types for zerokit
-        let path_elements: Vec<Fr> = path_elements_bytes
+        // Convert to Fr types for zerokit, then lift both the path and the
+        // root from the tree's depth to the circuit's — see `proof_circuit`.
+        let mut path_elements: Vec<Fr> = path_elements_bytes
             .iter()
             .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        let mut path_indices = path_indices;
+        crate::proof_circuit::pad_path(&mut path_elements, &mut path_indices);
+        let root =
+            crate::proof_circuit::fold_root(bytes_le_to_fr(&root_bytes).expect("Invalid root"));
 
         // Verify the leaf matches what we expect
         let expected_leaf = compute_rate_commitment(&id_commitment, rate_limit);
@@ -3852,7 +4076,7 @@ mod tests {
             .expect("Failed to create RLN witness");
 
         // Initialize RLN instance
-        let rln = RLNBuilder::stateless().build();
+        let rln = crate::proof_circuit::engine();
 
         // Generate the proof
         let (rln_proof, proof_values) = rln
@@ -3922,11 +4146,15 @@ mod tests {
             get_merkle_proof_from_state(&setup.state, &setup.registration, &TREE_ID, 1);
 
         // Convert to Fr types
-        let path_elements: Vec<Fr> = path_elements_bytes
+        let mut path_elements: Vec<Fr> = path_elements_bytes
             .iter()
             .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        // Lift path and root from the tree's depth to the circuit's.
+        let mut path_indices = path_indices;
+        crate::proof_circuit::pad_path(&mut path_elements, &mut path_indices);
+        let root =
+            crate::proof_circuit::fold_root(bytes_le_to_fr(&root_bytes).expect("Invalid root"));
 
         // Verify the leaf
         let expected_leaf = compute_rate_commitment(&id_commitment2, rate_limit2);
@@ -3950,7 +4178,7 @@ mod tests {
             .build()
             .expect("Failed to create RLN witness");
 
-        let rln = RLNBuilder::stateless().build();
+        let rln = crate::proof_circuit::engine();
         let (rln_proof, proof_values) = rln
             .generate_proof(&witness)
             .expect("Failed to generate RLN proof");
@@ -3989,8 +4217,11 @@ mod tests {
             .expect("Register should succeed");
 
         // Get root before slash
-        let tree_main_id = derive_tree_main_pda(setup.registration.id(), &TREE_ID);
-        let tree_before = setup.state.get_account_by_id(tree_main_id.clone());
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
+        let tree_before = setup.state.get_account_by_id(tree_main_id);
         let root_before: [u8; 32] = tree_before.data.as_ref()[9..41].try_into().unwrap();
 
         // Slash the member
@@ -4050,11 +4281,15 @@ mod tests {
         let (path_elements_bytes, path_indices, root_bytes, _) =
             get_merkle_proof_from_state(&setup.state, &setup.registration, &TREE_ID, 0);
 
-        let path_elements: Vec<Fr> = path_elements_bytes
+        let mut path_elements: Vec<Fr> = path_elements_bytes
             .iter()
             .map(|bytes| bytes_le_to_fr(bytes).expect("Invalid path element"))
             .collect();
-        let root = bytes_le_to_fr(&root_bytes).expect("Invalid root");
+        // Lift path and root from the tree's depth to the circuit's.
+        let mut path_indices = path_indices;
+        crate::proof_circuit::pad_path(&mut path_elements, &mut path_indices);
+        let root =
+            crate::proof_circuit::fold_root(bytes_le_to_fr(&root_bytes).expect("Invalid root"));
 
         // Same epoch and message_id but different messages
         let user_message_limit = Fr::from(rate_limit);
@@ -4090,7 +4325,7 @@ mod tests {
             .build()
             .expect("Failed to create witness 2");
 
-        let rln = RLNBuilder::stateless().build();
+        let rln = crate::proof_circuit::engine();
 
         // Generate both proofs
         let (proof1, values1) = rln
@@ -4173,7 +4408,10 @@ mod tests {
             .expect("Step 1: Private buy_credits should succeed");
 
         // Verify public state changes: credit supply increased
-        let credit_token_id = derive_credit_token_pda(setup.registration.id(), &TREE_ID);
+        let credit_token_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
         assert_eq!(
             get_token_supply(&setup.state, &credit_token_id),
             credit_amount,
@@ -4197,7 +4435,10 @@ mod tests {
         // Pre-create the recipient's token holding (Claim::Authorized on public accounts
         // requires the account to be authorized, which won't be the case in a deshield)
         let (deshield_credit_key, deshield_credit_id) = create_test_keypair(20);
-        let credit_token_def_id = derive_credit_token_pda(setup.registration.id(), &TREE_ID);
+        let credit_token_def_id = derive_credit_token_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
         let empty_credit_holding = token_core::TokenHolding::Fungible {
             definition_id: credit_token_def_id,
             balance: 0,
@@ -4205,7 +4446,7 @@ mod tests {
         setup.state.force_insert_account(
             deshield_credit_id.clone(),
             Account {
-                program_owner: programs::token().id(),
+                program_owner: crate::spel_seeds::program_account(&programs::token().id()),
                 data: Data::from(&empty_credit_holding),
                 ..Account::default()
             },
@@ -4284,7 +4525,7 @@ mod tests {
             timestamp,
         }
         .to_bytes();
-        let clock_program_id = programs::clock().id();
+        let clock_program_id = crate::spel_seeds::program_account(&programs::clock().id());
         state.force_insert_account(
             CLOCK_50_PROGRAM_ACCOUNT_ID,
             Account {
@@ -4301,7 +4542,11 @@ mod tests {
         tree_id: &[u8; 32],
         id_commitment: &[u8; 32],
     ) -> Option<Vec<u8>> {
-        let membership_id = derive_membership_pda(registration.id(), tree_id, id_commitment);
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&registration.id()),
+            tree_id,
+            id_commitment,
+        );
         let bytes = state.get_account_by_id(membership_id).data.into_inner();
         if bytes.is_empty() { None } else { Some(bytes) }
     }
@@ -4366,14 +4611,21 @@ mod tests {
         id_commitment: [u8; 32],
         payer_nonce: Nonce,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            &id_commitment,
+        );
 
         let account_ids = vec![
             config_id,
             membership_id,
-            setup.user_payment_id.clone(),
-            setup.treasury_id.clone(),
+            setup.user_payment_id,
+            setup.treasury_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
@@ -4383,7 +4635,7 @@ mod tests {
         };
 
         let message = Message::try_new(
-            setup.registration.id(),
+            crate::spel_seeds::program_account(&setup.registration.id()),
             account_ids,
             vec![payer_nonce], // nonce for the payer holding (index 2)
             instruction,
@@ -4402,11 +4654,25 @@ mod tests {
         id_commitment: [u8; 32],
         leaf_index: u64,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(setup.registration.id(), tree_id);
-        let tree_main_id = derive_tree_main_pda(setup.registration.id(), tree_id);
-        let membership_id = derive_membership_pda(setup.registration.id(), tree_id, &id_commitment);
+        let config_id = derive_config_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+        );
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            &id_commitment,
+        );
         let sid = subtree_id_for_index(leaf_index);
-        let subtree_account_id = derive_subtree_pda(setup.registration.id(), tree_id, sid);
+        let subtree_account_id = derive_subtree_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            sid,
+        );
 
         let account_ids = vec![
             config_id,
@@ -4422,8 +4688,13 @@ mod tests {
             subtree_id: sid,
         };
 
-        let message = Message::try_new(setup.registration.id(), account_ids, vec![], instruction)
-            .expect("valid message");
+        let message = Message::try_new(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            account_ids,
+            vec![],
+            instruction,
+        )
+        .expect("valid message");
 
         PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
     }
@@ -4612,12 +4883,12 @@ mod tests {
         let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
         set_clock_50(&mut setup.state, in_grace, 100);
         let empty = token_core::TokenHolding::Fungible {
-            definition_id: setup.payment_def_id.clone(),
+            definition_id: setup.payment_def_id,
             balance: 0,
         };
-        let prior = setup.state.get_account_by_id(setup.user_payment_id.clone());
+        let prior = setup.state.get_account_by_id(setup.user_payment_id);
         setup.state.force_insert_account(
-            setup.user_payment_id.clone(),
+            setup.user_payment_id,
             Account {
                 data: Data::from(&empty),
                 ..prior

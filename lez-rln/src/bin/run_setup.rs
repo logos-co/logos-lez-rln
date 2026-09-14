@@ -52,8 +52,14 @@ async fn main() {
         .await
     };
 
-    let tree_main_id = derive_tree_main_account(&registration_program.id(), &tree_id);
-    let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
+    let tree_main_id = derive_tree_main_account(
+        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
+        &tree_id,
+    );
+    let config_account_id = derive_config_account(
+        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
+        &tree_id,
+    );
 
     save_payment_account(&tree_id, &user_holding_id);
     println!("Payment account saved: {}", user_holding_id);

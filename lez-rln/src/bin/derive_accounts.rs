@@ -12,18 +12,19 @@ use logos_lez_rln::rln::{
     derive_config_account, derive_credit_supply_account, derive_credit_token_account,
     derive_tree_main_account,
 };
-use nssa_core::program::ProgramId;
+use nssa::AccountId;
 
-fn hex32(p: &ProgramId) -> String {
-    let bytes: [u8; 32] = bytemuck::cast(*p);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+fn hex32(id: &AccountId) -> String {
+    id.value().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn main() {
     let tree_id = tree_id_from_env();
     let (registration, merkle) = load_programs();
-    let reg_id = registration.id();
-    let merkle_id = merkle.id();
+    // A program is addressed by the account its header sits at. The bytes are
+    // the same ones the image id carried, so these JSON fields keep their shape.
+    let reg_id = logos_lez_rln::spel_seeds::program_account(&registration.id());
+    let merkle_id = logos_lez_rln::spel_seeds::program_account(&merkle.id());
     println!(
         "{{\"registration_program_id\":\"{}\",\"merkle_program_id\":\"{}\",\"config_account\":\"{}\",\"tree_main_account\":\"{}\",\"credit_token_account\":\"{}\",\"credit_supply_account\":\"{}\"}}",
         hex32(&reg_id),

@@ -9,5 +9,5 @@ async fn main() {
     let (registration_program, _) = load_programs();
     let tree_id = tree_id_from_env();
     let root = fetch_root(&wallet_core, &registration_program, &tree_id).await;
-    println!("LEZ tree root (LE hex): {}", hex::encode(&root));
+    println!("LEZ tree root (LE hex): {}", hex::encode(root));
 }
