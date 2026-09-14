@@ -79,7 +79,8 @@ pub async fn fetch_next_index(
     program: &Program,
     tree_id: &[u8; 32],
 ) -> u64 {
-    let main_account_id = derive_main_account(&program.id(), tree_id);
+    let main_account_id =
+        derive_main_account(&crate::spel_seeds::program_account(&program.id()), tree_id);
 
     let account = wallet_core
         .get_account_public(main_account_id)
@@ -95,7 +96,8 @@ pub async fn fetch_root(
     program: &Program,
     tree_id: &[u8; 32],
 ) -> [u8; 32] {
-    let main_account_id = derive_main_account(&program.id(), tree_id);
+    let main_account_id =
+        derive_main_account(&crate::spel_seeds::program_account(&program.id()), tree_id);
 
     let account = wallet_core
         .get_account_public(main_account_id)
@@ -114,7 +116,8 @@ pub async fn fetch_root_history(
     program: &Program,
     tree_id: &[u8; 32],
 ) -> Vec<[u8; 32]> {
-    let main_account_id = derive_main_account(&program.id(), tree_id);
+    let main_account_id =
+        derive_main_account(&crate::spel_seeds::program_account(&program.id()), tree_id);
 
     let account = wallet_core
         .get_account_public(main_account_id)
@@ -139,7 +142,8 @@ pub async fn fetch_cached_defaults(
     program: &Program,
     tree_id: &[u8; 32],
 ) -> Vec<[u8; 32]> {
-    let main_account_id = derive_main_account(&program.id(), tree_id);
+    let main_account_id =
+        derive_main_account(&crate::spel_seeds::program_account(&program.id()), tree_id);
 
     let account = wallet_core
         .get_account_public(main_account_id)
@@ -176,7 +180,8 @@ pub async fn fetch_node_hash(
 
     if level <= TOP_DEPTH {
         // Node is in top tree (sparse format stored in main account after OFFSET_TOP_TREE_DATA)
-        let main_account_id = derive_main_account(&program.id(), tree_id);
+        let main_account_id =
+            derive_main_account(&crate::spel_seeds::program_account(&program.id()), tree_id);
         match wallet_core.get_account_public(main_account_id).await {
             Ok(account) => {
                 let data = account.data.as_ref();
@@ -201,7 +206,11 @@ pub async fn fetch_node_hash(
         let subtree_id = (node_index as usize / nodes_per_subtree_at_level) as u32;
         let local_index = node_index as usize % nodes_per_subtree_at_level;
 
-        let subtree_account_id = derive_subtree_account(&program.id(), tree_id, subtree_id);
+        let subtree_account_id = derive_subtree_account(
+            &crate::spel_seeds::program_account(&program.id()),
+            tree_id,
+            subtree_id,
+        );
         match wallet_core.get_account_public(subtree_account_id).await {
             Ok(account) => {
                 let data = account.data.as_ref();
@@ -273,7 +282,8 @@ pub async fn get_merkle_proof(
     tree_id: &[u8; 32],
     leaf_index: u64,
 ) -> MerkleProof {
-    let main_account_id = derive_main_account(&program.id(), tree_id);
+    let main_account_id =
+        derive_main_account(&crate::spel_seeds::program_account(&program.id()), tree_id);
 
     // Fetch main account
     let main_account = wallet_core
@@ -314,7 +324,7 @@ pub async fn get_merkle_proof(
         let is_right_child = (node_index % 2) as u8;
         path_indices.push(is_right_child);
 
-        let sibling_index = if node_index % 2 == 0 {
+        let sibling_index = if node_index.is_multiple_of(2) {
             node_index + 1
         } else {
             node_index - 1

@@ -3,17 +3,12 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use common::transaction::LeeTransaction as NSSATransaction;
-use nssa::{
-    AccountId, ProgramDeploymentTransaction, PublicTransaction,
-    program::Program,
-    program_deployment_transaction,
-    public_transaction::{Message, WitnessSet},
-};
+use nssa::{AccountId, program::Program};
+use nssa_core::program::{PROGRAM_LOADER_ACCOUNT_ID, PdaSeed};
+use program_loader_core::MAX_SEGMENT_DATA_LEN;
 use rand_chacha::ChaCha20Rng;
 use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
-use sequencer_service_rpc::RpcClient as _;
-use wallet::{WalletCore, program_facades::token::Token};
+use wallet::{AccountIdentity, WalletCore, program_facades::token::Token};
 
 use crate::{
     fr_bytes::fr_to_bytes_le,
@@ -168,7 +163,10 @@ pub async fn is_initialized(
     registration_program: &Program,
     tree_id: &[u8; 32],
 ) -> bool {
-    let config_id = derive_config_account(&registration_program.id(), tree_id);
+    let config_id = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
     let account = wallet_core
         .get_account_public(config_id)
         .await
@@ -234,7 +232,7 @@ pub async fn wait_for_account_data(
 ) {
     for _ in 0..max_attempts {
         let account = wallet_core
-            .get_account_public(account_id.clone())
+            .get_account_public(*account_id)
             .await
             .expect("Failed to fetch account");
         if !account.data.as_ref().is_empty() {
@@ -364,48 +362,233 @@ async fn is_program_deployed(
     program: &Program,
     account_id: &AccountId,
 ) -> bool {
-    match wallet_core.get_account_public(account_id.clone()).await {
-        Ok(account) => account.program_owner == program.id(),
+    match wallet_core.get_account_public(*account_id).await {
+        Ok(account) => account.program_owner == header_account(program),
         Err(_) => false,
     }
 }
 
-/// Send a program-deployment transaction, treating "already deployed" sequencer
-/// errors as success (idempotent deploy).
+/// The account a deployed program lives at.
+///
+/// v0.2.5 lets whoever deploys a program choose its address, and the stock
+/// wallet facade takes a freshly generated one. We deliberately keep the
+/// address v0.2.2 derived from the image id instead, because everything
+/// downstream assumes a program is content-addressed: PDA derivation,
+/// `derive_accounts`, the `deployment.json` cross-check in `provision.sh` and
+/// the module's own reads all recompute it from the bytecode rather than
+/// carrying it as state. Letting it float would mean threading a new address
+/// through every one of them for no gain.
+///
+/// `program_loader` permits this. `CreateHeader` and `WriteSegment` require
+/// only that their target still be an unclaimed account, never that it be
+/// signed for, so a keyless `PublicNoSign` identity can land the header at an
+/// address nobody holds a key to. The conversion between the two id types is
+/// the byte-preserving reinterpretation LEZ documents, so this is exactly the
+/// address v0.2.2 used.
+fn header_account(program: &Program) -> AccountId {
+    AccountId::from(program.id())
+}
+
+/// Where segment `index` of `program`'s bytecode chain lives.
+///
+/// Derived rather than generated, so a re-run lands on the same accounts and
+/// an interrupted deploy can be told apart from a fresh one. The "segment"
+/// label keeps these clear of the program's own PDAs, which derive from their
+/// own labels.
+fn segment_account(program: &Program, index: u32) -> AccountId {
+    let seed = crate::spel_seeds::combine_seeds(&[
+        &crate::spel_seeds::label_seed("segment"),
+        &crate::spel_seeds::u32_seed(index),
+    ]);
+    AccountId::for_public_pda(&header_account(program), &PdaSeed::new(seed))
+}
+
+/// The funded account that pays for deployment and initialization.
+///
+/// Every account a deploy touches is freshly claimed and holds nothing, so
+/// self-pay has nothing to draw on. v0.2.5 charges real fees and its faucet
+/// runs only in the genesis block, so this has to name an account funded at
+/// genesis.
+fn fee_payer() -> Option<AccountId> {
+    std::env::var("LEZ_RLN_PAYER").ok().map(|raw| {
+        raw.parse::<AccountId>()
+            .unwrap_or_else(|e| panic!("LEZ_RLN_PAYER is not an account id: {e}"))
+    })
+}
+
+/// The execution gas a transaction declares.
+///
+/// The wallet's own send path bakes in 2,000,000, which is under half what a
+/// registration costs: a merkle insert is one Poseidon compression — about
+/// 902,000 cycles — per level of tree depth, and gas is cycles. Anything that
+/// registers has to declare its own limit, so it builds the transaction itself
+/// rather than going through `send_pub_tx_paid_by`.
+///
+/// Defaults to the protocol's own ceiling. Declaring more than
+/// `fee_core::market::MAX_GAS_EXEC` is not merely wasteful — the sequencer
+/// refuses such a transaction outright, and it can never be included in any
+/// block, so this is a ceiling rather than a preference.
+fn declared_gas_limit() -> u64 {
+    const MAX_GAS_EXEC: u64 = 10_000_000;
+    let limit = std::env::var("LEZ_RLN_GAS_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(MAX_GAS_EXEC);
+    assert!(
+        limit <= MAX_GAS_EXEC,
+        "LEZ_RLN_GAS_LIMIT {limit} exceeds MAX_GAS_EXEC {MAX_GAS_EXEC}; \
+         a transaction declaring more can never be included in a block"
+    );
+    limit
+}
+
+/// Send a public transaction that declares its own gas limit, signed by
+/// `signer` and paid for by the configured payer.
+///
+/// This is `send_pub_tx_paid_by` with the one thing it does not expose: the
+/// gas limit. Everything it was doing for us comes back by hand — the signer's
+/// nonce, the payer's nonce appended after it, and both signatures over the
+/// message hash.
+///
+/// Only accounts that sign carry a nonce. The rest of an instruction's account
+/// list is program-derived, and PDAs have no nonce to advance.
+async fn send_metered_tx(
+    wallet_core: &WalletCore,
+    program_account: AccountId,
+    accounts: Vec<AccountId>,
+    signer: &AccountId,
+    instruction_data: nssa_core::program::InstructionData,
+    label: &str,
+) -> common::HashType {
+    let payer =
+        fee_payer().unwrap_or_else(|| panic!("{label} needs a funded payer — set LEZ_RLN_PAYER"));
+
+    let signer_key = wallet_core
+        .get_account_public_signing_key(*signer)
+        .unwrap_or_else(|| panic!("{label}: signer {signer:?} not in wallet"));
+    let payer_key = wallet_core
+        .get_account_public_signing_key(payer)
+        .unwrap_or_else(|| panic!("{label}: payer {payer:?} not in wallet"));
+
+    let nonces = wallet_core
+        .get_accounts_nonces(&[*signer, payer])
+        .await
+        .unwrap_or_else(|e| panic!("{label}: failed to read nonces: {e:?}"));
+
+    let fee = nssa::FeeDeclaration::new(payer, declared_gas_limit(), 0, DECLARED_MAX_FEE);
+    let message = nssa::public_transaction::Message::new_preserialized(
+        program_account,
+        accounts,
+        nonces,
+        instruction_data,
+        Some(fee),
+    );
+
+    let hash = message.hash();
+    let witness = nssa::public_transaction::WitnessSet::from_raw_parts(vec![
+        (
+            nssa::Signature::new(&signer_key, &hash),
+            nssa::PublicKey::new_from_private_key(&signer_key),
+        ),
+        (
+            nssa::Signature::new(&payer_key, &hash),
+            nssa::PublicKey::new_from_private_key(&payer_key),
+        ),
+    ]);
+
+    use sequencer_service_rpc::RpcClient as _;
+    wallet_core
+        .helm_owned()
+        .send_transaction(common::transaction::LeeTransaction::Public(
+            nssa::PublicTransaction::new(message, witness),
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"))
+}
+
+/// The fee reservation cap, sized the way the wallet sizes its own: the
+/// declared gas plus a serialized-size allowance, priced at several times the
+/// genesis base fee so a default survives early congestion without re-signing.
+const DECLARED_MAX_FEE: u128 = (10_000_000 + 100_000) * 64;
+
+/// Whether a deploy failure just means the work is already on-chain.
+///
+/// `program_loader` asserts its target is still default, so a repeat deploy
+/// trips that assertion rather than returning a dedicated error code.
+fn already_deployed(err: &wallet::ExecutionFailureKind) -> bool {
+    let text = format!("{err:?}");
+    text.contains("already deployed") || text.contains("already") || text.contains("exists")
+}
+
+/// Upload `bytecode` as a segment chain and point a header at it.
+///
+/// Segments link tail-to-head, so they upload in reverse: a segment's
+/// `next_segment` has to be on-chain before the segment naming it is written.
 async fn send_deploy_tx(
     wallet_core: &WalletCore,
     program: &Program,
     program_name: &str,
     bytecode: Vec<u8>,
 ) {
-    let deploy_msg = program_deployment_transaction::Message::new(bytecode);
-    let deploy_tx = ProgramDeploymentTransaction::new(deploy_msg);
+    let header = header_account(program);
+    let payer = fee_payer();
+    let chunks: Vec<Vec<u8>> = bytecode
+        .chunks(MAX_SEGMENT_DATA_LEN)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+    let segments: Vec<AccountId> = (0..chunks.len())
+        .map(|i| segment_account(program, u32::try_from(i).expect("segment count fits u32")))
+        .collect();
 
+    for (index, chunk) in chunks.iter().enumerate().rev() {
+        let instruction = program_loader_core::Instruction::WriteSegment {
+            bytecode: chunk.clone(),
+            next_segment: segments.get(index + 1).copied(),
+        };
+        let data = Program::serialize_instruction(instruction).expect("instruction serializes");
+        let mut accounts = vec![AccountIdentity::PublicNoSign(segments[index])];
+        accounts.extend(
+            segments
+                .get(index + 1)
+                .copied()
+                .map(AccountIdentity::PublicNoSign),
+        );
+        match wallet_core
+            .send_pub_tx_paid_by(accounts, data, PROGRAM_LOADER_ACCOUNT_ID, payer)
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if already_deployed(&e) => {
+                println!("  {program_name} segment {index} already on-chain");
+            }
+            Err(e) => panic!("Failed to write {program_name} segment {index}: {e:?}"),
+        }
+        // Each write has to land before the next is built, for two reasons: a
+        // segment naming this one as `next_segment` requires it to already be
+        // on-chain, and the payer's nonce only advances once a transaction
+        // settles — building the next one against a stale nonce fails the fee
+        // check rather than the instruction, which reads as a fee problem
+        // when it is really a pacing one.
+        let landed = segments[index];
+        wait_for_account_data(wallet_core, &landed, wait_account_attempts()).await;
+    }
+
+    let instruction = program_loader_core::Instruction::CreateHeader {
+        first_segment: segments[0],
+        immutable: true,
+    };
+    let data = Program::serialize_instruction(instruction).expect("instruction serializes");
+    let mut accounts = vec![AccountIdentity::PublicNoSign(header)];
+    accounts.extend(segments.iter().copied().map(AccountIdentity::PublicNoSign));
     match wallet_core
-        .helm_owned()
-        .send_transaction(NSSATransaction::ProgramDeployment(deploy_tx))
+        .send_pub_tx_paid_by(accounts, data, PROGRAM_LOADER_ACCOUNT_ID, payer)
         .await
     {
-        Ok(_) => println!(
-            "  {} deployed (program ID: {:?})",
-            program_name,
-            program.id()
-        ),
-        Err(e) => {
-            let err_str = format!("{:?}", e);
-            if err_str.contains("already")
-                || err_str.contains("exists")
-                || err_str.contains("duplicate")
-            {
-                println!(
-                    "  {} already deployed (program ID: {:?})",
-                    program_name,
-                    program.id()
-                );
-            } else {
-                panic!("Failed to deploy {}: {:?}", program_name, e);
-            }
+        Ok(_) => println!("  {program_name} deployed at {header:?}"),
+        Err(e) if already_deployed(&e) => {
+            println!("  {program_name} already deployed at {header:?}");
         }
+        Err(e) => panic!("Failed to create {program_name} header: {e:?}"),
     }
 }
 
@@ -467,13 +650,28 @@ pub async fn ensure_program_deployed(
     send_deploy_tx(wallet_core, program, program_name, bytecode).await;
 }
 
-/// Deploy a built-in program (bytecode already embedded in the binary).
-pub async fn deploy_builtin_program(
+/// Confirm a built-in program is on-chain.
+///
+/// v0.2.5 seeds the builtins at genesis, each at the address its image id maps
+/// to, so there is nothing to deploy. Trying anyway uploads a whole segment
+/// chain to accounts nobody will read and then trips `program_loader`'s
+/// "header target already deployed" assertion, which looks like a failure and
+/// is really just wasted work.
+pub async fn require_builtin_program(
     wallet_core: &WalletCore,
     program: &Program,
     program_name: &str,
 ) {
-    send_deploy_tx(wallet_core, program, program_name, program.elf().to_vec()).await;
+    let header = header_account(program);
+    match wallet_core.get_account_public(header).await {
+        Ok(account) if !account.data.as_ref().is_empty() => {
+            println!("  {program_name} present at {header:?}");
+        }
+        _ => panic!(
+            "{program_name} is not on-chain at {header:?} — builtins are seeded at genesis, \
+             so this chain's genesis does not match the binaries this host was built against"
+        ),
+    }
 }
 
 /// Build, submit, and await one registration-program init transaction.
@@ -487,13 +685,18 @@ async fn send_init_tx(
     label: &str,
     wait_on: &AccountId,
 ) {
-    let msg = Message::try_new(registration_program.id(), accounts, vec![], instruction)
-        .unwrap_or_else(|e| panic!("Failed to create {label} message: {e:?}"));
-    let witness = WitnessSet::for_message(&msg, &[]);
-    let tx = PublicTransaction::new(msg, witness);
+    let instruction_data =
+        Program::serialize_instruction(instruction).expect("instruction serializes");
     let hash = wallet_core
-        .helm_owned()
-        .send_transaction(NSSATransaction::Public(tx))
+        .send_pub_tx_paid_by(
+            accounts
+                .into_iter()
+                .map(AccountIdentity::PublicNoSign)
+                .collect(),
+            instruction_data,
+            crate::spel_seeds::program_account(&registration_program.id()),
+            fee_payer(),
+        )
         .await
         .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"));
     println!("  {label} tx hash: {hash}");
@@ -510,12 +713,22 @@ pub async fn run_setup(
     user_funding: u128,
     policy: &DeployPolicy,
 ) -> AccountId {
-    let config_id = derive_config_account(&registration_program.id(), tree_id);
-    let tree_main_id = derive_tree_main_account(&registration_program.id(), tree_id);
-    let credit_token_id =
-        crate::rln::derive_credit_token_account(&registration_program.id(), tree_id);
-    let credit_supply_id =
-        crate::rln::derive_credit_supply_account(&registration_program.id(), tree_id);
+    let config_id = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let tree_main_id = derive_tree_main_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let credit_token_id = crate::rln::derive_credit_token_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let credit_supply_id = crate::rln::derive_credit_supply_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
 
     println!("Setup Step 1: Checking/deploying programs...");
 
@@ -541,7 +754,7 @@ pub async fn run_setup(
 
     wait_for_block_seal().await;
 
-    deploy_builtin_program(wallet_core, &programs::token(), "Token program").await;
+    require_builtin_program(wallet_core, &programs::token(), "Token program").await;
 
     wait_for_block_seal().await;
 
@@ -563,8 +776,8 @@ pub async fn run_setup(
             println!("Setup Step 3: Deploying payment token (wallet-key funding)...");
             Token(wallet_core)
                 .send_new_definition(
-                    wallet::AccountIdentity::Public(token_definition_id.clone()),
-                    wallet::AccountIdentity::Public(supply_holding_id.clone()),
+                    wallet::AccountIdentity::Public(token_definition_id),
+                    wallet::AccountIdentity::Public(supply_holding_id),
                     "RLNTOK".to_string(),
                     TOKEN_SUPPLY,
                 )
@@ -576,8 +789,8 @@ pub async fn run_setup(
             println!("Setup Step 4: Initializing treasury...");
             Token(wallet_core)
                 .send_transfer_transaction(
-                    wallet::AccountIdentity::Public(supply_holding_id.clone()),
-                    wallet::AccountIdentity::Public(treasury_id.clone()),
+                    wallet::AccountIdentity::Public(supply_holding_id),
+                    wallet::AccountIdentity::Public(treasury_id),
                     1,
                 )
                 .await
@@ -593,7 +806,10 @@ pub async fn run_setup(
             wallet_core
                 .store_persistent_data()
                 .expect("Failed to store wallet");
-            let payment_def = derive_payment_token_account(&registration_program.id(), tree_id);
+            let payment_def = derive_payment_token_account(
+                &crate::spel_seeds::program_account(&registration_program.id()),
+                tree_id,
+            );
             println!(
                 "Setup Step 3-4: Faucet funding — payment token will be the program PDA {payment_def} (created in Step 5b; treasury seeded by claim)"
             );
@@ -607,7 +823,7 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![config_id.clone(), credit_token_id.clone()],
+        vec![config_id, credit_token_id],
         Instruction::Initialize {
             merkle_program_id: bytemuck::cast(merkle_program.id()),
             tree_id: *tree_id,
@@ -633,11 +849,7 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![
-            config_id.clone(),
-            credit_token_id.clone(),
-            credit_supply_id.clone(),
-        ],
+        vec![config_id, credit_token_id, credit_supply_id],
         Instruction::InitializeCreditToken { tree_id: *tree_id },
         "InitializeCreditToken",
         &credit_supply_id,
@@ -647,7 +859,7 @@ pub async fn run_setup(
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![config_id.clone(), tree_main_id.clone()],
+        vec![config_id, tree_main_id],
         Instruction::InitializeMerkleTree { tree_id: *tree_id },
         "InitializeMerkleTree",
         &tree_main_id,
@@ -659,16 +871,18 @@ pub async fn run_setup(
         // 4th init tx (32M-cycle split discipline): create RLNTOK as the
         // program's own PDA definition — mirror of InitializeCreditToken.
         println!("Setup Step 5b: Creating payment token (program-owned PDA)...");
-        let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
-        let payment_supply_id = derive_payment_supply_account(&registration_program.id(), tree_id);
+        let payment_def_id = derive_payment_token_account(
+            &crate::spel_seeds::program_account(&registration_program.id()),
+            tree_id,
+        );
+        let payment_supply_id = derive_payment_supply_account(
+            &crate::spel_seeds::program_account(&registration_program.id()),
+            tree_id,
+        );
         send_init_tx(
             wallet_core,
             registration_program,
-            vec![
-                config_id.clone(),
-                payment_def_id.clone(),
-                payment_supply_id.clone(),
-            ],
+            vec![config_id, payment_def_id, payment_supply_id],
             Instruction::InitializePaymentToken { tree_id: *tree_id },
             "InitializePaymentToken",
             &payment_def_id,
@@ -710,22 +924,29 @@ pub async fn claim_payment_tokens(
     dest: &AccountId,
     amount: u128,
 ) {
-    let config_id = derive_config_account(&registration_program.id(), tree_id);
-    let payment_def_id = derive_payment_token_account(&registration_program.id(), tree_id);
+    let config_id = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let payment_def_id = derive_payment_token_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
     let instruction_data = Program::serialize_instruction(Instruction::ClaimTokens {
         tree_id: *tree_id,
         amount,
     })
     .expect("serialize ClaimTokens");
     let hash = wallet_core
-        .send_pub_tx(
+        .send_pub_tx_paid_by(
             vec![
-                wallet::AccountIdentity::PublicNoSign(config_id),
-                wallet::AccountIdentity::PublicNoSign(payment_def_id),
-                wallet::AccountIdentity::Public(dest.clone()),
+                AccountIdentity::PublicNoSign(config_id),
+                AccountIdentity::PublicNoSign(payment_def_id),
+                AccountIdentity::Public(*dest),
             ],
             instruction_data,
-            registration_program.id(),
+            crate::spel_seeds::program_account(&registration_program.id()),
+            fee_payer(),
         )
         .await
         .expect("Failed to send ClaimTokens");
@@ -782,7 +1003,7 @@ pub async fn create_funded_user(
     Token(wallet_core)
         .send_transfer_transaction(
             wallet::AccountIdentity::Public(supply_holding_id),
-            wallet::AccountIdentity::Public(user_payment_holding_id.clone()),
+            wallet::AccountIdentity::Public(user_payment_holding_id),
             user_funding,
         )
         .await
@@ -808,7 +1029,10 @@ async fn fetch_faucet_claim_cap(
     registration_program: &Program,
     tree_id: &[u8; 32],
 ) -> u128 {
-    let config_id = derive_config_account(&registration_program.id(), tree_id);
+    let config_id = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
     // The sequencer returns absent accounts as Ok with empty data, so Err
     // here is a transport failure — defaulting to 0 would misroute a faucet
     // deployment onto the wallet-key supply-transfer path.
@@ -830,7 +1054,6 @@ async fn fetch_faucet_claim_cap(
 /// Register an identity via the registration program.
 /// Returns the leaf index assigned to this registration.
 ///
-/// If `nonce_override` is `Some`, uses that nonce instead of fetching from chain.
 /// This is useful for bulk registration where transactions are sent faster than
 /// the sequencer processes them.
 pub async fn register_identity(
@@ -840,16 +1063,21 @@ pub async fn register_identity(
     id_commitment: &[u8; 32],
     user_holding_id: &AccountId,
     rate_limit: u64,
-    nonce_override: Option<nssa_core::account::Nonce>,
 ) -> u64 {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
-    let config_account = derive_config_account(&registration_program.id(), tree_id);
-    let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
+    let config_account = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let tree_main_account = derive_tree_main_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
 
     let config_data = wallet_core
-        .get_account_public(config_account.clone())
+        .get_account_public(config_account)
         .await
         .expect("Failed to fetch config account. Is the registration initialized?");
 
@@ -861,7 +1089,7 @@ pub async fn register_identity(
     let treasury_account_id = AccountId::new(treasury_bytes);
 
     let main_account_data = wallet_core
-        .get_account_public(tree_main_account.clone())
+        .get_account_public(tree_main_account)
         .await
         .expect("Failed to fetch tree main account");
 
@@ -869,31 +1097,26 @@ pub async fn register_identity(
     let next_index = u64::from_le_bytes(tree_data[1..9].try_into().unwrap());
 
     let subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
-    let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
+    let subtree_account = derive_subtree_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+        subtree_id,
+    );
 
-    let membership_account =
-        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
+    let membership_account = crate::rln::derive_membership_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+        id_commitment,
+    );
     let accounts = vec![
         config_account,
         tree_main_account,
-        user_holding_id.clone(),
+        *user_holding_id,
         treasury_account_id,
         subtree_account,
         clock_account_id(),
         membership_account,
     ];
-
-    let signing_key = wallet_core
-        .get_account_public_signing_key(user_holding_id.clone())
-        .expect("User holding account not found in wallet");
-
-    let nonces = match nonce_override {
-        Some(nonce) => vec![nonce],
-        None => wallet_core
-            .get_accounts_nonces(&[*user_holding_id])
-            .await
-            .expect("Failed to fetch account nonces"),
-    };
 
     let instruction = Instruction::Register {
         tree_id: *tree_id,
@@ -901,18 +1124,17 @@ pub async fn register_identity(
         rate_limit,
         subtree_id,
     };
-
-    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
-        .expect("Failed to create message");
-
-    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
-    let tx = PublicTransaction::new(message, witness_set);
-
-    wallet_core
-        .helm_owned()
-        .send_transaction(NSSATransaction::Public(tx))
-        .await
-        .expect("Failed to register identity");
+    let instruction_data =
+        Program::serialize_instruction(instruction).expect("instruction serializes");
+    send_metered_tx(
+        wallet_core,
+        crate::spel_seeds::program_account(&registration_program.id()),
+        accounts,
+        user_holding_id,
+        instruction_data,
+        "Failed to register identity",
+    )
+    .await;
 
     next_index
 }
@@ -935,43 +1157,39 @@ pub async fn extend_membership(
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
-    let config_account = derive_config_account(&registration_program.id(), tree_id);
-    let membership_account =
-        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
+    let config_account = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let membership_account = crate::rln::derive_membership_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+        id_commitment,
+    );
 
     let accounts = vec![
         config_account,
         membership_account,
-        payer_holding_id.clone(),
-        treasury_id.clone(),
+        *payer_holding_id,
+        *treasury_id,
         clock_account_id(),
     ];
-
-    let signing_key = wallet_core
-        .get_account_public_signing_key(payer_holding_id.clone())
-        .expect("Payer holding not found in wallet");
-
-    let nonces = wallet_core
-        .get_accounts_nonces(&[*payer_holding_id])
-        .await
-        .expect("Failed to fetch account nonces");
 
     let instruction = Instruction::Extend {
         tree_id: *tree_id,
         id_commitment: *id_commitment,
     };
-
-    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
-        .expect("Failed to create extend message");
-
-    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
-    let tx = PublicTransaction::new(message, witness_set);
-
-    wallet_core
-        .helm_owned()
-        .send_transaction(NSSATransaction::Public(tx))
-        .await
-        .expect("Failed to extend membership");
+    let instruction_data =
+        Program::serialize_instruction(instruction).expect("instruction serializes");
+    send_metered_tx(
+        wallet_core,
+        crate::spel_seeds::program_account(&registration_program.id()),
+        accounts,
+        payer_holding_id,
+        instruction_data,
+        "Failed to extend membership",
+    )
+    .await;
 }
 
 /// Erase an expired membership. Any funded account can call this; callers
@@ -987,12 +1205,25 @@ pub async fn erase_membership(
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
-    let config_account = derive_config_account(&registration_program.id(), tree_id);
-    let tree_main_account = derive_tree_main_account(&registration_program.id(), tree_id);
-    let membership_account =
-        crate::rln::derive_membership_account(&registration_program.id(), tree_id, id_commitment);
+    let config_account = derive_config_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let tree_main_account = derive_tree_main_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
+    let membership_account = crate::rln::derive_membership_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+        id_commitment,
+    );
     let subtree_id = (leaf_index / SUBTREE_LEAVES as u64) as u32;
-    let subtree_account = derive_subtree_account(&registration_program.id(), tree_id, subtree_id);
+    let subtree_account = derive_subtree_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+        subtree_id,
+    );
 
     let accounts = vec![
         config_account,
@@ -1002,30 +1233,20 @@ pub async fn erase_membership(
         clock_account_id(),
     ];
 
-    let signing_key = wallet_core
-        .get_account_public_signing_key(fee_payer_id.clone())
-        .expect("Fee payer account not found in wallet");
-
-    let nonces = wallet_core
-        .get_accounts_nonces(&[*fee_payer_id])
-        .await
-        .expect("Failed to fetch account nonces");
-
     let instruction = Instruction::Erase {
         tree_id: *tree_id,
         id_commitment: *id_commitment,
         subtree_id,
     };
-
-    let message = Message::try_new(registration_program.id(), accounts, nonces, instruction)
-        .expect("Failed to create erase message");
-
-    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
-    let tx = PublicTransaction::new(message, witness_set);
-
-    wallet_core
-        .helm_owned()
-        .send_transaction(NSSATransaction::Public(tx))
-        .await
-        .expect("Failed to erase membership");
+    let instruction_data =
+        Program::serialize_instruction(instruction).expect("instruction serializes");
+    send_metered_tx(
+        wallet_core,
+        crate::spel_seeds::program_account(&registration_program.id()),
+        accounts,
+        fee_payer_id,
+        instruction_data,
+        "Failed to erase membership",
+    )
+    .await;
 }

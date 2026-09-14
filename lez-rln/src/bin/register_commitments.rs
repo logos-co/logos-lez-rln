@@ -73,7 +73,10 @@ async fn main() {
     let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
-    let config_account_id = derive_config_account(&registration_program.id(), &tree_id);
+    let config_account_id = derive_config_account(
+        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
+        &tree_id,
+    );
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
         let user_holding_id = create_funded_user(
@@ -93,7 +96,6 @@ async fn main() {
             id_commitment,
             &user_holding_id,
             *rate_limit,
-            None,
         )
         .await;
 

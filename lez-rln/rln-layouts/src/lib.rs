@@ -152,18 +152,45 @@ impl MerkleOpcode {
 // Merkle Tree Constants
 // ============================================================================
 
-/// Tree depth (number of levels from root to leaves).
-/// A depth of 20 supports up to 2^20 = 1,048,576 leaves.
-pub const TREE_DEPTH: usize = 20;
+/// Tree depth (number of levels from root to leaves), so the registry holds up
+/// to `2^TREE_DEPTH` members.
+///
+/// Depth is a *cost* decision, not a capacity one. LEZ v0.2.5 meters a charged
+/// transaction by its declared gas limit at one gas per cycle and caps that at
+/// ten million, and an insert costs one Poseidon compression — about 902,000
+/// cycles — per level. A register transaction spends 980,000 of its budget on
+/// the registration guest and the chained token transfer before the insert
+/// starts, so the tree can afford nine or ten levels and no more. Depth 20,
+/// which this was, costs 18.1M and cannot be included in any block.
+pub const TREE_DEPTH: usize = 9;
 
-/// Depth of the top tree (levels 0-10).
-pub const TOP_DEPTH: usize = 10;
+/// Depth of the top tree.
+pub const TOP_DEPTH: usize = 4;
 
-/// Depth of each bottom subtree (levels 11-20, mapped to 0-10 within subtree).
-pub const BOTTOM_DEPTH: usize = 10;
+/// Depth of each bottom subtree, mapped to levels 0..BOTTOM_DEPTH within it.
+pub const BOTTOM_DEPTH: usize = 5;
 
-/// Number of leaves per bottom subtree (2^10 = 1024).
-pub const SUBTREE_LEAVES: usize = 1024;
+/// Number of leaves per bottom subtree (`2^BOTTOM_DEPTH`).
+pub const SUBTREE_LEAVES: usize = 32;
+
+// These four are independent literals, and nothing used to check they agreed.
+// Setting one and forgetting another compiled cleanly and produced a tree whose
+// nodes alias each other, so state it once here where it fails at build time.
+const _: () = assert!(
+    TOP_DEPTH + BOTTOM_DEPTH == TREE_DEPTH,
+    "the two halves must sum to the whole depth"
+);
+const _: () = assert!(
+    SUBTREE_LEAVES == 1 << BOTTOM_DEPTH,
+    "a bottom subtree holds exactly 2^BOTTOM_DEPTH leaves"
+);
+// Sparse node offsets are cast to u16. The largest offset in a half of depth D
+// is 2^(D+1) - 2, so above 15 distinct nodes collapse onto the same slot and
+// the tree silently returns a wrong root.
+const _: () = assert!(
+    TOP_DEPTH <= 15 && BOTTOM_DEPTH <= 15,
+    "sparse node offsets are u16, so neither half may exceed depth 15"
+);
 
 /// Offset of depth field in main account data (1 byte).
 pub const OFFSET_DEPTH: usize = 0;

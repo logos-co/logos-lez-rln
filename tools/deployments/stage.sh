@@ -58,7 +58,13 @@ jq '.last_synced_block = 0' "$WALLET" > "$OUT/storage.json.seed"
 # calibration_limit sequential getLastBlockId probes (default 100) when no
 # statistics file exists — minutes against a slow chain, wedging every caller
 # behind the open. One sequencer needs no leader election; 3 probes suffice.
-jq -n --arg s "$SEQ" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$OUT/wallet_config.json"
+# gas_limit: the wallet's own default is 2,000,000, and a registration costs
+# about 9.1M — an on-chain merkle insert is one Poseidon compression, roughly
+# 902,000 cycles, per level of tree depth, and gas is cycles. A wallet that
+# declares too little has its transaction refused for running out of gas, with
+# nothing in the reply naming the limit it hit. MAX_GAS_EXEC (10M) is the
+# ceiling the protocol enforces; declaring more is refused outright.
+jq -n --arg s "$SEQ" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$OUT/wallet_config.json"
 cat > "$OUT/env.sh" <<EOF
 #!/usr/bin/env bash
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"

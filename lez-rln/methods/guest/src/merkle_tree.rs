@@ -26,10 +26,7 @@
 //! ensures only the owning program (via tail call with PDA seeds) can modify
 //! the tree.
 
-use nssa_core::{
-    account::{Account, AccountWithMetadata},
-    program::{AccountPostState, Claim},
-};
+use nssa_core::account::{Account, AccountWithMetadata};
 pub use rln_layouts::{
     BOTTOM_DEPTH, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
     OFFSET_ROOT_HISTORY, OFFSET_TOP_TREE_DATA, ROOT_HISTORY_SIZE, SUBTREE_LEAVES, TOP_DEPTH,
@@ -108,7 +105,7 @@ fn write_sparse_node(data: &mut Vec<u8>, level: usize, index: usize, hash: &[u8;
 /// # Panics
 /// - If `pre_states[0].is_authorized` is false
 /// - If `pre_states[0]` is already initialized
-pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<AccountPostState> {
+pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<Account> {
     let main_account = &pre_states[0];
 
     if !main_account.is_authorized {
@@ -143,10 +140,7 @@ pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<AccountPostS
     let mut post_account = main_account.account.clone();
     post_account.data = data.try_into().expect("Data should fit");
 
-    vec![AccountPostState::new_claimed_if_default(
-        post_account,
-        Claim::Authorized,
-    )]
+    vec![post_account]
 }
 
 /// Insert a leaf into the Merkle tree.
@@ -161,10 +155,7 @@ pub fn initialize_tree(pre_states: Vec<AccountWithMetadata>) -> Vec<AccountPostS
 /// # Panics
 /// - If `pre_states[0].is_authorized` is false
 /// - If expected_index != next_index
-pub fn insert_leaf(
-    pre_states: Vec<AccountWithMetadata>,
-    instruction: &[u8],
-) -> Vec<AccountPostState> {
+pub fn insert_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec<Account> {
     let main_account = &pre_states[0];
 
     if !main_account.is_authorized {
@@ -180,7 +171,15 @@ pub fn insert_leaf(
     validate_field_element(&leaf_value);
 
     let main_data = main_account.account.data.as_ref();
+    // The tree records its own depth, but every walk below navigates with the
+    // compile-time constants. A binary pointed at a tree built to a different
+    // depth reads the wrong offsets and returns a wrong root without panicking,
+    // so refuse it here instead.
     let depth = main_data[OFFSET_DEPTH] as usize;
+    assert_eq!(
+        depth, TREE_DEPTH,
+        "tree was built to a different depth than this program"
+    );
     let next_index = u64::from_le_bytes(
         main_data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
             .try_into()
@@ -225,10 +224,7 @@ pub fn insert_leaf(
     let mut subtree_post_account = pre_states[1].account.clone();
     subtree_post_account.data = bottom_data.try_into().expect("Data fits");
 
-    vec![
-        AccountPostState::new(main_post_account),
-        AccountPostState::new_claimed_if_default(subtree_post_account, Claim::Authorized),
-    ]
+    vec![main_post_account, subtree_post_account]
 }
 
 /// Set a leaf at a specific index (for index reuse after removal).
@@ -244,7 +240,7 @@ pub fn insert_leaf(
 /// - If `pre_states[0].is_authorized` is false
 /// - If leaf_index >= next_index
 /// - If the current leaf at leaf_index is not zero
-pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec<AccountPostState> {
+pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec<Account> {
     let main_account = &pre_states[0];
 
     if !main_account.is_authorized {
@@ -260,7 +256,15 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
     validate_field_element(&leaf_value);
 
     let main_data = main_account.account.data.as_ref();
+    // The tree records its own depth, but every walk below navigates with the
+    // compile-time constants. A binary pointed at a tree built to a different
+    // depth reads the wrong offsets and returns a wrong root without panicking,
+    // so refuse it here instead.
     let depth = main_data[OFFSET_DEPTH] as usize;
+    assert_eq!(
+        depth, TREE_DEPTH,
+        "tree was built to a different depth than this program"
+    );
     let next_index = u64::from_le_bytes(
         main_data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
             .try_into()
@@ -318,10 +322,7 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
     let mut subtree_post_account = pre_states[1].account.clone();
     subtree_post_account.data = bottom_data.try_into().expect("Data fits");
 
-    vec![
-        AccountPostState::new(main_post_account),
-        AccountPostState::new(subtree_post_account),
-    ]
+    vec![main_post_account, subtree_post_account]
 }
 
 /// Remove a leaf from the Merkle tree by setting it to zero.
@@ -339,7 +340,7 @@ pub fn set_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> Vec
 pub fn remove_leaf(
     pre_states: Vec<AccountWithMetadata>,
     instruction: &[u8],
-) -> (Vec<AccountPostState>, [u8; 32]) {
+) -> (Vec<Account>, [u8; 32]) {
     let main_account = &pre_states[0];
 
     if !main_account.is_authorized {
@@ -353,7 +354,15 @@ pub fn remove_leaf(
     let leaf_index = u64::from_le_bytes(instruction[0..8].try_into().unwrap());
 
     let main_data = main_account.account.data.as_ref();
+    // The tree records its own depth, but every walk below navigates with the
+    // compile-time constants. A binary pointed at a tree built to a different
+    // depth reads the wrong offsets and returns a wrong root without panicking,
+    // so refuse it here instead.
     let depth = main_data[OFFSET_DEPTH] as usize;
+    assert_eq!(
+        depth, TREE_DEPTH,
+        "tree was built to a different depth than this program"
+    );
     let next_index = u64::from_le_bytes(
         main_data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
             .try_into()
@@ -396,10 +405,7 @@ pub fn remove_leaf(
     let mut subtree_post_account = pre_states[1].account.clone();
     subtree_post_account.data = bottom_data.try_into().expect("Data fits");
 
-    let post_states = vec![
-        AccountPostState::new(main_post_account),
-        AccountPostState::new(subtree_post_account),
-    ];
+    let post_states = vec![main_post_account, subtree_post_account];
 
     (post_states, new_root)
 }
@@ -726,7 +732,7 @@ mod tests {
 
         assert_eq!(post_states.len(), 1);
 
-        let post_data = post_states[0].account().data.as_ref();
+        let post_data = post_states[0].data.as_ref();
 
         assert_eq!(post_data[OFFSET_DEPTH], TREE_DEPTH as u8);
 
@@ -744,7 +750,7 @@ mod tests {
     fn test_initialize_cached_defaults_correct() {
         let pre_states = vec![AccountForTests::main_empty()];
         let post_states = initialize_tree(pre_states);
-        let post_data = post_states[0].account().data.as_ref();
+        let post_data = post_states[0].data.as_ref();
 
         let mut cached_from_account = Vec::new();
         for i in 0..=TREE_DEPTH {
@@ -761,7 +767,7 @@ mod tests {
     fn test_initialize_root_matches_cached_default() {
         let pre_states = vec![AccountForTests::main_empty()];
         let post_states = initialize_tree(pre_states);
-        let post_data = post_states[0].account().data.as_ref();
+        let post_data = post_states[0].data.as_ref();
 
         let root = read_root(post_data);
         let cached_level_0: [u8; 32] = post_data[OFFSET_CACHED_NODES..OFFSET_CACHED_NODES + 32]
@@ -789,7 +795,7 @@ mod tests {
         // Verify 2 post states (main + subtree)
         assert_eq!(post_states.len(), 2);
 
-        let main_post = post_states[0].account().data.as_ref();
+        let main_post = post_states[0].data.as_ref();
         assert_eq!(read_next_index(main_post), 1);
 
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
@@ -798,7 +804,7 @@ mod tests {
         assert_ne!(new_root, old_root);
 
         // Verify subtree has data
-        let subtree_post = post_states[1].account().data.as_ref();
+        let subtree_post = post_states[1].data.as_ref();
         assert!(!subtree_post.is_empty());
     }
 
@@ -827,17 +833,17 @@ mod tests {
         );
 
         let post_states1 = insert_leaf(pre_states, &instruction1);
-        let root_after_first = read_root(post_states1[0].account().data.as_ref());
+        let root_after_first = read_root(post_states1[0].data.as_ref());
 
         // Insert second leaf - reuse state from first insert
         let main2 = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_states1[0].account().clone(),
+            account: post_states1[0].clone(),
             is_authorized: true,
         };
         let subtree2 = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_states1[1].account().clone(),
+            account: post_states1[1].clone(),
             is_authorized: true,
         };
 
@@ -846,7 +852,7 @@ mod tests {
 
         let post_states2 = insert_leaf(pre_states2, &instruction2);
 
-        let main_post = post_states2[0].account().data.as_ref();
+        let main_post = post_states2[0].data.as_ref();
         assert_eq!(read_next_index(main_post), 2);
 
         let root_after_second = read_root(main_post);
@@ -900,17 +906,17 @@ mod tests {
         );
 
         let post_states = insert_leaf(pre_states, &instruction);
-        let root_after_insert = read_root(post_states[0].account().data.as_ref());
+        let root_after_insert = read_root(post_states[0].data.as_ref());
 
         // Remove the leaf
         let main_after_insert = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_states[0].account().clone(),
+            account: post_states[0].clone(),
             is_authorized: true,
         };
         let subtree_after_insert = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_states[1].account().clone(),
+            account: post_states[1].clone(),
             is_authorized: true,
         };
 
@@ -919,7 +925,7 @@ mod tests {
 
         let (remove_post_states, new_root) = remove_leaf(remove_pre_states, &remove_instruction);
 
-        let root_after_remove = read_root(remove_post_states[0].account().data.as_ref());
+        let root_after_remove = read_root(remove_post_states[0].data.as_ref());
         assert_ne!(root_after_remove, root_after_insert);
         assert_eq!(root_after_remove, new_root);
     }
@@ -939,12 +945,12 @@ mod tests {
         // Remove the leaf
         let main_after_insert = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_states[0].account().clone(),
+            account: post_states[0].clone(),
             is_authorized: true,
         };
         let subtree_after_insert = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_states[1].account().clone(),
+            account: post_states[1].clone(),
             is_authorized: true,
         };
 
@@ -953,7 +959,7 @@ mod tests {
 
         let (remove_post_states, _) = remove_leaf(remove_pre_states, &remove_instruction);
 
-        let root_after_remove = read_root(remove_post_states[0].account().data.as_ref());
+        let root_after_remove = read_root(remove_post_states[0].data.as_ref());
         assert_eq!(root_after_remove, empty_root);
     }
 
@@ -967,16 +973,16 @@ mod tests {
         );
 
         let post_states = insert_leaf(pre_states, &instruction);
-        assert_eq!(read_next_index(post_states[0].account().data.as_ref()), 1);
+        assert_eq!(read_next_index(post_states[0].data.as_ref()), 1);
 
         let main_after = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_states[0].account().clone(),
+            account: post_states[0].clone(),
             is_authorized: true,
         };
         let subtree_after = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_states[1].account().clone(),
+            account: post_states[1].clone(),
             is_authorized: true,
         };
 
@@ -985,10 +991,7 @@ mod tests {
 
         let (remove_post_states, _) = remove_leaf(remove_pre_states, &remove_instruction);
 
-        assert_eq!(
-            read_next_index(remove_post_states[0].account().data.as_ref()),
-            1
-        );
+        assert_eq!(read_next_index(remove_post_states[0].data.as_ref()), 1);
     }
 
     #[test]
@@ -1006,12 +1009,12 @@ mod tests {
         // Insert second leaf
         let main2 = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_states1[0].account().clone(),
+            account: post_states1[0].clone(),
             is_authorized: true,
         };
         let subtree2 = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_states1[1].account().clone(),
+            account: post_states1[1].clone(),
             is_authorized: true,
         };
 
@@ -1019,17 +1022,17 @@ mod tests {
         let (pre_states2, instruction2) = build_insert_leaf_data(main2, subtree2, leaf2, 1);
 
         let post_states2 = insert_leaf(pre_states2, &instruction2);
-        let root_after_two = read_root(post_states2[0].account().data.as_ref());
+        let root_after_two = read_root(post_states2[0].data.as_ref());
 
         // Remove second leaf (index 1)
         let main_after_two = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_states2[0].account().clone(),
+            account: post_states2[0].clone(),
             is_authorized: true,
         };
         let subtree_after_two = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_states2[1].account().clone(),
+            account: post_states2[1].clone(),
             is_authorized: true,
         };
 
@@ -1038,7 +1041,7 @@ mod tests {
 
         let (remove_post_states, _) = remove_leaf(remove_pre_states, &remove_instruction);
 
-        let root_after_remove = read_root(remove_post_states[0].account().data.as_ref());
+        let root_after_remove = read_root(remove_post_states[0].data.as_ref());
         assert_ne!(
             root_after_remove, root_after_two,
             "Root should change after removal"
@@ -1060,7 +1063,7 @@ mod tests {
             );
 
             let post_states = insert_leaf(pre_states, &instruction);
-            read_root(post_states[0].account().data.as_ref())
+            read_root(post_states[0].data.as_ref())
         };
 
         let root1 = run_insertions();
@@ -1099,7 +1102,7 @@ mod tests {
 
         // Initialize tree
         let init_post = initialize_tree(vec![AccountForTests::main_empty()]);
-        let mut main_account = init_post[0].account().clone();
+        let mut main_account = init_post[0].clone();
         let mut subtrees: HashMap<u32, Account> = HashMap::new();
 
         for i in 0..count {
@@ -1129,8 +1132,8 @@ mod tests {
             ];
 
             let post_states = insert_leaf(pre_states, &instruction);
-            main_account = post_states[0].account().clone();
-            subtrees.insert(subtree_id, post_states[1].account().clone());
+            main_account = post_states[0].clone();
+            subtrees.insert(subtree_id, post_states[1].clone());
         }
 
         (main_account, subtrees)
@@ -1205,18 +1208,19 @@ mod tests {
 
         let post_states = insert_leaf(vec![main_account, subtree_account], &instruction);
 
-        let main_post = post_states[0].account().data.as_ref();
+        let main_post = post_states[0].data.as_ref();
         assert_eq!(read_next_index(main_post), last_index + 1);
 
         // Root should differ from default (we inserted a non-zero leaf)
         assert_ne!(read_root(main_post), cached_nodes[0]);
 
-        // Verify subtree_id = last_index / 1024 = 1023
+        // The last leaf lives in the last subtree, whichever depth says that is.
         let expected_subtree_id = (last_index / SUBTREE_LEAVES as u64) as u32;
-        assert_eq!(expected_subtree_id, 1023);
+        let last_subtree_id = ((1u64 << TREE_DEPTH) / SUBTREE_LEAVES as u64 - 1) as u32;
+        assert_eq!(expected_subtree_id, last_subtree_id);
 
         // Subtree should have data
-        let subtree_post = post_states[1].account().data.as_ref();
+        let subtree_post = post_states[1].data.as_ref();
         assert!(!subtree_post.is_empty());
     }
 
@@ -1250,24 +1254,24 @@ mod tests {
         insert_instr.extend_from_slice(&[1u8; 32]);
 
         let post_insert = insert_leaf(vec![main_account, subtree_account], &insert_instr);
-        let root_after_insert = read_root(post_insert[0].account().data.as_ref());
+        let root_after_insert = read_root(post_insert[0].data.as_ref());
 
         // Remove
         let remove_instr = last_index.to_le_bytes().to_vec();
         let main_after = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
-            account: post_insert[0].account().clone(),
+            account: post_insert[0].clone(),
             is_authorized: true,
         };
         let subtree_after = AccountWithMetadata {
             account_id: IdForTests::subtree_account_id(),
-            account: post_insert[1].account().clone(),
+            account: post_insert[1].clone(),
             is_authorized: true,
         };
 
         let (post_remove, _) = remove_leaf(vec![main_after, subtree_after], &remove_instr);
 
-        let root_after_remove = read_root(post_remove[0].account().data.as_ref());
+        let root_after_remove = read_root(post_remove[0].data.as_ref());
         assert_ne!(root_after_remove, root_after_insert);
         // Should restore to the empty-tree root (since all other leaves are zero)
         assert_eq!(root_after_remove, cached_nodes[0]);
@@ -1287,11 +1291,11 @@ mod tests {
             [1u8; 32],
         );
         let post1 = insert_leaf(pre_states, &instr);
-        let root_one_leaf_subtree0 = read_root(post1[0].account().data.as_ref());
+        let root_one_leaf_subtree0 = read_root(post1[0].data.as_ref());
 
         // Now insert at index 1024 (subtree 1) using a fresh subtree account
         // but carrying forward the main account from above
-        let main_data = post1[0].account().data.as_ref();
+        let main_data = post1[0].data.as_ref();
         // Set next_index to 1024 to skip the rest of subtree 0
         let mut modified_main = main_data.to_vec();
         modified_main[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
@@ -1316,7 +1320,7 @@ mod tests {
         instr2.extend_from_slice(&[2u8; 32]);
 
         let post2 = insert_leaf(vec![main_for_subtree1, fresh_subtree1], &instr2);
-        let root_two_subtrees = read_root(post2[0].account().data.as_ref());
+        let root_two_subtrees = read_root(post2[0].data.as_ref());
 
         // Roots should differ — second insert added a leaf in a different subtree
         assert_ne!(root_one_leaf_subtree0, root_two_subtrees);
@@ -1356,8 +1360,8 @@ mod tests {
             ];
 
             let (post_states, _) = remove_leaf(pre_states, &remove_instr);
-            current_main = post_states[0].account().clone();
-            current_subtree = post_states[1].account().clone();
+            current_main = post_states[0].clone();
+            current_subtree = post_states[1].clone();
         }
 
         let final_root = read_root(current_main.data.as_ref());

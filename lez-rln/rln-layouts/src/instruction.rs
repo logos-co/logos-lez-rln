@@ -6,9 +6,10 @@
 //! `#[instruction]` fn parameter lists in `methods/guest/src/program.rs`
 //! (account params stripped, remaining args preserved in order).
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub enum Instruction {
     Initialize {
         merkle_program_id: [u8; 32],
