@@ -5,7 +5,7 @@
 #   bash provision.sh --name <name> [--tree <64hex>] [--adopt-wallet <storage.json>]
 #                     [--sequencer <url>] [--outdir <dir>]
 #                     [--funding faucet|wallet-key] [--claim-cap <u128>]
-#                     [--registrar <64hex>] [--quota <u64>]
+#                     [--registrar <64hex>] [--quota <u64>] [--payer <account-id>]
 #
 # tree_id is the single knob: --tree targets/redeploys a specific tree, omit for a
 # fresh random one. --adopt-wallet reuses an existing wallet (its seed, hence account
@@ -20,12 +20,18 @@
 #     lives in the wallet.
 #   --registrar/--quota: authorize one account for N free (unpaid) memberships
 #     via RegisterFree, alongside the normal paid path.
+#
+# --payer names the funded account that pays every deploy and init fee. It must
+# already hold native balance, which on a local chain means it was funded at
+# genesis (mint_payer prints an id, dev.sh's LEZ_RLN_GENESIS_FUND funds it).
+# Omit it only against a chain whose accounts are funded some other way; without
+# it the sequencer rejects every transaction for want of a fee.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"                    # logos-lez-rln root
 NAME=""; TREE=""; ADOPT=""; SEQUENCER="https://testnet.lez.logos.co/"; OUTROOT="$REPO/deployments"
-FUNDING="faucet"; CLAIM_CAP=""; REGISTRAR=""; QUOTA="0"
+FUNDING="faucet"; CLAIM_CAP=""; REGISTRAR=""; QUOTA="0"; PAYER=""
 while [ $# -gt 0 ]; do case "$1" in
   --name) NAME="$2"; shift 2;;
   --tree) TREE="$2"; shift 2;;
@@ -36,6 +42,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --claim-cap) CLAIM_CAP="$2"; shift 2;;
   --registrar) REGISTRAR="$2"; shift 2;;
   --quota) QUOTA="$2"; shift 2;;
+  --payer) PAYER="$2"; shift 2;;
   *) echo "unknown arg: $1" >&2; exit 1;;
 esac; done
 case "$FUNDING" in faucet|wallet-key) ;; *) echo "--funding must be faucet|wallet-key" >&2; exit 1;; esac
@@ -49,7 +56,8 @@ case "$FUNDING" in faucet|wallet-key) ;; *) echo "--funding must be faucet|walle
 LEZ="$REPO/lez-rln"
 RUN_SETUP="$LEZ/target/release/run_setup"
 DERIVE="$LEZ/target/release/derive_accounts"
-for b in "$RUN_SETUP" "$DERIVE"; do [ -x "$b" ] || { echo "missing $b — build: (cd $LEZ && PYO3_PYTHON=\$(command -v python3) cargo build --release --bin run_setup --bin derive_accounts)" >&2; exit 1; }; done
+MINT_PAYER="$LEZ/target/release/mint_payer"
+for b in "$RUN_SETUP" "$DERIVE" "$MINT_PAYER"; do [ -x "$b" ] || { echo "missing $b — build: (cd $LEZ && PYO3_PYTHON=\$(command -v python3) cargo build --release --bin run_setup --bin derive_accounts --bin mint_payer)" >&2; exit 1; }; done
 
 WS=$(mktemp -d); trap 'rm -rf "$WS"' EXIT
 if [ -n "$ADOPT" ]; then
@@ -59,12 +67,26 @@ fi
 # Dual-shape sequencer field — see stage.sh: `sequencers` for lez >= v0.2.1,
 # flat `sequencer_addr` for the rc6-era wallet module. calibration_limit: see
 # stage.sh — v0.2.2 open probes calibration_limit times (default 100).
-jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
+# gas_limit: the wallet's own default is 2,000,000, and a registration costs
+# about 9.1M — an on-chain merkle insert is one Poseidon compression, roughly
+# 902,000 cycles, per level of tree depth, and gas is cycles. A wallet that
+# declares too little has its transaction refused for running out of gas, with
+# nothing in the reply naming the limit it hit. MAX_GAS_EXEC (10M) is the
+# ceiling the protocol enforces; declaring more is refused outright.
+jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
 echo "provision: tree=$TREE sequencer=$SEQUENCER funding=$FUNDING (deploying via run_setup — several min)"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS" NSSA_WALLET_HOME_DIR="$WS"
 export LEZ_RLN_TREE_ID_HEX="$TREE" RISC0_DEV_MODE=1
 export LEZ_RLN_FUNDING="$FUNDING" LEZ_RLN_FREE_QUOTA="$QUOTA"
+# Every deploy and init transaction carries a fee now, drawn from this account.
+# Warn rather than fail: a chain may fund its accounts some other way.
+if [ -n "$PAYER" ]; then
+  export LEZ_RLN_PAYER="$PAYER"
+  echo "provision: fees paid by $PAYER"
+else
+  echo "provision: WARNING no --payer given; the sequencer will reject unfunded transactions" >&2
+fi
 [ -z "$CLAIM_CAP" ] || export LEZ_RLN_FAUCET_CLAIM_CAP="$CLAIM_CAP"
 [ -z "$REGISTRAR" ] || export LEZ_RLN_REGISTRAR="$REGISTRAR"
 export DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-/Library/Developer/CommandLineTools/Library/Frameworks}"
