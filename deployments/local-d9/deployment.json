@@ -1,0 +1,11 @@
+{
+  "name": "local-d9",
+  "tree_id": "1e7e233368134233efadc0240401e15663d6c676fd94caaed95ce9f5b275681f",
+  "sequencer": "http://127.0.0.1:3040",
+  "registration_program_id": "318699d573a766c808b374f88ac16765fa03a701fd4f86c095d8a19fe98f3ca9",
+  "merkle_program_id": "a80a8cf996a1052cf54b8cb89a2a4d69282fbb21d3b5b3bc397317dce08ec521",
+  "config_account": "DXPkmrfpo1qTX7YRTrvjkCZNUPhhUhXNoR5Jn4vHn29x",
+  "payment_account": "6z2JQCwH5d8prv2nxV8zXNXSymc5BEMBe4XDPQL6rGrT",
+  "supply_holding": "6uzLFqyQcX5ivPGcv9n5ZBFzTyiuRqW5vjA9UYz3WjpR",
+  "funding": "faucet"
+}
