@@ -65,18 +65,20 @@ program that owns accounts, give it one.
 The same rule the token-holding convention below states, generalized: a
 `ChainedCall::program_id` must be read from `config_state`, because these
 handlers attach `pda_seeds` that authorize the callee to claim the
-registration program's own PDAs (`main`, `receipt`, `supply`, `payment`,
-`payment_supply`). A caller-named program id would be handed those seeds.
+registration program's own PDAs (`main`, and the subtrees under it). A
+caller-named program id would be handed those seeds.
 
-`InitializeMerkleTree` / `InitializeCreditToken` / `InitializePaymentToken`
-originally took `merkle_program_id` / `token_program_id` as instruction args
-and never loaded config. They now declare the config PDA and read the target
-from it via `require_config` (which also binds `tree_id`), and the args are
-gone from `rln_layouts::Instruction` entirely — the wire cannot express the
-attack. This makes config a prerequisite for those three instructions, which
-is satisfied because `Initialize` runs first (it only reads
-`credit_token.account_id`, never its contents). Regression:
-`test_init_merkle_uses_config_program_not_caller_arg`.
+`InitializeMerkleTree` originally took `merkle_program_id` as an instruction
+arg and never loaded config. It now declares the config PDA and reads the
+target from it via `require_config` (which also binds `tree_id`), and the arg
+is gone from `rln_layouts::Instruction` entirely — the wire cannot express the
+attack. This makes config a prerequisite, satisfied because `Initialize` runs
+first. Regression: `test_init_merkle_uses_config_program_not_caller_arg`.
+
+The same rule once covered `InitializeCreditToken` / `InitializePaymentToken`
+and the `receipt` / `supply` / `payment` / `payment_supply` PDAs. Those
+instructions and PDAs no longer exist: the registry takes the native asset
+only, so it chains to nothing but the merkle program.
 
 ## A declared plain-wallet account breaks the program on its second use
 LEZ rule 7 (`NonDefaultAccountWithDefaultOwner`) rejects any account in a
@@ -151,15 +153,6 @@ payment accounts are token-owned, so this is rule-7 safe.
   provisioned against no longer exists, and its program predates both
   security fixes above. Its ids (registry, tree, program) are stale — expect
   to re-provision from scratch rather than to verify against it.
-- The hosted testnet was reset (observed 2026-09-08: `getLastBlockId` ≈ 601,
-  and the config/tree/payment accounts of every deployment recorded under
-  `deployments/` read back as empty accounts). `testnet-shrink-verify` and
-  everything before it are dead the same way; the "deployed + verified"
-  note in `testnet-shrink-verify/deployment.json` predates the reset, as do
-  `tools/check-membership`'s built-in shared-faucet defaults.
-  `deployments/testnet-faucet-260908` was provisioned the same day from
-  main's guest (image id `88ba7685…`, 405,488 B; faucet funding;
-  `verify.sh` OK) and is the live one.
 - `state_tests` reads the guest `.bin`s from the same `docker/` dir the
   deploy host uses, which is also the record of what is live. Set
   `LEZ_RLN_GUEST_DIR` to a fresh build's `release/` dir to test guest changes

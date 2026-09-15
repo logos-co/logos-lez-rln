@@ -32,7 +32,7 @@ mod tests {
     };
     use risc0_zkvm::{ExecutorEnv, default_executor};
 
-    use crate::rln::{derive_config_account, derive_credit_token_account};
+    use crate::rln::{derive_config_account, derive_subtree_account};
 
     /// risc0's per-execution session limit. Still the ceiling a single guest
     /// may not cross, but no longer the binding one — see `MAX_GAS_EXEC`.
@@ -240,9 +240,16 @@ mod tests {
             stripped.len(),
             blob.len() as i64 - stripped.len() as i64
         );
+        // `<=`, not `<`: stripping is idempotent, and build.rs strips the
+        // docker `.bin` in place on every `cargo build` of the methods crate.
+        // So this test's input is already stripped except in the window between
+        // a `cargo risczero build` and the next `cargo build` — a strict `<`
+        // turns that normal state into a red test. Size is incidental here
+        // anyway; what the test is for is that a stripped-kernel container
+        // still decodes and still executes.
         assert!(
-            stripped.len() < blob.len(),
-            "stripping should not grow the binary"
+            stripped.len() <= blob.len(),
+            "stripping must never grow the binary"
         );
 
         // Load-bearing: risc0 must still decode the stripped-kernel container.
@@ -282,9 +289,10 @@ mod tests {
         let subtree_pre = AccountWithMetadata {
             account: Account::default(),
             is_authorized: true,
-            account_id: derive_credit_token_account(
+            account_id: derive_subtree_account(
                 &crate::spel_seeds::program_account(&program.id()),
                 &TREE_ID,
+                0,
             ),
         };
 

@@ -8,100 +8,22 @@ use nssa_core::program::{PROGRAM_LOADER_ACCOUNT_ID, PdaSeed};
 use program_loader_core::MAX_SEGMENT_DATA_LEN;
 use rand_chacha::ChaCha20Rng;
 use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
-use wallet::{AccountIdentity, WalletCore, program_facades::token::Token};
+use wallet::{AccountIdentity, WalletCore};
 
 use crate::{
     fr_bytes::fr_to_bytes_le,
     merkle_tree::SUBTREE_LEAVES,
     rln::{
-        CONFIG_OFFSET_FAUCET_CLAIM_CAP, CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction,
-        derive_config_account, derive_payment_supply_account, derive_payment_token_account,
+        CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction, derive_config_account,
         derive_subtree_account, derive_tree_main_account,
     },
 };
 
+/// Native atomic units charged per unit of rate limit. Kept from the token
+/// era as a pure re-denomination: at rate_limit 100 a membership costs
+/// 1,000,000, which is the anti-grief price `Extend` needs to stay non-zero.
 pub const PRICE_PER_UNIT: u128 = 10_000;
-/// 100 B RLNTOK minted per tree deploy. At PRICE_PER_UNIT=10_000 and the
-/// demo's rateLimit=100, each registration burns 1 M tokens, so this supply
-/// funds roughly 100K registrations across the tree's lifetime before
-/// depletion forces a fresh deploy.
-pub const TOKEN_SUPPLY: u128 = 100_000_000_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
-
-/// Default per-call faucet claim cap for faucet-funded deployments: 10 M
-/// tokens = 10 registrations at the demo rate. Per-call only (repeat claims
-/// are unbounded by design — test tokens).
-pub const DEFAULT_FAUCET_CLAIM_CAP: u128 = 10_000_000;
-
-/// How a deployment's payment token gets funded. The claim cap only exists
-/// in faucet mode; on-chain, wallet-key deployments carry cap 0 (faucet
-/// disabled) — derived at the `Initialize` build site.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FundingPolicy {
-    /// Payment token definition is a registration-program PDA; anyone claims
-    /// up to `claim_cap` per `ClaimTokens` call — no human mint authority
-    /// exists (default).
-    Faucet { claim_cap: u128 },
-    /// Legacy model: wallet-keypair definition, fixed pre-minted supply,
-    /// funding via transfers (and the definition key can mint).
-    WalletKey,
-}
-
-/// Deployment-time policy knobs (resolved once from env by `policy_from_env`).
-pub struct DeployPolicy {
-    pub funding: FundingPolicy,
-    /// `None` = no free-quota registrar (zeros on the wire).
-    pub authorized_registrar: Option<[u8; 32]>,
-    pub free_quota: u64,
-}
-
-/// Env knobs: `LEZ_RLN_FUNDING` = `faucet` (default) | `wallet-key`,
-/// `LEZ_RLN_FAUCET_CLAIM_CAP`, `LEZ_RLN_REGISTRAR` (64-hex account id),
-/// `LEZ_RLN_FREE_QUOTA`.
-pub fn policy_from_env() -> DeployPolicy {
-    let funding = match std::env::var("LEZ_RLN_FUNDING").as_deref() {
-        Err(_) | Ok("faucet") => {
-            let claim_cap = match std::env::var("LEZ_RLN_FAUCET_CLAIM_CAP") {
-                Err(_) => DEFAULT_FAUCET_CLAIM_CAP,
-                Ok(s) => s.trim().parse().unwrap_or_else(|e| {
-                    eprintln!("LEZ_RLN_FAUCET_CLAIM_CAP is not a valid u128: {e}");
-                    std::process::exit(2);
-                }),
-            };
-            FundingPolicy::Faucet { claim_cap }
-        }
-        Ok("wallet-key") => FundingPolicy::WalletKey,
-        Ok(other) => {
-            eprintln!("LEZ_RLN_FUNDING must be 'faucet' or 'wallet-key', got '{other}'");
-            std::process::exit(2);
-        }
-    };
-    let authorized_registrar = match std::env::var("LEZ_RLN_REGISTRAR") {
-        Err(_) => None,
-        Ok(s) => {
-            let bytes = hex::decode(s.trim()).unwrap_or_else(|e| {
-                eprintln!("LEZ_RLN_REGISTRAR is not valid hex: {e}");
-                std::process::exit(2);
-            });
-            Some(bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
-                eprintln!("LEZ_RLN_REGISTRAR must decode to 32 bytes, got {}", v.len());
-                std::process::exit(2);
-            }))
-        }
-    };
-    let free_quota = match std::env::var("LEZ_RLN_FREE_QUOTA") {
-        Err(_) => 0,
-        Ok(s) => s.trim().parse().unwrap_or_else(|e| {
-            eprintln!("LEZ_RLN_FREE_QUOTA is not a valid u64: {e}");
-            std::process::exit(2);
-        }),
-    };
-    DeployPolicy {
-        funding,
-        authorized_registrar,
-        free_quota,
-    }
-}
 
 /// 30 days, in seconds.
 pub const DEFAULT_ACTIVE_DURATION_SECS: u32 = 30 * 24 * 60 * 60;
@@ -272,21 +194,6 @@ fn load_account_file(tree_id: &[u8; 32], prefix: &str) -> Option<AccountId> {
 }
 
 /// Get the path to the supply holding file for a given tree_id.
-pub fn get_supply_holding_path(tree_id: &[u8; 32]) -> PathBuf {
-    account_file_path(tree_id, "supply_holding")
-}
-
-/// Save the supply holding account ID for later reuse.
-pub fn save_supply_holding(tree_id: &[u8; 32], supply_holding_id: &AccountId) {
-    save_account_file(tree_id, "supply_holding", supply_holding_id);
-}
-
-/// Load a previously saved supply holding account ID.
-pub fn load_supply_holding(tree_id: &[u8; 32]) -> Option<AccountId> {
-    load_account_file(tree_id, "supply_holding")
-}
-
-/// Get the path to the payment account file for a given tree_id.
 pub fn get_payment_account_path(tree_id: &[u8; 32]) -> PathBuf {
     account_file_path(tree_id, "payment_account")
 }
@@ -466,12 +373,28 @@ async fn send_metered_tx(
     let signer_key = wallet_core
         .get_account_public_signing_key(*signer)
         .unwrap_or_else(|| panic!("{label}: signer {signer:?} not in wallet"));
-    let payer_key = wallet_core
-        .get_account_public_signing_key(payer)
-        .unwrap_or_else(|| panic!("{label}: payer {payer:?} not in wallet"));
 
+    // Since registration pays its price and its fee from ONE native balance,
+    // signer == payer is the normal case, not an oddity. Listing that account
+    // twice would take two nonces and two signatures for it, and
+    // apply_state_diff advances a nonce once per entry — so the account's
+    // nonce jumps by two and the NEXT transaction fails its nonce check, with
+    // an error that reads like a sequencer fault. The stock wallet dedupes the
+    // same way (`Some(payer) if acc_manager.signs_for(payer)`).
+    let payer_is_signer = payer == *signer;
+    let payer_key = (!payer_is_signer).then(|| {
+        wallet_core
+            .get_account_public_signing_key(payer)
+            .unwrap_or_else(|| panic!("{label}: payer {payer:?} not in wallet"))
+    });
+
+    let nonce_accounts: Vec<AccountId> = if payer_is_signer {
+        vec![*signer]
+    } else {
+        vec![*signer, payer]
+    };
     let nonces = wallet_core
-        .get_accounts_nonces(&[*signer, payer])
+        .get_accounts_nonces(&nonce_accounts)
         .await
         .unwrap_or_else(|e| panic!("{label}: failed to read nonces: {e:?}"));
 
@@ -485,16 +408,17 @@ async fn send_metered_tx(
     );
 
     let hash = message.hash();
-    let witness = nssa::public_transaction::WitnessSet::from_raw_parts(vec![
-        (
-            nssa::Signature::new(&signer_key, &hash),
-            nssa::PublicKey::new_from_private_key(&signer_key),
-        ),
-        (
-            nssa::Signature::new(&payer_key, &hash),
-            nssa::PublicKey::new_from_private_key(&payer_key),
-        ),
-    ]);
+    let mut witnesses = vec![(
+        nssa::Signature::new(signer_key, &hash),
+        nssa::PublicKey::new_from_private_key(signer_key),
+    )];
+    if let Some(payer_key) = payer_key.as_ref() {
+        witnesses.push((
+            nssa::Signature::new(payer_key, &hash),
+            nssa::PublicKey::new_from_private_key(payer_key),
+        ));
+    }
+    let witness = nssa::public_transaction::WitnessSet::from_raw_parts(witnesses);
 
     use sequencer_service_rpc::RpcClient as _;
     wallet_core
@@ -710,25 +634,10 @@ pub async fn run_setup(
     registration_program: &Program,
     merkle_program: &Program,
     tree_id: &[u8; 32],
-    user_funding: u128,
-    policy: &DeployPolicy,
 ) -> AccountId {
-    let config_id = derive_config_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
-    let tree_main_id = derive_tree_main_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
-    let credit_token_id = crate::rln::derive_credit_token_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
-    let credit_supply_id = crate::rln::derive_credit_supply_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
+    let program_account = crate::spel_seeds::program_account(&registration_program.id());
+    let config_id = derive_config_account(&program_account, tree_id);
+    let tree_main_id = derive_tree_main_account(&program_account, tree_id);
 
     println!("Setup Step 1: Checking/deploying programs...");
 
@@ -754,105 +663,39 @@ pub async fn run_setup(
 
     wait_for_block_seal().await;
 
-    require_builtin_program(wallet_core, &programs::token(), "Token program").await;
-
-    wait_for_block_seal().await;
-
-    println!("Setup Step 2: Creating accounts...");
+    // The treasury is a plain public account, deliberately not a PDA: a PDA is
+    // spendable only through a chained call carrying its seeds, issued by its
+    // owning program, and this program has no instruction that would issue
+    // one. It needs no initialization either — a native credit lands on an
+    // account that has never been written to, and leaves it unowned. That is
+    // also why nothing can squat the funds: ownership gates DATA writes, while
+    // a balance decrease is gated separately on the account's own
+    // authorization.
+    println!("Setup Step 2: Creating the treasury account...");
     let (treasury_id, _) = wallet_core.create_new_account_public(None);
+    wallet_core
+        .store_persistent_data()
+        .expect("Failed to store wallet");
+    println!("  Treasury: {treasury_id}");
 
-    // Funding-mode split: wallet-key mints a fixed supply into a
-    // wallet-owned definition (the legacy model); faucet defers token
-    // creation to the program's own `payment` PDA (Step 5b) so no human
-    // ever holds the mint key.
-    let payment_token_id: [u8; 32] = match policy.funding {
-        FundingPolicy::WalletKey => {
-            let (token_definition_id, _) = wallet_core.create_new_account_public(None);
-            let (supply_holding_id, _) = wallet_core.create_new_account_public(None);
-            wallet_core
-                .store_persistent_data()
-                .expect("Failed to store wallet");
-
-            println!("Setup Step 3: Deploying payment token (wallet-key funding)...");
-            Token(wallet_core)
-                .send_new_definition(
-                    wallet::AccountIdentity::Public(token_definition_id),
-                    wallet::AccountIdentity::Public(supply_holding_id),
-                    "RLNTOK".to_string(),
-                    TOKEN_SUPPLY,
-                )
-                .await
-                .expect("Failed to deploy token");
-            wait_for_account_data(wallet_core, &supply_holding_id, wait_account_attempts()).await;
-            println!("  Token deployed: {}", token_definition_id);
-
-            println!("Setup Step 4: Initializing treasury...");
-            Token(wallet_core)
-                .send_transfer_transaction(
-                    wallet::AccountIdentity::Public(supply_holding_id),
-                    wallet::AccountIdentity::Public(treasury_id),
-                    1,
-                )
-                .await
-                .expect("Failed to initialize treasury");
-            wait_for_account_data(wallet_core, &treasury_id, wait_account_attempts()).await;
-
-            // Saved before Step 7: `create_funded_user`'s wallet-key path
-            // funds the user from this sidecar file (`load_supply_holding`).
-            save_supply_holding(tree_id, &supply_holding_id);
-            *token_definition_id.value()
-        }
-        FundingPolicy::Faucet { .. } => {
-            wallet_core
-                .store_persistent_data()
-                .expect("Failed to store wallet");
-            let payment_def = derive_payment_token_account(
-                &crate::spel_seeds::program_account(&registration_program.id()),
-                tree_id,
-            );
-            println!(
-                "Setup Step 3-4: Faucet funding — payment token will be the program PDA {payment_def} (created in Step 5b; treasury seeded by claim)"
-            );
-            *payment_def.value()
-        }
-    };
-
-    println!("Setup Step 5: Initializing registration program...");
-    // Split across 3 txs: a fused Initialize+token+merkle blows the 32M
-    // per-session cycle cap when all chained calls execute inline.
+    println!("Setup Step 3: Initializing registration program...");
+    // Still two transactions rather than one: a fused Initialize+merkle blows
+    // the 32M per-session cycle cap when the chained call executes inline.
     send_init_tx(
         wallet_core,
         registration_program,
-        vec![config_id, credit_token_id],
+        vec![config_id],
         Instruction::Initialize {
             merkle_program_id: bytemuck::cast(merkle_program.id()),
             tree_id: *tree_id,
-            payment_token_id,
             price_per_unit: PRICE_PER_UNIT,
             treasury_account_id: *treasury_id.value(),
-            token_program_id: bytemuck::cast(programs::token().id()),
             max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
             active_duration_for_new_memberships: DEFAULT_ACTIVE_DURATION_SECS,
             grace_period_duration_for_new_memberships: DEFAULT_GRACE_PERIOD_DURATION_SECS,
-            authorized_registrar: policy.authorized_registrar.unwrap_or([0u8; 32]),
-            free_quota: policy.free_quota,
-            faucet_claim_cap: match policy.funding {
-                FundingPolicy::Faucet { claim_cap } => claim_cap,
-                FundingPolicy::WalletKey => 0,
-            },
         },
         "InitializeConfig",
         &config_id,
-    )
-    .await;
-
-    send_init_tx(
-        wallet_core,
-        registration_program,
-        vec![config_id, credit_token_id, credit_supply_id],
-        Instruction::InitializeCreditToken { tree_id: *tree_id },
-        "InitializeCreditToken",
-        &credit_supply_id,
     )
     .await;
 
@@ -867,201 +710,78 @@ pub async fn run_setup(
     .await;
     println!("  Registration initialized");
 
-    if matches!(policy.funding, FundingPolicy::Faucet { .. }) {
-        // 4th init tx (32M-cycle split discipline): create RLNTOK as the
-        // program's own PDA definition — mirror of InitializeCreditToken.
-        println!("Setup Step 5b: Creating payment token (program-owned PDA)...");
-        let payment_def_id = derive_payment_token_account(
-            &crate::spel_seeds::program_account(&registration_program.id()),
-            tree_id,
-        );
-        let payment_supply_id = derive_payment_supply_account(
-            &crate::spel_seeds::program_account(&registration_program.id()),
-            tree_id,
-        );
-        send_init_tx(
-            wallet_core,
-            registration_program,
-            vec![config_id, payment_def_id, payment_supply_id],
-            Instruction::InitializePaymentToken { tree_id: *tree_id },
-            "InitializePaymentToken",
-            &payment_def_id,
-        )
-        .await;
-
-        // Treasury must be an initialized holding of the payment token so
-        // the paid register path's chained Transfer can credit it.
-        println!("Setup Step 5c: Seeding treasury via faucet claim...");
-        claim_payment_tokens(wallet_core, registration_program, tree_id, &treasury_id, 1).await;
-        wait_for_account_data(wallet_core, &treasury_id, wait_account_attempts()).await;
-
-        // The faucet token's supply holder is the (empty) program PDA; saved
-        // so downstream tooling records a supply pointer for this tree.
-        save_supply_holding(tree_id, &payment_supply_id);
-    }
-    println!("Setup Step 6: Saved supply holding for future runs");
-
-    // Single funding path: the config just initialized above is what
-    // `create_funded_user` reads its mode from (on-chain faucet_claim_cap ==
-    // the policy's claim cap here), and both arms saved the supply pointer
-    // its wallet-key fallback loads.
-    println!("Setup Step 7: Creating and funding user account...");
-    let user_payment_holding_id =
-        create_funded_user(wallet_core, registration_program, tree_id, user_funding).await;
-
-    println!("Setup complete!\n");
-    user_payment_holding_id
+    let payer = resolve_payer();
+    save_payment_account(tree_id, &payer);
+    println!("Setup complete! Registrations pay from {payer}\n");
+    payer
 }
 
-/// Submit a faucet `ClaimTokens` minting `amount` payment tokens into `dest`.
-/// `dest` signs (its key must be in the wallet — fresh holdings are claimed
-/// `Claim::Authorized` by the token program). Faucet deployments only: the
-/// guest rejects claims when `faucet_claim_cap` is 0 or `amount` exceeds it.
-pub async fn claim_payment_tokens(
-    wallet_core: &WalletCore,
-    registration_program: &Program,
-    tree_id: &[u8; 32],
-    dest: &AccountId,
-    amount: u128,
-) {
-    let config_id = derive_config_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
-    let payment_def_id = derive_payment_token_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
-    let instruction_data = Program::serialize_instruction(Instruction::ClaimTokens {
-        tree_id: *tree_id,
-        amount,
-    })
-    .expect("serialize ClaimTokens");
-    let hash = wallet_core
-        .send_pub_tx_paid_by(
-            vec![
-                AccountIdentity::PublicNoSign(config_id),
-                AccountIdentity::PublicNoSign(payment_def_id),
-                AccountIdentity::Public(*dest),
-            ],
-            instruction_data,
-            crate::spel_seeds::program_account(&registration_program.id()),
-            fee_payer(),
-        )
-        .await
-        .expect("Failed to send ClaimTokens");
-    println!("  ClaimTokens tx hash: {hash}");
-}
-
-/// Create a new user account and fund it, mode-aware: on faucet deployments
-/// (config `faucet_claim_cap > 0`) the funding is claimed from the faucet
-/// (clamped to the cap); otherwise it is transferred from the saved supply
-/// holding (wallet-key deployments).
-pub async fn create_funded_user(
-    wallet_core: &mut WalletCore,
-    registration_program: &Program,
-    tree_id: &[u8; 32],
-    user_funding: u128,
-) -> AccountId {
-    let (user_payment_holding_id, _) = wallet_core.create_new_account_public(None);
-    wallet_core
-        .store_persistent_data()
-        .expect("Failed to store wallet");
-
-    let faucet_cap = fetch_faucet_claim_cap(wallet_core, registration_program, tree_id).await;
-    if faucet_cap > 0 {
-        let amount = user_funding.min(faucet_cap);
-        println!("  Claiming {} tokens from the faucet...", amount);
-        claim_payment_tokens(
-            wallet_core,
-            registration_program,
-            tree_id,
-            &user_payment_holding_id,
-            amount,
-        )
-        .await;
-        wait_for_account_data(
-            wallet_core,
-            &user_payment_holding_id,
-            wait_account_attempts(),
-        )
-        .await;
-        println!("  User payment holding: {}", user_payment_holding_id);
-        println!("  User funded with {} tokens\n", amount);
-        return user_payment_holding_id;
-    }
-
-    let supply_holding_id = load_supply_holding(tree_id).unwrap_or_else(|| {
-        eprintln!("Error: No saved supply holding found for this tree_id.");
-        eprintln!("Run setup first or check that the supply holding file exists.");
-        std::process::exit(1);
-    });
-
-    println!("  Using saved supply holding: {}", supply_holding_id);
-
-    println!("  Funding new user account...");
-    Token(wallet_core)
-        .send_transfer_transaction(
-            wallet::AccountIdentity::Public(supply_holding_id),
-            wallet::AccountIdentity::Public(user_payment_holding_id),
-            user_funding,
-        )
-        .await
-        .expect("Failed to fund user. The supply holding may be out of funds.");
-
-    wait_for_account_data(
-        wallet_core,
-        &user_payment_holding_id,
-        wait_account_attempts(),
-    )
-    .await;
-    println!("  User payment holding: {}", user_payment_holding_id);
-    println!("  User funded with {} tokens\n", user_funding);
-
-    user_payment_holding_id
-}
-
-/// Read the deployment's `faucet_claim_cap` from the on-chain config
-/// (offset-based; 0 for wallet-key deployments and for pre-policy configs
-/// whose ConfigState predates the field).
-async fn fetch_faucet_claim_cap(
-    wallet_core: &WalletCore,
-    registration_program: &Program,
-    tree_id: &[u8; 32],
-) -> u128 {
-    let config_id = derive_config_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
-    // The sequencer returns absent accounts as Ok with empty data, so Err
-    // here is a transport failure — defaulting to 0 would misroute a faucet
-    // deployment onto the wallet-key supply-transfer path.
-    let account = wallet_core
-        .get_account_public(config_id)
-        .await
-        .expect("Failed to fetch config account (sequencer unreachable?)");
-    let data = account.data.as_ref();
-    if data.len() < CONFIG_OFFSET_FAUCET_CLAIM_CAP + 16 {
-        return 0;
-    }
-    u128::from_le_bytes(
-        data[CONFIG_OFFSET_FAUCET_CLAIM_CAP..CONFIG_OFFSET_FAUCET_CLAIM_CAP + 16]
-            .try_into()
-            .expect("16-byte slice"),
-    )
-}
-
-/// Register an identity via the registration program.
-/// Returns the leaf index assigned to this registration.
+/// An account id as either 64 hex chars or base58.
 ///
-/// This is useful for bulk registration where transactions are sent faster than
-/// the sequencer processes them.
+/// `AccountId`'s own FromStr is base58 only, but the registry module publishes
+/// its payer as hex — `wallet_status` answers `{"payer":"<64 hex>"}` because
+/// that is what every other id on its wire is. Accepting one spelling would
+/// mean the caller that most needs these binaries cannot use them, and the
+/// error for the wrong one ("invalid base58: InvalidBase58Character") does not
+/// suggest the fix. Hex is tried only at exactly 64 characters, so a base58 id
+/// is never silently reinterpreted as bytes.
+pub fn parse_account_id(raw: &str) -> Result<AccountId, String> {
+    let raw = raw.trim();
+    if raw.len() == 64
+        && let Ok(bytes) = hex::decode(raw)
+        && let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice())
+    {
+        return Ok(AccountId::new(id));
+    }
+    raw.parse()
+        .map_err(|e| format!("neither 64-hex nor base58: {e}"))
+}
+
+/// The account that signs a registration and pays for it.
+///
+/// One account now does three jobs that used to take two: it signs the
+/// `Register` transaction, pays the registry price out of its native balance,
+/// and pays the transaction fee. There is nothing to create and nothing to
+/// mint here — no program can mint native balance, so this account must
+/// already have been funded at genesis (`dev.sh`'s `LEZ_RLN_GENESIS_FUND`),
+/// over the bridge, or by a transfer from something already funded.
+pub fn resolve_payer() -> AccountId {
+    fee_payer().unwrap_or_else(|| {
+        eprintln!(
+            "LEZ_RLN_PAYER must name a funded account: a registration pays its \
+             price and its fee from one native balance, and no program can mint native."
+        );
+        std::process::exit(2);
+    })
+}
+
+/// Refuse a payer that cannot cover the registry price AND the fee reserve.
+///
+/// The fee dwarfs the price by two to three orders of magnitude — at the
+/// declared gas limit the reserve is `DECLARED_MAX_FEE`, against a price of
+/// ~1e6 — so "can afford the price" is not the question. The reserve is moved
+/// out of the payer before the guest runs, so an account that clears the price
+/// but not the reserve never reaches the program at all: the sequencer refuses
+/// it with a bare "Incorrect fee" that names neither number.
+async fn assert_can_afford(wallet_core: &WalletCore, payer: &AccountId, price: u128, label: &str) {
+    let account = wallet_core
+        .get_account_public(*payer)
+        .await
+        .unwrap_or_else(|e| panic!("{label}: cannot read payer {payer}: {e:?}"));
+    let required = price.saturating_add(DECLARED_MAX_FEE);
+    assert!(
+        account.balance >= required,
+        "{label}: payer {payer} holds {} native, needs {required} ({price} price + {DECLARED_MAX_FEE} fee reserve)",
+        account.balance,
+    );
+}
+
 pub async fn register_identity(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
-    user_holding_id: &AccountId,
+    payer_id: &AccountId,
     rate_limit: u64,
 ) -> u64 {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
@@ -1111,12 +831,20 @@ pub async fn register_identity(
     let accounts = vec![
         config_account,
         tree_main_account,
-        *user_holding_id,
+        *payer_id,
         treasury_account_id,
         subtree_account,
         clock_account_id(),
         membership_account,
     ];
+
+    assert_can_afford(
+        wallet_core,
+        payer_id,
+        PRICE_PER_UNIT.saturating_mul(u128::from(rate_limit)),
+        "register",
+    )
+    .await;
 
     let instruction = Instruction::Register {
         tree_id: *tree_id,
@@ -1130,7 +858,7 @@ pub async fn register_identity(
         wallet_core,
         crate::spel_seeds::program_account(&registration_program.id()),
         accounts,
-        user_holding_id,
+        payer_id,
         instruction_data,
         "Failed to register identity",
     )
@@ -1142,16 +870,16 @@ pub async fn register_identity(
 /// Renew a membership that is currently inside its grace period.
 ///
 /// Renewal costs the same as registering the membership's rate limit, so
-/// `payer_holding_id` must be a holding of the deployment's payment token with
-/// enough balance; it signs and is debited. Anyone may pay for anyone's
-/// renewal — the charge, not the caller's identity, is what stops a third
-/// party from pinning an abandoned membership's rate limit forever.
+/// `payer_id` must hold that much NATIVE balance on top of the fee reserve; it
+/// signs and is debited. Anyone may pay for anyone's renewal — the charge, not
+/// the caller's identity, is what stops a third party from pinning an
+/// abandoned membership's rate limit forever.
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
-    payer_holding_id: &AccountId,
+    payer_id: &AccountId,
     treasury_id: &AccountId,
 ) {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
@@ -1170,10 +898,23 @@ pub async fn extend_membership(
     let accounts = vec![
         config_account,
         membership_account,
-        *payer_holding_id,
+        *payer_id,
         *treasury_id,
         clock_account_id(),
     ];
+
+    // Priced off the membership's own rate limit, which the guest reads and
+    // the host would have to fetch; MAX_RATE_LIMIT is the ceiling, so checking
+    // against it refuses an account that could not afford any renewal without
+    // a second round trip. A payer that clears this can still be refused by
+    // the guest for its actual price, which is the authority.
+    assert_can_afford(
+        wallet_core,
+        payer_id,
+        PRICE_PER_UNIT.saturating_mul(u128::from(crate::rln::MAX_RATE_LIMIT)),
+        "extend",
+    )
+    .await;
 
     let instruction = Instruction::Extend {
         tree_id: *tree_id,
@@ -1185,7 +926,7 @@ pub async fn extend_membership(
         wallet_core,
         crate::spel_seeds::program_account(&registration_program.id()),
         accounts,
-        payer_holding_id,
+        payer_id,
         instruction_data,
         "Failed to extend membership",
     )

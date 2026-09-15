@@ -5,6 +5,16 @@
 //! when building transactions. Variants and field order must match the
 //! `#[instruction]` fn parameter lists in `methods/guest/src/program.rs`
 //! (account params stripped, remaining args preserved in order).
+//!
+//! Borsh encodes a variant as its DECLARATION INDEX, so removing or reordering
+//! a variant re-numbers every variant after it. A host built against one
+//! revision of this enum and a guest built against another agree on the bytes
+//! and disagree on their meaning, silently. Move the two together.
+//!
+//! A membership is paid for in the NATIVE asset by the account that signs the
+//! transaction, which is also its fee payer. There is no payment token, no
+//! credit token and no faucet: no program can mint native balance, so it
+//! enters an account only at genesis, over the bridge, or by transfer.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -13,25 +23,21 @@ use serde::{Deserialize, Serialize};
 pub enum Instruction {
     Initialize {
         merkle_program_id: [u8; 32],
-        token_program_id: [u8; 32],
         tree_id: [u8; 32],
-        payment_token_id: [u8; 32],
+        /// Native atomic units charged per unit of rate limit.
         price_per_unit: u128,
+        /// Plain public account the price is credited to. Deliberately not a
+        /// PDA: a PDA is spendable only through a chained call carrying its
+        /// seeds, issued by its owning program, and this program has no
+        /// instruction that would issue one.
         treasury_account_id: [u8; 32],
         max_total_rate_limit: u64,
         active_duration_for_new_memberships: u32,
         grace_period_duration_for_new_memberships: u32,
-        authorized_registrar: [u8; 32],
-        free_quota: u64,
-        faucet_claim_cap: u128,
     },
-    /// Callee program ids are deliberately absent here and on the two
-    /// initializers below: they come from the config PDA these instructions
-    /// declare. A caller-supplied program id would be handed `pda_seeds`
-    /// authorizing it to claim the registration program's own PDAs.
-    InitializeCreditToken {
-        tree_id: [u8; 32],
-    },
+    /// The callee program id is deliberately absent: it comes from the config
+    /// PDA this instruction declares. A caller-supplied program id would be
+    /// handed `pda_seeds` authorizing it to claim this program's own PDAs.
     InitializeMerkleTree {
         tree_id: [u8; 32],
     },
@@ -39,16 +45,6 @@ pub enum Instruction {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
         rate_limit: u64,
-        subtree_id: u32,
-    },
-    BuyCredits {
-        tree_id: [u8; 32],
-        amount: u128,
-    },
-    RegisterWithCredits {
-        tree_id: [u8; 32],
-        id_commitment: [u8; 32],
-        amount_to_burn: u64,
         subtree_id: u32,
     },
     Slash {
@@ -64,27 +60,6 @@ pub enum Instruction {
     Erase {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
-        subtree_id: u32,
-    },
-    /// Create the payment token ("RLNTOK") as a program-owned PDA definition
-    /// — faucet deployments only; the mint authority is the program itself,
-    /// no human key. Mirrors `InitializeCreditToken`.
-    InitializePaymentToken {
-        tree_id: [u8; 32],
-    },
-    /// Faucet: mint up to `faucet_claim_cap` payment tokens to the (signing)
-    /// destination holding. Rejected when the deployment's cap is 0.
-    ClaimTokens {
-        tree_id: [u8; 32],
-        amount: u128,
-    },
-    /// Create a membership without payment — only the deployment's
-    /// `authorized_registrar` may call it, and only while
-    /// `free_quota_remaining > 0`.
-    RegisterFree {
-        tree_id: [u8; 32],
-        id_commitment: [u8; 32],
-        rate_limit: u64,
         subtree_id: u32,
     },
 }

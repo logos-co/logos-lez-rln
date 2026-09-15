@@ -16,8 +16,6 @@ use crate::handlers;
 pub struct ConfigState {
     pub merkle_program_id: [u8; 32],
     pub tree_id: [u8; 32],
-    pub payment_token_id: [u8; 32],
-    pub receipt_token_id: [u8; 32],
     pub price_per_unit: u128,
     pub treasury_account_id: [u8; 32],
     pub total_registrations: u64,
@@ -25,10 +23,6 @@ pub struct ConfigState {
     pub current_total_rate_limit: u64,
     pub active_duration_for_new_memberships: u32,
     pub grace_period_duration_for_new_memberships: u32,
-    pub token_program_id: [u8; 32],
-    pub authorized_registrar: [u8; 32],
-    pub free_quota_remaining: u64,
-    pub faucet_claim_cap: u128,
 }
 
 impl ConfigState {
@@ -80,8 +74,6 @@ mod layout_equivalence {
         let local = ConfigState {
             merkle_program_id: [1u8; 32],
             tree_id: [2u8; 32],
-            payment_token_id: [3u8; 32],
-            receipt_token_id: [4u8; 32],
             price_per_unit: 5,
             treasury_account_id: [6u8; 32],
             total_registrations: 7,
@@ -89,16 +81,10 @@ mod layout_equivalence {
             current_total_rate_limit: 9,
             active_duration_for_new_memberships: 10,
             grace_period_duration_for_new_memberships: 11,
-            token_program_id: [12u8; 32],
-            authorized_registrar: [13u8; 32],
-            free_quota_remaining: 14,
-            faucet_claim_cap: 15,
         };
         let shared = SharedConfigState {
             merkle_program_id: [1u8; 32],
             tree_id: [2u8; 32],
-            payment_token_id: [3u8; 32],
-            receipt_token_id: [4u8; 32],
             price_per_unit: 5,
             treasury_account_id: [6u8; 32],
             total_registrations: 7,
@@ -106,10 +92,6 @@ mod layout_equivalence {
             current_total_rate_limit: 9,
             active_duration_for_new_memberships: 10,
             grace_period_duration_for_new_memberships: 11,
-            token_program_id: [12u8; 32],
-            authorized_registrar: [13u8; 32],
-            free_quota_remaining: 14,
-            faucet_claim_cap: 15,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -152,52 +134,23 @@ pub mod rln_registration {
     #[instruction]
     pub fn initialize(
         #[account(init, pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("receipt"), arg("tree_id")])] credit_token: AccountWithMetadata,
         merkle_program_id: [u8; 32],
-        token_program_id: [u8; 32],
         tree_id: [u8; 32],
-        payment_token_id: [u8; 32],
         price_per_unit: u128,
         treasury_account_id: [u8; 32],
         max_total_rate_limit: u64,
         active_duration_for_new_memberships: u32,
         grace_period_duration_for_new_memberships: u32,
-        authorized_registrar: [u8; 32],
-        free_quota: u64,
-        faucet_claim_cap: u128,
     ) -> SpelResult {
         Ok(handlers::initialize(
             config,
-            credit_token,
             merkle_program_id,
-            token_program_id,
             tree_id,
-            payment_token_id,
             price_per_unit,
             treasury_account_id,
             max_total_rate_limit,
             active_duration_for_new_memberships,
             grace_period_duration_for_new_memberships,
-            authorized_registrar,
-            free_quota,
-            faucet_claim_cap,
-        ))
-    }
-
-    #[instruction]
-    pub fn initialize_credit_token(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(init, pda = [literal("receipt"), arg("tree_id")])]
-        credit_token: AccountWithMetadata,
-        #[account(init, pda = [literal("supply"), arg("tree_id")])]
-        credit_supply: AccountWithMetadata,
-        tree_id: [u8; 32],
-    ) -> SpelResult {
-        Ok(handlers::initialize_credit_token(
-            config,
-            credit_token,
-            credit_supply,
-            tree_id,
         ))
     }
 
@@ -214,8 +167,8 @@ pub mod rln_registration {
     pub fn register(
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
-        #[account(signer)] user_holding: AccountWithMetadata,
-        treasury_holding: AccountWithMetadata,
+        #[account(signer)] payer: AccountWithMetadata,
+        treasury: AccountWithMetadata,
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
         clock_account: AccountWithMetadata,
@@ -229,68 +182,14 @@ pub mod rln_registration {
         Ok(handlers::register(
             config,
             tree_main,
-            user_holding,
-            treasury_holding,
+            payer,
+            treasury,
             bottom_subtree,
             clock_account,
             membership,
             tree_id,
             id_commitment,
             rate_limit,
-            subtree_id,
-        ))
-    }
-
-    #[instruction]
-    pub fn buy_credits(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("receipt"), arg("tree_id")])]
-        credit_token_def: AccountWithMetadata,
-        #[account(signer)] user_payment_holding: AccountWithMetadata,
-        treasury_holding: AccountWithMetadata,
-        user_credit_holding: AccountWithMetadata,
-        tree_id: [u8; 32],
-        amount: u128,
-    ) -> SpelResult {
-        Ok(handlers::buy_credits(
-            config,
-            credit_token_def,
-            user_payment_holding,
-            treasury_holding,
-            user_credit_holding,
-            tree_id,
-            amount,
-        ))
-    }
-
-    #[instruction]
-    pub fn register_with_credits(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("receipt"), arg("tree_id")])]
-        credit_token_def: AccountWithMetadata,
-        #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
-        #[account(signer)] user_credit_holding: AccountWithMetadata,
-        #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
-        bottom_subtree: AccountWithMetadata,
-        clock_account: AccountWithMetadata,
-        #[account(init, pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
-        membership: AccountWithMetadata,
-        tree_id: [u8; 32],
-        id_commitment: [u8; 32],
-        amount_to_burn: u64,
-        subtree_id: u32,
-    ) -> SpelResult {
-        Ok(handlers::register_with_credits(
-            config,
-            credit_token_def,
-            tree_main,
-            user_credit_holding,
-            bottom_subtree,
-            clock_account,
-            membership,
-            tree_id,
-            id_commitment,
-            amount_to_burn,
             subtree_id,
         ))
     }
@@ -325,8 +224,8 @@ pub mod rln_registration {
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
         membership: AccountWithMetadata,
-        #[account(signer)] payer_holding: AccountWithMetadata,
-        treasury_holding: AccountWithMetadata,
+        #[account(signer)] payer: AccountWithMetadata,
+        treasury: AccountWithMetadata,
         clock_account: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
@@ -335,74 +234,10 @@ pub mod rln_registration {
         Ok(handlers::extend(
             config,
             membership,
-            payer_holding,
-            treasury_holding,
+            payer,
+            treasury,
             clock_account,
             tree_id,
-        ))
-    }
-
-    #[instruction]
-    pub fn initialize_payment_token(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(init, pda = [literal("payment"), arg("tree_id")])]
-        payment_token: AccountWithMetadata,
-        #[account(init, pda = [literal("payment_supply"), arg("tree_id")])]
-        payment_supply: AccountWithMetadata,
-        tree_id: [u8; 32],
-    ) -> SpelResult {
-        Ok(handlers::initialize_payment_token(
-            config,
-            payment_token,
-            payment_supply,
-            tree_id,
-        ))
-    }
-
-    #[instruction]
-    pub fn claim_tokens(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("payment"), arg("tree_id")])]
-        payment_token_def: AccountWithMetadata,
-        #[account(signer)] dest_holding: AccountWithMetadata,
-        tree_id: [u8; 32],
-        amount: u128,
-    ) -> SpelResult {
-        Ok(handlers::claim_tokens(
-            config,
-            payment_token_def,
-            dest_holding,
-            tree_id,
-            amount,
-        ))
-    }
-
-    #[instruction]
-    pub fn register_free(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
-        #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
-        #[account(signer)] registrar: AccountWithMetadata,
-        #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
-        bottom_subtree: AccountWithMetadata,
-        clock_account: AccountWithMetadata,
-        #[account(init, pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
-        membership: AccountWithMetadata,
-        tree_id: [u8; 32],
-        id_commitment: [u8; 32],
-        rate_limit: u64,
-        subtree_id: u32,
-    ) -> SpelResult {
-        Ok(handlers::register_free(
-            config,
-            tree_main,
-            registrar,
-            bottom_subtree,
-            clock_account,
-            membership,
-            tree_id,
-            id_commitment,
-            rate_limit,
-            subtree_id,
         ))
     }
 

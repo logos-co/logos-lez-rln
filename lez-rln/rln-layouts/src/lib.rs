@@ -88,35 +88,6 @@ le_int!(U64Le, u64, 8);
 le_int!(U128Le, u128, 16);
 
 // ============================================================================
-// Account Layouts
-// ============================================================================
-
-/// Zero-copy layout for token holding account (49 bytes).
-#[repr(C, packed)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct TokenHoldingLayout {
-    pub account_type: u8,
-    pub definition_id: [u8; 32],
-    pub balance: U128Le,
-}
-
-impl TokenHoldingLayout {
-    pub const SIZE: usize = 49;
-
-    #[inline]
-    pub fn parse(data: &[u8]) -> &Self {
-        bytemuck::from_bytes(&data[..Self::SIZE])
-    }
-
-    #[inline]
-    pub fn balance(&self) -> u128 {
-        self.balance.get()
-    }
-}
-
-const _: () = assert!(core::mem::size_of::<TokenHoldingLayout>() == TokenHoldingLayout::SIZE);
-
-// ============================================================================
 // Merkle Tree Opcodes
 // ============================================================================
 

@@ -46,7 +46,6 @@ workspace = true
 # rc6 lssa fetched as git deps (nssa_core->lee_core; package alias keeps guest
 # source unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
 nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2", default-features = false }
-token_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2" }
 clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"

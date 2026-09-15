@@ -40,9 +40,7 @@ rand_chacha = "0.3"
 
 [features]
 rc5-state-tests = []
-# Privacy-flow tests use SharedSecretKey::encapsulate_deterministic which is
-# gated behind lee_core's test_utils feature.
-rc5-state-tests-privacy = ["rc5-state-tests", "nssa_core/test_utils"]
+rc5-state-tests-privacy = ["rc5-state-tests"]
 
 [[bin]]
 name = "run_rln_proof"
@@ -57,8 +55,16 @@ name = "mint_payer"
 path = "src/bin/mint_payer.rs"
 
 [[bin]]
+name = "fund_account"
+path = "src/bin/fund_account.rs"
+
+[[bin]]
 name = "register_member"
 path = "src/bin/register_member.rs"
+
+[[bin]]
+name = "account_balance"
+path = "src/bin/account_balance.rs"
 
 [dev-dependencies]
 nssa = { package = "lee", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2", features = ["test-utils"] }
