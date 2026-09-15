@@ -11,14 +11,13 @@ use logos_lez_rln::{
     merkle_tree::wait_for_leaf,
     rln::{
         client::{
-            RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
+            RlnIdentity, create_identity, init_wallet, resolve_payer, load_programs,
             register_identity, tree_id_from_env,
         },
         derive_config_account,
     },
 };
 
-const USER_FUNDING: u128 = 100_000_000;
 const USER_MESSAGE_LIMIT: u64 = 100;
 
 #[tokio::main]
@@ -34,13 +33,7 @@ async fn main() {
     );
 
     for i in 0..count {
-        let user_holding_id = create_funded_user(
-            &mut wallet_core,
-            &registration_program,
-            &tree_id,
-            USER_FUNDING,
-        )
-        .await;
+        let user_holding_id = resolve_payer();
 
         let RlnIdentity {
             id_commitment_bytes,

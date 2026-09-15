@@ -9,18 +9,11 @@
 
 use logos_lez_rln::rln::{
     client::{
-        create_funded_user, init_wallet, is_initialized, load_programs, policy_from_env, run_setup,
+        init_wallet, resolve_payer, is_initialized, load_programs, run_setup,
         save_payment_account, tree_id_from_env,
     },
     derive_config_account, derive_tree_main_account,
 };
-
-/// 10 B RLNTOK funded per payment account. At PRICE_PER_UNIT=10_000 and the
-/// demo's rateLimit=100, each registration burns 1 M tokens — so each payment
-/// account hands out ~10K registrations before depletion forces a re-fund
-/// from supply_holding. Tracks the TOKEN_SUPPLY 10x bump in client.rs (10 B
-/// supply funded only ~1K regs per account, hit the wall in long dev cycles).
-const USER_FUNDING: u128 = 10_000_000_000;
 
 #[tokio::main]
 async fn main() {
@@ -31,14 +24,8 @@ async fn main() {
     println!("=== RLN Setup ===\n");
 
     let user_holding_id = if is_initialized(&wallet_core, &registration_program, &tree_id).await {
-        println!("Registration already initialized, creating new funded account...\n");
-        create_funded_user(
-            &mut wallet_core,
-            &registration_program,
-            &tree_id,
-            USER_FUNDING,
-        )
-        .await
+        println!("Registration already initialized; registrations pay from LEZ_RLN_PAYER\n");
+        resolve_payer()
     } else {
         println!("First run, deploying programs and initializing tree...\n");
         run_setup(
@@ -46,8 +33,6 @@ async fn main() {
             &registration_program,
             &merkle_program,
             &tree_id,
-            USER_FUNDING,
-            &policy_from_env(),
         )
         .await
     };

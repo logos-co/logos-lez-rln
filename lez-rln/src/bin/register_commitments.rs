@@ -14,14 +14,12 @@ use logos_lez_rln::{
     merkle_tree::wait_for_leaf,
     rln::{
         client::{
-            create_funded_user, init_wallet, load_programs, rate_commitment_from_fr,
+            init_wallet, resolve_payer, load_programs, rate_commitment_from_fr,
             register_identity, tree_id_from_env,
         },
         derive_config_account,
     },
 };
-
-const USER_FUNDING: u128 = 100_000_000;
 
 fn hex_to_bytes32(hex: &str) -> [u8; 32] {
     let hex = hex.trim();
@@ -70,7 +68,7 @@ async fn main() {
         entries.len()
     );
 
-    let mut wallet_core = init_wallet().await;
+    let wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
     let (registration_program, _merkle_program) = load_programs();
     let config_account_id = derive_config_account(
@@ -79,13 +77,7 @@ async fn main() {
     );
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
-        let user_holding_id = create_funded_user(
-            &mut wallet_core,
-            &registration_program,
-            &tree_id,
-            USER_FUNDING,
-        )
-        .await;
+        let user_holding_id = resolve_payer();
 
         let leaf_bytes = compute_rate_commitment(id_commitment, *rate_limit);
 

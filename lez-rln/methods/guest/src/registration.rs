@@ -10,28 +10,7 @@ pub use rln_layouts::OFFSET_NEXT_INDEX as TREE_OFFSET_NEXT_INDEX;
 pub use crate::layouts::{
     CLOCK_50_ACCOUNT_ID_BYTES, MAX_RATE_LIMIT, MIN_RATE_LIMIT, is_expired, is_in_grace_period,
 };
-use crate::{
-    hash::{hash_pair, validate_field_element},
-    layouts,
-};
-
-// ============================================================================
-// Token Operations
-// ============================================================================
-
-/// A decoded token-holding account: which token it holds and the balance.
-pub struct TokenHolding {
-    pub definition_id: [u8; 32],
-    pub balance: u128,
-}
-
-pub fn parse_token_holding(data: &[u8]) -> TokenHolding {
-    let layout = layouts::TokenHoldingLayout::parse(data);
-    TokenHolding {
-        definition_id: layout.definition_id,
-        balance: layout.balance(),
-    }
-}
+use crate::hash::{hash_pair, validate_field_element};
 
 // ============================================================================
 // Validation
@@ -56,9 +35,16 @@ pub fn validate_rate_limit(rate_limit: u64) {
     );
 }
 
-/// Calculate payment amount for a given rate limit.
+/// Price of a membership at `rate_limit`, in native atomic units.
+///
+/// Saturating rather than wrapping: the product of a u128 price and a
+/// rate limit capped at `MAX_RATE_LIMIT` cannot realistically overflow, but
+/// this now prices a debit against a REAL balance rather than a test token,
+/// and a wrapped product would compute a price nobody asked for. Saturation
+/// turns that into an unaffordable one, which the caller's balance assert
+/// then refuses.
 pub fn calculate_payment_amount(rate_limit: u64, price_per_unit: u128) -> u128 {
-    price_per_unit * (rate_limit as u128)
+    price_per_unit.saturating_mul(rate_limit as u128)
 }
 
 // ============================================================================
@@ -136,6 +122,13 @@ mod tests {
         assert_eq!(calculate_payment_amount(rate_limit, price_per_unit), 1000);
 
         assert_eq!(calculate_payment_amount(600, 5), 3000);
+    }
+
+    /// A price that cannot be paid is better than a price that wrapped into
+    /// one that can.
+    #[test]
+    fn calculate_payment_amount_saturates_instead_of_wrapping() {
+        assert_eq!(calculate_payment_amount(2, u128::MAX), u128::MAX);
     }
 
     #[test]

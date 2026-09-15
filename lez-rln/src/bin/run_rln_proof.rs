@@ -6,13 +6,11 @@ use logos_lez_rln::{
     fr_bytes::fr_to_bytes_le,
     merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf},
     rln::client::{
-        RlnIdentity, create_funded_user, create_identity, init_wallet, load_programs,
+        RlnIdentity, create_identity, init_wallet, resolve_payer, load_programs,
         register_identity, tree_id_from_env,
     },
 };
 use rln::prelude::{Fr, Hasher, PoseidonHash, RLNWitnessInput, hash_to_field_le};
-
-const USER_FUNDING: u128 = 100_000_000;
 
 // RLN proof constants
 const USER_MESSAGE_LIMIT: u64 = 100;
@@ -29,13 +27,7 @@ async fn main() {
 
     println!("=== RLN Proof Demo ===\n");
 
-    let user_holding_id = create_funded_user(
-        &mut wallet_core,
-        &registration_program,
-        &tree_id,
-        USER_FUNDING,
-    )
-    .await;
+    let user_holding_id = resolve_payer();
 
     // Step 1: Create identity using zerokit
     println!("Step 1: Creating identity...");
