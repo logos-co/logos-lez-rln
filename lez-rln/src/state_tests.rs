@@ -585,7 +585,8 @@ mod tests {
         state: &V03State,
     ) -> (PrivacyPreservingTransaction, Account) {
         let recipient_id = recipient_keys.account_id(0);
-        let sender = AccountWithMetadata::new(state.get_account_by_id(*sender_id), true, *sender_id);
+        let sender =
+            AccountWithMetadata::new(state.get_account_by_id(*sender_id), true, *sender_id);
         let sender_nonce = sender.account.nonce;
         let recipient = AccountWithMetadata::new(
             Account::default(),
@@ -1964,8 +1965,7 @@ mod tests {
             "a private recipient leaves nothing at its account id in public state"
         );
 
-        // 3. Deshield: back out to a public account that never touched the
-        //    funder.
+        // 3. Deshield: back out to a public account that never touched the funder.
         let (deshield_tx, bob_emptied) =
             deshield_tokens(&bob, &bob_after, &exit_id, 150_000, &state);
         state

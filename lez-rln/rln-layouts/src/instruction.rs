@@ -38,9 +38,7 @@ pub enum Instruction {
     /// The callee program id is deliberately absent: it comes from the config
     /// PDA this instruction declares. A caller-supplied program id would be
     /// handed `pda_seeds` authorizing it to claim this program's own PDAs.
-    InitializeMerkleTree {
-        tree_id: [u8; 32],
-    },
+    InitializeMerkleTree { tree_id: [u8; 32] },
     Register {
         tree_id: [u8; 32],
         id_commitment: [u8; 32],

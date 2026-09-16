@@ -469,7 +469,7 @@ dependencies = [
 [[package]]
 name = "clock_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -1045,7 +1045,7 @@ dependencies = [
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "base58",
  "borsh",
@@ -1822,7 +1822,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "spel-framework"
 version = "0.6.0"
-source = "git+https://github.com/adklempner/spel.git?rev=763037cf995f1c088f53e607fe411376b85c5743#763037cf995f1c088f53e607fe411376b85c5743"
+source = "git+https://github.com/adklempner/spel.git?rev=04b9eda1ecb9571407c08cea2687ae9446aa8924#04b9eda1ecb9571407c08cea2687ae9446aa8924"
 dependencies = [
  "borsh",
  "lee_core",
@@ -1834,7 +1834,7 @@ dependencies = [
 [[package]]
 name = "spel-framework-core"
 version = "0.6.0"
-source = "git+https://github.com/adklempner/spel.git?rev=763037cf995f1c088f53e607fe411376b85c5743#763037cf995f1c088f53e607fe411376b85c5743"
+source = "git+https://github.com/adklempner/spel.git?rev=04b9eda1ecb9571407c08cea2687ae9446aa8924#04b9eda1ecb9571407c08cea2687ae9446aa8924"
 dependencies = [
  "base58",
  "borsh",
@@ -1851,7 +1851,7 @@ dependencies = [
 [[package]]
 name = "spel-framework-macros"
 version = "0.6.0"
-source = "git+https://github.com/adklempner/spel.git?rev=763037cf995f1c088f53e607fe411376b85c5743#763037cf995f1c088f53e607fe411376b85c5743"
+source = "git+https://github.com/adklempner/spel.git?rev=04b9eda1ecb9571407c08cea2687ae9446aa8924#04b9eda1ecb9571407c08cea2687ae9446aa8924"
 dependencies = [
  "proc-macro2",
  "quote",

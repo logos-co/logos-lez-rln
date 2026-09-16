@@ -6,8 +6,8 @@ use logos_lez_rln::{
     fr_bytes::fr_to_bytes_le,
     merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf},
     rln::client::{
-        RlnIdentity, create_identity, init_wallet, resolve_payer, load_programs,
-        register_identity, tree_id_from_env,
+        RlnIdentity, create_identity, init_wallet, load_programs, register_identity, resolve_payer,
+        tree_id_from_env,
     },
 };
 use rln::prelude::{Fr, Hasher, PoseidonHash, RLNWitnessInput, hash_to_field_le};

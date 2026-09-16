@@ -47,8 +47,9 @@ pub use rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rln_layouts::ConfigState;
+
+    use super::*;
 
     /// Every offset above recovers the field it names from a real serialized
     /// `ConfigState`. The module in logos-rln-modules keeps its own copy of
@@ -74,7 +75,10 @@ mod tests {
             &b[CONFIG_OFFSET_MERKLE_PROGRAM_ID..CONFIG_OFFSET_MERKLE_PROGRAM_ID + 32],
             &[0x11; 32],
         );
-        assert_eq!(&b[CONFIG_OFFSET_TREE_ID..CONFIG_OFFSET_TREE_ID + 32], &[0x22; 32]);
+        assert_eq!(
+            &b[CONFIG_OFFSET_TREE_ID..CONFIG_OFFSET_TREE_ID + 32],
+            &[0x22; 32]
+        );
         assert_eq!(
             u128::from_le_bytes(
                 b[CONFIG_OFFSET_PRICE_PER_UNIT..CONFIG_OFFSET_PRICE_PER_UNIT + 16]

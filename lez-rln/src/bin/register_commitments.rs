@@ -14,8 +14,8 @@ use logos_lez_rln::{
     merkle_tree::wait_for_leaf,
     rln::{
         client::{
-            init_wallet, resolve_payer, load_programs, rate_commitment_from_fr,
-            register_identity, tree_id_from_env,
+            init_wallet, load_programs, rate_commitment_from_fr, register_identity, resolve_payer,
+            tree_id_from_env,
         },
         derive_config_account,
     },

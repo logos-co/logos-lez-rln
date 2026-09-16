@@ -45,8 +45,8 @@ workspace = true
 [dependencies]
 # rc6 lssa fetched as git deps (nssa_core->lee_core; package alias keeps guest
 # source unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
-nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2", default-features = false }
-clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2" }
+nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc3", default-features = false }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc3" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
@@ -55,7 +55,7 @@ rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseid
 # spel-framework must target the same lee_core release as nssa_core above: it
 # builds the ProgramOutput this guest commits, so a mismatch is an ABI break
 # that only shows up as a rejected transaction.
-spel-framework = { git = "https://github.com/adklempner/spel.git", rev = "763037cf995f1c088f53e607fe411376b85c5743" }
+spel-framework = { git = "https://github.com/adklempner/spel.git", rev = "04b9eda1ecb9571407c08cea2687ae9446aa8924" }
 
 # NOTE: the risc0 guest toolchain is rustc 1.88; some transitive deps have newer
 # MSRVs and must be held back in Cargo.lock (cargo update --precise), or

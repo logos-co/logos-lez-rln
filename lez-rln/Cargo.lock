@@ -94,7 +94,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "amm_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -455,7 +455,7 @@ checksum = "4858a9d740c5007a9069007c3b4e91152d0506f13c1b31dd49051fd537656156"
 [[package]]
 name = "associated_token_account_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -591,7 +591,7 @@ dependencies = [
 [[package]]
 name = "authenticated_transfer_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -871,7 +871,7 @@ dependencies = [
 [[package]]
 name = "bridge_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -881,7 +881,7 @@ dependencies = [
 [[package]]
 name = "bridge_lock_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -900,7 +900,7 @@ dependencies = [
 [[package]]
 name = "build_utils"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "anyhow",
  "risc0-binfmt",
@@ -1136,7 +1136,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "clock_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -1176,7 +1176,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "anyhow",
  "authenticated_transfer_core",
@@ -1349,7 +1349,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "cross_zone_inbox_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -2124,15 +2124,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
-name = "faucet_core"
-version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
-dependencies = [
- "borsh",
- "lee_core",
-]
-
-[[package]]
 name = "fd-lock"
 version = "4.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2146,7 +2137,7 @@ dependencies = [
 [[package]]
 name = "fee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -3535,7 +3526,7 @@ dependencies = [
 [[package]]
 name = "key_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3582,7 +3573,7 @@ dependencies = [
 [[package]]
 name = "keycard_wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "bip39",
  "hex",
@@ -3630,7 +3621,7 @@ dependencies = [
 [[package]]
 name = "lee"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "anyhow",
  "borsh",
@@ -3651,7 +3642,7 @@ dependencies = [
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "base58",
  "borsh",
@@ -5688,7 +5679,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "ping_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -5933,7 +5924,7 @@ dependencies = [
 [[package]]
 name = "program_loader_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -5943,7 +5934,7 @@ dependencies = [
 [[package]]
 name = "programs"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "build_utils",
@@ -7165,7 +7156,7 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 [[package]]
 name = "sequencer_service_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "common",
  "hex",
@@ -7178,7 +7169,7 @@ dependencies = [
 [[package]]
 name = "sequencer_service_rpc"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "jsonrpsee",
  "sequencer_service_protocol",
@@ -7187,7 +7178,7 @@ dependencies = [
 [[package]]
 name = "sequencer_stake_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "ed25519-dalek",
@@ -7804,11 +7795,10 @@ dependencies = [
 [[package]]
 name = "system_accounts"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "bridge_core",
  "clock_core",
- "faucet_core",
  "fee_core",
  "lee_core",
  "programs",
@@ -7848,7 +7838,7 @@ dependencies = [
 [[package]]
 name = "testnet_initial_state"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "key_protocol",
  "lee",
@@ -7974,7 +7964,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "token_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -8654,7 +8644,7 @@ dependencies = [
 [[package]]
 name = "wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc2#d8596eb734bf9c9ce801afb92df06098a2eb098a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.5-rc3#a03b54aa4aa0968a92ce9ad6732749b6aaf1f1c4"
 dependencies = [
  "amm_core",
  "anyhow",

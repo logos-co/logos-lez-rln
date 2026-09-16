@@ -9,8 +9,8 @@
 
 use logos_lez_rln::rln::{
     client::{
-        init_wallet, resolve_payer, is_initialized, load_programs, run_setup,
-        save_payment_account, tree_id_from_env,
+        init_wallet, is_initialized, load_programs, resolve_payer, run_setup, save_payment_account,
+        tree_id_from_env,
     },
     derive_config_account, derive_tree_main_account,
 };
