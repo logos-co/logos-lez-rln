@@ -6,11 +6,11 @@ use nssa_core::{Timestamp, account::AccountWithMetadata};
 // ============================================================================
 pub use rln_layouts::OFFSET_NEXT_INDEX as TREE_OFFSET_NEXT_INDEX;
 
+use crate::hash::{hash_pair, validate_field_element};
 // Re-export rate limit and expiration constants / helpers from shared crate
 pub use crate::layouts::{
     CLOCK_50_ACCOUNT_ID_BYTES, MAX_RATE_LIMIT, MIN_RATE_LIMIT, is_expired, is_in_grace_period,
 };
-use crate::hash::{hash_pair, validate_field_element};
 
 // ============================================================================
 // Validation

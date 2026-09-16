@@ -9,8 +9,7 @@
 
 use logos_lez_rln::rln::{
     client::{load_programs, tree_id_from_env},
-    derive_config_account,
-    derive_tree_main_account,
+    derive_config_account, derive_tree_main_account,
 };
 use nssa::AccountId;
 
