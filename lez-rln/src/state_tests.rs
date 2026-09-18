@@ -3637,6 +3637,34 @@ mod tests {
         );
     }
 
+    /// A fresh chain carries the genesis CLOCK_50 (timestamp 0) until the
+    /// sequencer's first refresh of it at block 50. Registering against that
+    /// would stamp the membership's whole lifetime in 1970 and expire it the
+    /// moment the clock is first written, so the program refuses instead.
+    #[test]
+    fn test_register_is_refused_while_the_clock_reads_zero() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+
+        set_clock_50(&mut setup.state, 0, 0);
+
+        let id_commitment = valid_field_element(0xB2);
+        let register_tx =
+            build_register_tx(&setup, &TREE_ID, id_commitment, EXP_RATE_LIMIT, Nonce(0), 0);
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&register_tx, 1, 0)
+                .is_err(),
+            "register must fail while CLOCK_50 still reads its genesis zero",
+        );
+        assert!(
+            read_membership(&setup.state, &setup.registration, &TREE_ID, &id_commitment).is_none(),
+            "no membership may exist after the refused registration",
+        );
+    }
+
     /// The production defaults, over a realistic wall-clock timeline.
     ///
     /// Regression guard for the bug that turned a 30-day membership into a

@@ -80,12 +80,25 @@ pub fn read_tree_next_index(tree_main_data: &[u8]) -> u64 {
 
 /// Validate that `clock_account` is the expected CLOCK_50 system account and
 /// return its current unix timestamp.
+///
+/// A zero timestamp is refused rather than returned: CLOCK_50 carries the
+/// genesis zero until the sequencer's first refresh of it (every 50 blocks),
+/// and a membership stamped from that dates its whole lifetime to 1970 and
+/// expires the instant the clock is first written. There is no timestamp a
+/// live chain could legitimately report as zero, so every time-dependent
+/// instruction refuses to run until the clock exists.
 pub fn require_clock_ms(clock_account: &AccountWithMetadata) -> Timestamp {
     assert!(
         *clock_account.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
         "Wrong clock account provided"
     );
-    clock_core::ClockAccountData::from_bytes(clock_account.account.data.as_ref()).timestamp
+    let now_ms =
+        clock_core::ClockAccountData::from_bytes(clock_account.account.data.as_ref()).timestamp;
+    assert!(
+        now_ms > 0,
+        "ClockNotInitialized: CLOCK_50 has not been written yet"
+    );
+    now_ms
 }
 
 // ============================================================================
