@@ -34,8 +34,8 @@ pub struct ConfigState {
     pub total_registrations: u64,
     pub max_total_rate_limit: u64,
     pub current_total_rate_limit: u64,
-    pub active_duration_for_new_memberships: u32,
-    pub grace_period_duration_for_new_memberships: u32,
+    pub active_duration_for_new_memberships_sec: u32,
+    pub grace_period_duration_for_new_memberships_sec: u32,
 }
 
 /// Borsh layout for a per-member account in the SPEL registration program.
@@ -46,9 +46,10 @@ pub struct MembershipState {
     pub leaf_index: u64,
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],
-    pub grace_period_start_timestamp: u64,
-    pub active_duration: u32,
-    pub grace_period_duration: u32,
+    /// Snapshotted from the config at registration.
+    pub grace_period_start_timestamp_ms: u64,
+    pub active_duration_sec: u32,
+    pub grace_period_duration_sec: u32,
 }
 
 /// Serialized size of [`ConfigState`], in bytes.
@@ -80,8 +81,8 @@ mod tests {
             total_registrations: 5,
             max_total_rate_limit: 6,
             current_total_rate_limit: 7,
-            active_duration_for_new_memberships: 8,
-            grace_period_duration_for_new_memberships: 9,
+            active_duration_for_new_memberships_sec: 8,
+            grace_period_duration_for_new_memberships_sec: 9,
         };
         let bytes = borsh::to_vec(&config).expect("ConfigState serializes");
         assert_eq!(bytes.len(), CONFIG_STATE_SIZE);
@@ -99,8 +100,8 @@ mod tests {
             total_registrations: 0x0102_0304,
             max_total_rate_limit: 0x0506_0708,
             current_total_rate_limit: 0x090A_0B0C,
-            active_duration_for_new_memberships: 0x0D0E,
-            grace_period_duration_for_new_memberships: 0x0F10,
+            active_duration_for_new_memberships_sec: 0x0D0E,
+            grace_period_duration_for_new_memberships_sec: 0x0F10,
         };
         let b = borsh::to_vec(&config).expect("ConfigState serializes");
         assert_eq!(&b[0..32], &[0xAA; 32], "merkle_program_id @0");
@@ -129,12 +130,12 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes(b[136..140].try_into().unwrap()),
             0x0D0E,
-            "active_duration @136",
+            "active_duration_sec @136",
         );
         assert_eq!(
             u32::from_le_bytes(b[140..144].try_into().unwrap()),
             0x0F10,
-            "grace_period_duration @140",
+            "grace_period_duration_sec @140",
         );
     }
 
@@ -144,9 +145,9 @@ mod tests {
             leaf_index: 1,
             rate_limit: 2,
             id_commitment: [3; 32],
-            grace_period_start_timestamp: 4,
-            active_duration: 5,
-            grace_period_duration: 6,
+            grace_period_start_timestamp_ms: 4,
+            active_duration_sec: 5,
+            grace_period_duration_sec: 6,
         };
         let bytes = borsh::to_vec(&membership).expect("MembershipState serializes");
         assert_eq!(bytes.len(), MEMBERSHIP_STATE_SIZE);

@@ -21,8 +21,8 @@ pub struct ConfigState {
     pub total_registrations: u64,
     pub max_total_rate_limit: u64,
     pub current_total_rate_limit: u64,
-    pub active_duration_for_new_memberships: u32,
-    pub grace_period_duration_for_new_memberships: u32,
+    pub active_duration_for_new_memberships_sec: u32,
+    pub grace_period_duration_for_new_memberships_sec: u32,
 }
 
 impl ConfigState {
@@ -49,9 +49,9 @@ pub struct MembershipState {
     pub leaf_index: u64,
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],
-    pub grace_period_start_timestamp: u64,
-    pub active_duration: u32,
-    pub grace_period_duration: u32,
+    pub grace_period_start_timestamp_ms: u64,
+    pub active_duration_sec: u32,
+    pub grace_period_duration_sec: u32,
 }
 
 const _: () = {
@@ -79,8 +79,8 @@ mod layout_equivalence {
             total_registrations: 7,
             max_total_rate_limit: 8,
             current_total_rate_limit: 9,
-            active_duration_for_new_memberships: 10,
-            grace_period_duration_for_new_memberships: 11,
+            active_duration_for_new_memberships_sec: 10,
+            grace_period_duration_for_new_memberships_sec: 11,
         };
         let shared = SharedConfigState {
             merkle_program_id: [1u8; 32],
@@ -90,8 +90,8 @@ mod layout_equivalence {
             total_registrations: 7,
             max_total_rate_limit: 8,
             current_total_rate_limit: 9,
-            active_duration_for_new_memberships: 10,
-            grace_period_duration_for_new_memberships: 11,
+            active_duration_for_new_memberships_sec: 10,
+            grace_period_duration_for_new_memberships_sec: 11,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -106,17 +106,17 @@ mod layout_equivalence {
             leaf_index: 1,
             rate_limit: 2,
             id_commitment: [3u8; 32],
-            grace_period_start_timestamp: 4,
-            active_duration: 5,
-            grace_period_duration: 6,
+            grace_period_start_timestamp_ms: 4,
+            active_duration_sec: 5,
+            grace_period_duration_sec: 6,
         };
         let shared = SharedMembershipState {
             leaf_index: 1,
             rate_limit: 2,
             id_commitment: [3u8; 32],
-            grace_period_start_timestamp: 4,
-            active_duration: 5,
-            grace_period_duration: 6,
+            grace_period_start_timestamp_ms: 4,
+            active_duration_sec: 5,
+            grace_period_duration_sec: 6,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -139,8 +139,8 @@ pub mod rln_registration {
         price_per_unit: u128,
         treasury_account_id: [u8; 32],
         max_total_rate_limit: u64,
-        active_duration_for_new_memberships: u32,
-        grace_period_duration_for_new_memberships: u32,
+        active_duration_for_new_memberships_sec: u32,
+        grace_period_duration_for_new_memberships_sec: u32,
     ) -> SpelResult {
         Ok(handlers::initialize(
             config,
@@ -149,8 +149,8 @@ pub mod rln_registration {
             price_per_unit,
             treasury_account_id,
             max_total_rate_limit,
-            active_duration_for_new_memberships,
-            grace_period_duration_for_new_memberships,
+            active_duration_for_new_memberships_sec,
+            grace_period_duration_for_new_memberships_sec,
         ))
     }
 

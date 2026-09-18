@@ -48,20 +48,28 @@ pub const MAX_RATE_LIMIT: u64 = 600;
 /// `clock_core` to stay `no_std`-friendly for the host side.
 pub const CLOCK_50_ACCOUNT_ID_BYTES: [u8; 32] = *b"/LEZ/ClockProgramAccount/0000050";
 
+pub const MILLIS_PER_SECOND: u64 = 1_000;
+
+#[inline]
+pub const fn secs_to_millis(secs: u32) -> u64 {
+    secs as u64 * MILLIS_PER_SECOND
+}
+
 // ============================================================================
 // Expiration helpers
 // ============================================================================
 
-/// Returns true iff `now` falls inside `[grace_start, grace_start + grace_duration)`.
+/// Returns true iff `now_ms` falls inside
+/// `[grace_start_ms, grace_start_ms + grace_duration_ms)`.
 #[inline]
-pub fn is_in_grace_period(grace_start: u64, grace_duration: u32, now: u64) -> bool {
-    grace_start <= now && now < grace_start.saturating_add(grace_duration as u64)
+pub fn is_in_grace_period(grace_start_ms: u64, grace_duration_ms: u64, now_ms: u64) -> bool {
+    grace_start_ms <= now_ms && now_ms < grace_start_ms.saturating_add(grace_duration_ms)
 }
 
-/// Returns true iff `now >= grace_start + grace_duration`.
+/// Returns true iff `now_ms >= grace_start_ms + grace_duration_ms`.
 #[inline]
-pub fn is_expired(grace_start: u64, grace_duration: u32, now: u64) -> bool {
-    now >= grace_start.saturating_add(grace_duration as u64)
+pub fn is_expired(grace_start_ms: u64, grace_duration_ms: u64, now_ms: u64) -> bool {
+    now_ms >= grace_start_ms.saturating_add(grace_duration_ms)
 }
 
 // ============================================================================

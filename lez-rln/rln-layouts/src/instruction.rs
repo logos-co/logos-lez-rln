@@ -32,8 +32,8 @@ pub enum Instruction {
         /// instruction that would issue one.
         treasury_account_id: [u8; 32],
         max_total_rate_limit: u64,
-        active_duration_for_new_memberships: u32,
-        grace_period_duration_for_new_memberships: u32,
+        active_duration_for_new_memberships_sec: u32,
+        grace_period_duration_for_new_memberships_sec: u32,
     },
     /// The callee program id is deliberately absent: it comes from the config
     /// PDA this instruction declares. A caller-supplied program id would be

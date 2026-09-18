@@ -80,7 +80,7 @@ pub fn read_tree_next_index(tree_main_data: &[u8]) -> u64 {
 
 /// Validate that `clock_account` is the expected CLOCK_50 system account and
 /// return its current unix timestamp.
-pub fn require_clock(clock_account: &AccountWithMetadata) -> Timestamp {
+pub fn require_clock_ms(clock_account: &AccountWithMetadata) -> Timestamp {
     assert!(
         *clock_account.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
         "Wrong clock account provided"
@@ -149,29 +149,29 @@ mod tests {
 
     #[test]
     fn test_is_in_grace_period_boundaries() {
-        let start = 1_000u64;
-        let duration = 100u32;
-        assert!(!is_in_grace_period(start, duration, 999));
-        assert!(is_in_grace_period(start, duration, 1000));
-        assert!(is_in_grace_period(start, duration, 1099));
-        assert!(!is_in_grace_period(start, duration, 1100));
-        assert!(!is_in_grace_period(start, duration, 5000));
+        let start_ms = 1_000u64;
+        let duration_ms = 100u64;
+        assert!(!is_in_grace_period(start_ms, duration_ms, 999));
+        assert!(is_in_grace_period(start_ms, duration_ms, 1000));
+        assert!(is_in_grace_period(start_ms, duration_ms, 1099));
+        assert!(!is_in_grace_period(start_ms, duration_ms, 1100));
+        assert!(!is_in_grace_period(start_ms, duration_ms, 5000));
     }
 
     #[test]
     fn test_is_expired_boundaries() {
-        let start = 1_000u64;
-        let duration = 100u32;
-        assert!(!is_expired(start, duration, 999));
-        assert!(!is_expired(start, duration, 1099));
-        assert!(is_expired(start, duration, 1100));
-        assert!(is_expired(start, duration, 5000));
+        let start_ms = 1_000u64;
+        let duration_ms = 100u64;
+        assert!(!is_expired(start_ms, duration_ms, 999));
+        assert!(!is_expired(start_ms, duration_ms, 1099));
+        assert!(is_expired(start_ms, duration_ms, 1100));
+        assert!(is_expired(start_ms, duration_ms, 5000));
     }
 
     #[test]
     fn test_grace_period_zero_duration_transitions_directly_to_expired() {
-        let start = 1_000u64;
-        assert!(!is_in_grace_period(start, 0, 1_000));
-        assert!(is_expired(start, 0, 1_000));
+        let start_ms = 1_000u64;
+        assert!(!is_in_grace_period(start_ms, 0, 1_000));
+        assert!(is_expired(start_ms, 0, 1_000));
     }
 }

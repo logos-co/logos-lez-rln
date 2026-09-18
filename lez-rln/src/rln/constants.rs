@@ -65,8 +65,8 @@ mod tests {
             total_registrations: 0x0A0B,
             max_total_rate_limit: 0x0C0D,
             current_total_rate_limit: 0x0E0F,
-            active_duration_for_new_memberships: 0x1011,
-            grace_period_duration_for_new_memberships: 0x1213,
+            active_duration_for_new_memberships_sec: 0x1011,
+            grace_period_duration_for_new_memberships_sec: 0x1213,
         };
         let b = borsh::to_vec(&config).expect("ConfigState serializes");
 
