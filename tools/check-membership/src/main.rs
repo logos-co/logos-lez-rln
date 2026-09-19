@@ -13,7 +13,7 @@
 
 use borsh::BorshDeserialize;
 use rln_layouts::{
-    combine_seeds, is_expired, is_in_grace_period, label_seed, MembershipState,
+    combine_seeds, is_expired, is_in_grace_period, label_seed, secs_to_millis, MembershipState,
     CLOCK_50_ACCOUNT_ID_BYTES,
 };
 use sha2::{Digest, Sha256};
@@ -84,16 +84,17 @@ fn main() {
     let state = MembershipState::try_from_slice(&data[..MEMBERSHIP_STATE_SIZE])
         .unwrap_or_else(|_| { fail("failed to decode membership account") });
 
-    let now = clock_timestamp(&cfg.sequencer);
-    let status = lifecycle(&state, now);
-    report_registered(json, &state, status, now);
+    let now_ms = clock_timestamp_ms(&cfg.sequencer);
+    let status = lifecycle(&state, now_ms);
+    report_registered(json, &state, status, now_ms);
 }
 
-fn lifecycle(state: &MembershipState, now: u64) -> &'static str {
-    let (start, dur) = (state.grace_period_start_timestamp, state.grace_period_duration);
-    if is_expired(start, dur, now) {
+fn lifecycle(state: &MembershipState, now_ms: u64) -> &'static str {
+    let start_ms = state.grace_period_start_timestamp_ms;
+    let grace_ms = secs_to_millis(state.grace_period_duration_sec);
+    if is_expired(start_ms, grace_ms, now_ms) {
         "expired"
-    } else if is_in_grace_period(start, dur, now) {
+    } else if is_in_grace_period(start_ms, grace_ms, now_ms) {
         "grace_period"
     } else {
         "active"
@@ -126,7 +127,7 @@ fn get_account(sequencer: &str, id: &[u8; 32]) -> Option<Vec<u8>> {
     if data.is_empty() { None } else { Some(data) }
 }
 
-fn clock_timestamp(sequencer: &str) -> u64 {
+fn clock_timestamp_ms(sequencer: &str) -> u64 {
     let data = get_account(sequencer, &CLOCK_50_ACCOUNT_ID_BYTES)
         .unwrap_or_else(|| { fail("clock account is absent — cannot compute lifecycle state") });
     if data.len() < 16 {
@@ -152,16 +153,16 @@ fn rpc(sequencer: &str, method: &str, params: serde_json::Value) -> serde_json::
     doc.get("result").cloned().unwrap_or_else(|| { fail("JSON-RPC reply has no result") })
 }
 
-fn report_registered(json: bool, state: &MembershipState, status: &str, now: u64) {
+fn report_registered(json: bool, state: &MembershipState, status: &str, now_ms: u64) {
     if json {
         println!("{}", serde_json::json!({
             "registered": true,
             "state": status,
             "leaf_index": state.leaf_index,
             "rate_limit": state.rate_limit,
-            "grace_period_start_timestamp": state.grace_period_start_timestamp,
-            "grace_period_duration": state.grace_period_duration,
-            "clock_timestamp": now,
+            "grace_period_start_timestamp": state.grace_period_start_timestamp_ms,
+            "grace_period_duration": state.grace_period_duration_sec,
+            "clock_timestamp": now_ms,
         }));
     } else {
         println!("\u{2713} Registered \u{2014} state: {status}, leaf index: {}, rate limit: {}", state.leaf_index, state.rate_limit);

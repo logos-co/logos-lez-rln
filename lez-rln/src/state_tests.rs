@@ -123,15 +123,18 @@ mod tests {
 
     /// Genesis timestamp used when seeding test state. Chosen non-zero so that
     /// time-travel tests can reason about both past and future relative to genesis.
-    const GENESIS_TIMESTAMP: u64 = 1_700_000_000;
+    const GENESIS_TIMESTAMP_MS: u64 = 1_700_000_000_000;
 
     /// Active-period length applied to newly registered memberships in tests
     /// (1 hour). Kept small so tests can exercise expiration without huge numbers.
-    const DEFAULT_ACTIVE_DURATION: u32 = 3_600;
+    const DEFAULT_ACTIVE_DURATION_SEC: u32 = 3_600;
 
     /// Grace-period length applied to newly registered memberships in tests
     /// (10 minutes).
-    const DEFAULT_GRACE_PERIOD_DURATION: u32 = 600;
+    const DEFAULT_GRACE_PERIOD_DURATION_SEC: u32 = 600;
+
+    const ACTIVE_MS: u64 = rln_layouts::secs_to_millis(DEFAULT_ACTIVE_DURATION_SEC);
+    const GRACE_MS: u64 = rln_layouts::secs_to_millis(DEFAULT_GRACE_PERIOD_DURATION_SEC);
 
     /// Returns a valid BN254 field element with `seed` in the lowest
     /// little-endian byte and zero-padding above. Used wherever a test needs a
@@ -206,7 +209,7 @@ mod tests {
             merkle_program.clone(),
             registration_program.clone(),
         ]);
-        set_clock_50(&mut state, GENESIS_TIMESTAMP, 0);
+        set_clock_50(&mut state, GENESIS_TIMESTAMP_MS, 0);
 
         Some((state, merkle_program, registration_program))
     }
@@ -897,8 +900,8 @@ mod tests {
             price_per_unit,
             treasury_id,
             max_total_rate_limit,
-            DEFAULT_ACTIVE_DURATION,
-            DEFAULT_GRACE_PERIOD_DURATION,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
         )
     }
 
@@ -910,8 +913,8 @@ mod tests {
         price_per_unit: u128,
         treasury_id: &AccountId,
         max_total_rate_limit: u64,
-        active_duration: u32,
-        grace_period_duration: u32,
+        active_duration_sec: u32,
+        grace_period_duration_sec: u32,
     ) -> [PublicTransaction; 2] {
         let config_id = derive_config_pda(
             crate::spel_seeds::program_account(&registration.id()),
@@ -931,8 +934,8 @@ mod tests {
                 price_per_unit,
                 treasury_account_id: *treasury_id.value(),
                 max_total_rate_limit,
-                active_duration_for_new_memberships: active_duration,
-                grace_period_duration_for_new_memberships: grace_period_duration,
+                active_duration_for_new_memberships_sec: active_duration_sec,
+                grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
             },
         );
 
@@ -1019,8 +1022,8 @@ mod tests {
     fn state_with_initialized_registration_config(max_total_rate_limit: u64) -> Option<TestSetup> {
         state_with_initialized_registration_durations(
             max_total_rate_limit,
-            DEFAULT_ACTIVE_DURATION,
-            DEFAULT_GRACE_PERIOD_DURATION,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
         )
     }
 
@@ -1035,8 +1038,8 @@ mod tests {
     #[allow(dead_code)]
     fn state_with_initialized_registration_durations(
         max_total_rate_limit: u64,
-        active_duration: u32,
-        grace_period_duration: u32,
+        active_duration_sec: u32,
+        grace_period_duration_sec: u32,
     ) -> Option<TestSetup> {
         let (mut state, merkle, registration) = state_with_programs()?;
 
@@ -1052,8 +1055,8 @@ mod tests {
             PRICE_PER_UNIT,
             &treasury_id,
             max_total_rate_limit,
-            active_duration,
-            grace_period_duration,
+            active_duration_sec,
+            grace_period_duration_sec,
         );
         apply_registration_init(&mut state, &init_txs).ok()?;
 
@@ -1580,24 +1583,24 @@ mod tests {
             "Initial current_total_rate_limit should be 0"
         );
 
-        let active_duration = u32::from_le_bytes(
+        let active_duration_sec = u32::from_le_bytes(
             data[CONFIG_OFFSET_ACTIVE_DURATION..CONFIG_OFFSET_ACTIVE_DURATION + 4]
                 .try_into()
                 .unwrap(),
         );
         assert_eq!(
-            active_duration, DEFAULT_ACTIVE_DURATION,
-            "Config should store active_duration_for_new_memberships"
+            active_duration_sec, DEFAULT_ACTIVE_DURATION_SEC,
+            "Config should store active_duration_for_new_memberships_sec"
         );
 
-        let grace_period_duration = u32::from_le_bytes(
+        let grace_period_duration_sec = u32::from_le_bytes(
             data[CONFIG_OFFSET_GRACE_PERIOD_DURATION..CONFIG_OFFSET_GRACE_PERIOD_DURATION + 4]
                 .try_into()
                 .unwrap(),
         );
         assert_eq!(
-            grace_period_duration, DEFAULT_GRACE_PERIOD_DURATION,
-            "Config should store grace_period_duration_for_new_memberships"
+            grace_period_duration_sec, DEFAULT_GRACE_PERIOD_DURATION_SEC,
+            "Config should store grace_period_duration_for_new_memberships_sec"
         );
     }
 
@@ -3399,14 +3402,14 @@ mod tests {
     // ========================================================================
 
     /// Overwrite the CLOCK_50 system account with a specific timestamp so
-    /// subsequent program invocations observe `now == timestamp`. Uses the
-    /// `test-utils` `force_insert_account` escape hatch instead of issuing
+    /// subsequent program invocations observe `now_ms == timestamp_ms`. Uses
+    /// the `test-utils` `force_insert_account` escape hatch instead of issuing
     /// 50 clock-ticks, because CLOCK_50 only refreshes every 50 blocks.
-    fn set_clock_50(state: &mut V03State, timestamp: u64, block_id: u64) {
+    fn set_clock_50(state: &mut V03State, timestamp_ms: u64, block_id: u64) {
         use clock_core::{CLOCK_50_PROGRAM_ACCOUNT_ID, ClockAccountData};
         let data = ClockAccountData {
             block_id,
-            timestamp,
+            timestamp: timestamp_ms,
         }
         .to_bytes();
         let clock_program_id = crate::spel_seeds::program_account(&programs::clock().id());
@@ -3435,7 +3438,7 @@ mod tests {
         if bytes.is_empty() { None } else { Some(bytes) }
     }
 
-    fn read_grace_start(
+    fn read_grace_start_ms(
         state: &V03State,
         registration: &Program,
         tree_id: &[u8; 32],
@@ -3451,7 +3454,7 @@ mod tests {
         )
     }
 
-    fn read_active_duration(
+    fn read_active_duration_sec(
         state: &V03State,
         registration: &Program,
         tree_id: &[u8; 32],
@@ -3466,7 +3469,7 @@ mod tests {
         )
     }
 
-    fn read_grace_duration(
+    fn read_grace_duration_sec(
         state: &V03State,
         registration: &Program,
         tree_id: &[u8; 32],
@@ -3593,8 +3596,8 @@ mod tests {
     fn setup_with_expiration() -> Option<TestSetup> {
         state_with_initialized_registration_durations(
             DEFAULT_MAX_TOTAL_RATE_LIMIT,
-            DEFAULT_ACTIVE_DURATION,
-            DEFAULT_GRACE_PERIOD_DURATION,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
         )
     }
 
@@ -3613,24 +3616,122 @@ mod tests {
             return;
         };
 
-        let register_clock = GENESIS_TIMESTAMP + 500;
-        set_clock_50(&mut setup.state, register_clock, 50);
+        let register_clock_ms = GENESIS_TIMESTAMP_MS + 500;
+        set_clock_50(&mut setup.state, register_clock_ms, 50);
 
         let id_commitment = valid_field_element(0xA1);
         register_for_expiration_test(&mut setup, id_commitment);
 
         assert_eq!(
-            read_grace_start(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
-            register_clock + DEFAULT_ACTIVE_DURATION as u64,
-            "grace_period_start_timestamp = now + active_duration",
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            register_clock_ms + ACTIVE_MS,
+            "grace_period_start_timestamp_ms = now_ms + ACTIVE_MS",
         );
         assert_eq!(
-            read_active_duration(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
-            DEFAULT_ACTIVE_DURATION,
+            read_active_duration_sec(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            DEFAULT_ACTIVE_DURATION_SEC,
         );
         assert_eq!(
-            read_grace_duration(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
-            DEFAULT_GRACE_PERIOD_DURATION,
+            read_grace_duration_sec(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
+        );
+    }
+
+    /// A fresh chain carries the genesis CLOCK_50 (timestamp 0) until the
+    /// sequencer's first refresh of it at block 50. Registering against that
+    /// would stamp the membership's whole lifetime in 1970 and expire it the
+    /// moment the clock is first written, so the program refuses instead.
+    #[test]
+    fn test_register_is_refused_while_the_clock_reads_zero() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+
+        set_clock_50(&mut setup.state, 0, 0);
+
+        let id_commitment = valid_field_element(0xB2);
+        let register_tx =
+            build_register_tx(&setup, &TREE_ID, id_commitment, EXP_RATE_LIMIT, Nonce(0), 0);
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&register_tx, 1, 0)
+                .is_err(),
+            "register must fail while CLOCK_50 still reads its genesis zero",
+        );
+        assert!(
+            read_membership(&setup.state, &setup.registration, &TREE_ID, &id_commitment).is_none(),
+            "no membership may exist after the refused registration",
+        );
+    }
+
+    /// The production defaults, over a realistic wall-clock timeline.
+    ///
+    /// Regression guard for the bug that turned a 30-day membership into a
+    /// 43-minute one. The rest of this suite runs on compressed durations
+    /// where a 1000x error is invisible; this one pins real days.
+    #[test]
+    fn test_production_durations_span_real_days_of_chain_time() {
+        use crate::rln::client::{
+            DEFAULT_ACTIVE_DURATION_SECS, DEFAULT_GRACE_PERIOD_DURATION_SECS,
+        };
+
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+
+        let Some(mut setup) = state_with_initialized_registration_durations(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SECS,
+            DEFAULT_GRACE_PERIOD_DURATION_SECS,
+        ) else {
+            return;
+        };
+
+        let registered_at_ms = GENESIS_TIMESTAMP_MS;
+        set_clock_50(&mut setup.state, registered_at_ms, 50);
+        let id_commitment = valid_field_element(0xB1);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            registered_at_ms + 30 * DAY_MS,
+            "the active period must span 30 DAYS of chain time",
+        );
+
+        // Day 29: still active, so extending is refused.
+        set_clock_50(&mut setup.state, registered_at_ms + 29 * DAY_MS, 100);
+        let too_early = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&too_early, 2, 0)
+                .is_err(),
+            "membership must still be active 29 days after registration",
+        );
+
+        // Day 31: inside the 7-day grace period, so extending succeeds.
+        set_clock_50(&mut setup.state, registered_at_ms + 31 * DAY_MS, 150);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 3, 0)
+            .expect("extend must succeed 31 days in (grace period)");
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            registered_at_ms + (30 + 7 + 30) * DAY_MS,
+            "extend adds one grace + one active period",
+        );
+
+        // Day 75: past the renewed active period AND its grace, so the
+        // membership is erasable.
+        set_clock_50(&mut setup.state, registered_at_ms + 75 * DAY_MS, 200);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 4, 0)
+            .expect("erase must succeed once the renewed membership expired");
+        assert!(
+            read_membership(&setup.state, &setup.registration, &TREE_ID, &id_commitment).is_none(),
+            "membership data should be cleared",
         );
     }
 
@@ -3640,13 +3741,13 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA2);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        let grace_start = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64;
-        let in_grace = grace_start + (DEFAULT_GRACE_PERIOD_DURATION as u64 / 2);
-        set_clock_50(&mut setup.state, in_grace, 100);
+        let grace_start_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS;
+        let in_grace_ms = grace_start_ms + (GRACE_MS / 2);
+        set_clock_50(&mut setup.state, in_grace_ms, 100);
 
         let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         setup
@@ -3654,11 +3755,13 @@ mod tests {
             .transition_from_public_transaction(&extend_tx, 2, 0)
             .expect("extend during grace must succeed");
 
-        let new_grace_start =
-            read_grace_start(&setup.state, &setup.registration, &TREE_ID, &id_commitment);
-        let expected =
-            grace_start + DEFAULT_GRACE_PERIOD_DURATION as u64 + DEFAULT_ACTIVE_DURATION as u64;
-        assert_eq!(new_grace_start, expected, "grace_start += grace + active");
+        let new_grace_start_ms =
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment);
+        let expected = grace_start_ms + GRACE_MS + ACTIVE_MS;
+        assert_eq!(
+            new_grace_start_ms, expected,
+            "grace_start += grace + active"
+        );
     }
 
     #[test]
@@ -3667,11 +3770,11 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA3);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 10, 100);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + 10, 100);
 
         let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         let result = setup
@@ -3690,14 +3793,12 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA4);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        let expiration = GENESIS_TIMESTAMP
-            + DEFAULT_ACTIVE_DURATION as u64
-            + DEFAULT_GRACE_PERIOD_DURATION as u64;
-        set_clock_50(&mut setup.state, expiration + 1, 100);
+        let expiration_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS;
+        set_clock_50(&mut setup.state, expiration_ms + 1, 100);
 
         let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         let result = setup
@@ -3723,12 +3824,12 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA5);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
-        set_clock_50(&mut setup.state, in_grace, 100);
+        let in_grace_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
+        set_clock_50(&mut setup.state, in_grace_ms, 100);
 
         let paid_before = native_balance(&setup.state, &setup.payer_id);
         let treasury_before = native_balance(&setup.state, &setup.treasury_id);
@@ -3764,14 +3865,14 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA7);
         register_for_expiration_test(&mut setup, id_commitment);
 
         // Drain the payer's native balance, keeping its nonce (the register
         // above already signed once), then try to renew.
-        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
-        set_clock_50(&mut setup.state, in_grace, 100);
+        let in_grace_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
+        set_clock_50(&mut setup.state, in_grace_ms, 100);
         let prior = setup.state.get_account_by_id(setup.payer_id);
         setup.state.force_insert_account(
             setup.payer_id,
@@ -3797,14 +3898,12 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA6);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        let expiration = GENESIS_TIMESTAMP
-            + DEFAULT_ACTIVE_DURATION as u64
-            + DEFAULT_GRACE_PERIOD_DURATION as u64;
-        set_clock_50(&mut setup.state, expiration + 1, 100);
+        let expiration_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS;
+        set_clock_50(&mut setup.state, expiration_ms + 1, 100);
 
         let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         setup
@@ -3824,11 +3923,11 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA7);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP + 1, 100);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + 1, 100);
 
         let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         let result = setup
@@ -3847,12 +3946,12 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xA8);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        let in_grace = GENESIS_TIMESTAMP + DEFAULT_ACTIVE_DURATION as u64 + 1;
-        set_clock_50(&mut setup.state, in_grace, 100);
+        let in_grace_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
+        set_clock_50(&mut setup.state, in_grace_ms, 100);
 
         let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         let result = setup
@@ -3870,17 +3969,15 @@ mod tests {
             return;
         };
 
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP, 50);
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let id_commitment = valid_field_element(0xAA);
         register_for_expiration_test(&mut setup, id_commitment);
 
         let before = get_current_total_rate_limit(&setup.state, &setup.registration, &TREE_ID);
         assert_eq!(before, EXP_RATE_LIMIT);
 
-        let expiration = GENESIS_TIMESTAMP
-            + DEFAULT_ACTIVE_DURATION as u64
-            + DEFAULT_GRACE_PERIOD_DURATION as u64;
-        set_clock_50(&mut setup.state, expiration + 1, 100);
+        let expiration_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS;
+        set_clock_50(&mut setup.state, expiration_ms + 1, 100);
 
         let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
         setup

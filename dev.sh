@@ -36,32 +36,45 @@ if [ -z "$CONFIG" ]; then
   exit 1
 fi
 
-# --- Fund a payer at genesis ---
-# Public transactions now carry a fee, and the faucet program only runs in the
-# genesis block, so nothing a fresh wallet creates can ever hold native balance.
-# Provisioning therefore mints its payer first and names it here, and the chain
-# starts owing that account a balance. The stock supply accounts in the shipped
-# config belong to whoever generated them, so their keys are no use to us.
+# --- Patch the shipped debug config ---
+# Two edits, both written beside the checkout rather than into it, so a refresh
+# of the pinned source never has to reconcile a local change.
 #
-# The edited config is written beside the checkout rather than into it, so a
-# refresh of the pinned source never has to reconcile a local change.
-if [ -n "${LEZ_RLN_GENESIS_FUND:-}" ]; then
-  FUNDED_CONFIG="$SEQ_SRC/../sequencer_config.funded.json"
-  BALANCE="${LEZ_RLN_GENESIS_BALANCE:-10000000000000}"
-  python3 - "$SEQ_SRC/$CONFIG" "$FUNDED_CONFIG" "$LEZ_RLN_GENESIS_FUND" "$BALANCE" <<'PY'
+# 1. Fund a payer at genesis. Public transactions now carry a fee, and the
+#    faucet program only runs in the genesis block, so nothing a fresh wallet
+#    creates can ever hold native balance. Provisioning therefore mints its
+#    payer first and names it here, and the chain starts owing that account a
+#    balance. The stock supply accounts in the shipped config belong to whoever
+#    generated them, so their keys are no use to us.
+#
+# 2. Shorten the block interval. The shipped 15s is a testnet cadence; on a
+#    devnet it leaves CLOCK_50 — which the registration program reads, and which
+#    the clock program refreshes only every 50 blocks — at its genesis zero for
+#    over twelve minutes. Registration refuses a zero clock (it would date the
+#    membership to 1970 and expire it the moment the clock is first written), so
+#    the chain is unusable until then. One second puts CLOCK_50 live inside a
+#    minute and shortens every confirmation wait with it.
+PATCHED_CONFIG="$SEQ_SRC/../sequencer_config.dev.json"
+BLOCK_TIME="${LEZ_RLN_BLOCK_TIME:-1s}"
+BALANCE="${LEZ_RLN_GENESIS_BALANCE:-10000000000000}"
+python3 - "$SEQ_SRC/$CONFIG" "$PATCHED_CONFIG" "${LEZ_RLN_GENESIS_FUND:-}" "$BALANCE" "$BLOCK_TIME" <<'PY'
 import json, sys
-src, dst, account_id, balance = sys.argv[1:5]
+src, dst, account_id, balance, block_time = sys.argv[1:6]
 cfg = json.load(open(src))
-cfg["genesis"] = [
-    entry for entry in cfg["genesis"]
-    if entry.get("supply_account", {}).get("account_id") != account_id
-]
-cfg["genesis"].append(
-    {"supply_account": {"account_id": account_id, "balance": int(balance)}}
-)
+if account_id:
+    cfg["genesis"] = [
+        entry for entry in cfg["genesis"]
+        if entry.get("supply_account", {}).get("account_id") != account_id
+    ]
+    cfg["genesis"].append(
+        {"supply_account": {"account_id": account_id, "balance": int(balance)}}
+    )
+cfg["block_create_timeout"] = block_time
 json.dump(cfg, open(dst, "w"), indent=2)
 PY
-  CONFIG="$FUNDED_CONFIG"
+CONFIG="$PATCHED_CONFIG"
+echo "Block interval $BLOCK_TIME (CLOCK_50 goes live after 50 blocks)"
+if [ -n "${LEZ_RLN_GENESIS_FUND:-}" ]; then
   echo "Genesis funds $LEZ_RLN_GENESIS_FUND with $BALANCE"
 fi
 

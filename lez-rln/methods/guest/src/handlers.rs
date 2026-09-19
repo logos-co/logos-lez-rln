@@ -14,7 +14,7 @@ use nssa_core::{
 };
 use rln_layouts::{
     MerkleOpcode, SUBTREE_LEAVES, combine_seeds, is_expired, is_in_grace_period, label_seed,
-    u32_seed,
+    secs_to_millis, u32_seed,
 };
 use spel_framework::prelude::SpelOutput;
 
@@ -22,8 +22,8 @@ use crate::{
     hash::{hash_single, validate_field_element},
     program::{ConfigState, MembershipState},
     registration::{
-        calculate_payment_amount, compute_registration_leaf, read_tree_next_index, require_clock,
-        validate_rate_limit,
+        calculate_payment_amount, compute_registration_leaf, read_tree_next_index,
+        require_clock_ms, validate_rate_limit,
     },
 };
 
@@ -77,16 +77,16 @@ fn new_membership_state(
     next_index: u64,
     rate_limit: u64,
     id_commitment: [u8; 32],
-    grace_period_start_timestamp: u64,
+    grace_period_start_timestamp_ms: u64,
     config_state: &ConfigState,
 ) -> MembershipState {
     MembershipState {
         leaf_index: next_index,
         rate_limit,
         id_commitment,
-        grace_period_start_timestamp,
-        active_duration: config_state.active_duration_for_new_memberships,
-        grace_period_duration: config_state.grace_period_duration_for_new_memberships,
+        grace_period_start_timestamp_ms,
+        active_duration_sec: config_state.active_duration_for_new_memberships_sec,
+        grace_period_duration_sec: config_state.grace_period_duration_for_new_memberships_sec,
     }
 }
 
@@ -127,15 +127,15 @@ pub fn initialize(
     price_per_unit: u128,
     treasury_account_id: [u8; 32],
     max_total_rate_limit: u64,
-    active_duration_for_new_memberships: u32,
-    grace_period_duration_for_new_memberships: u32,
+    active_duration_for_new_memberships_sec: u32,
+    grace_period_duration_for_new_memberships_sec: u32,
 ) -> Output {
     assert!(
         max_total_rate_limit > 0,
         "Max total rate limit must be positive"
     );
     assert!(
-        active_duration_for_new_memberships > 0,
+        active_duration_for_new_memberships_sec > 0,
         "Active duration must be positive"
     );
 
@@ -147,8 +147,8 @@ pub fn initialize(
         total_registrations: 0,
         max_total_rate_limit,
         current_total_rate_limit: 0,
-        active_duration_for_new_memberships,
-        grace_period_duration_for_new_memberships,
+        active_duration_for_new_memberships_sec,
+        grace_period_duration_for_new_memberships_sec,
     };
     write_borsh(&mut config, &config_state, "ConfigState");
 
@@ -202,9 +202,10 @@ pub fn register(
         "Would exceed max total rate limit"
     );
 
-    let now = require_clock(&clock_account);
-    let grace_period_start_timestamp =
-        now.saturating_add(config_state.active_duration_for_new_memberships as u64);
+    let now_ms = require_clock_ms(&clock_account);
+    let grace_period_start_timestamp_ms = now_ms.saturating_add(secs_to_millis(
+        config_state.active_duration_for_new_memberships_sec,
+    ));
     let payment_amount = calculate_payment_amount(rate_limit, config_state.price_per_unit);
 
     // The price moves in NATIVE balance, so nothing here is self-reported: the
@@ -247,7 +248,7 @@ pub fn register(
         next_index,
         rate_limit,
         id_commitment,
-        grace_period_start_timestamp,
+        grace_period_start_timestamp_ms,
         &config_state,
     );
     write_borsh(&mut membership, &membership_state, "MembershipState");
@@ -358,7 +359,7 @@ pub fn slash(
 /// membership's share of `max_total_rate_limit` forever, one cheap tx per
 /// grace window, and eventually block all new registrations. Charging the
 /// registration price makes that grief cost exactly as much as holding the
-/// slot legitimately, and gives `active_duration` economic force.
+/// slot legitimately, and gives `active_duration_sec` economic force.
 pub fn extend(
     config: AccountWithMetadata,
     mut membership: AccountWithMetadata,
@@ -367,7 +368,7 @@ pub fn extend(
     clock_account: AccountWithMetadata,
     tree_id: [u8; 32],
 ) -> Output {
-    let now = require_clock(&clock_account);
+    let now_ms = require_clock_ms(&clock_account);
 
     let config_state =
         ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
@@ -386,9 +387,9 @@ pub fn extend(
 
     assert!(
         is_in_grace_period(
-            membership_state.grace_period_start_timestamp,
-            membership_state.grace_period_duration,
-            now,
+            membership_state.grace_period_start_timestamp_ms,
+            secs_to_millis(membership_state.grace_period_duration_sec),
+            now_ms,
         ),
         "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
     );
@@ -411,10 +412,10 @@ pub fn extend(
         "Wrong treasury"
     );
 
-    membership_state.grace_period_start_timestamp = membership_state
-        .grace_period_start_timestamp
-        .saturating_add(membership_state.grace_period_duration as u64)
-        .saturating_add(membership_state.active_duration as u64);
+    membership_state.grace_period_start_timestamp_ms = membership_state
+        .grace_period_start_timestamp_ms
+        .saturating_add(secs_to_millis(membership_state.grace_period_duration_sec))
+        .saturating_add(secs_to_millis(membership_state.active_duration_sec));
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     payer.account.balance -= payment_amount;
@@ -439,7 +440,7 @@ pub fn erase(
     tree_id: [u8; 32],
     subtree_id: u32,
 ) -> Output {
-    let now = require_clock(&clock_account);
+    let now_ms = require_clock_ms(&clock_account);
 
     let mut config_state =
         ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
@@ -458,9 +459,9 @@ pub fn erase(
 
     assert!(
         is_expired(
-            membership_state.grace_period_start_timestamp,
-            membership_state.grace_period_duration,
-            now,
+            membership_state.grace_period_start_timestamp_ms,
+            secs_to_millis(membership_state.grace_period_duration_sec),
+            now_ms,
         ),
         "CannotEraseUnexpiredMembership: membership has not expired yet"
     );
