@@ -44,10 +44,6 @@ fn escrow_seed(tree_id: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Move `amount` of native balance out of the tree's escrow.
-///
-/// A debit needs the account authorized, and a program's own PDA is authorized
-/// only as the callee of a chained call naming its seed — so paying a deposit
-/// back cannot be the plain assignment that taking one is.
 fn escrow_payout(
     escrow: &AccountWithMetadata,
     destination: &AccountWithMetadata,
@@ -124,7 +120,6 @@ fn new_membership_state(
         grace_period_duration_sec: config_state.grace_period_duration_for_new_memberships_sec,
         holder,
         deposit_amount,
-        exiting: 0,
     }
 }
 
@@ -140,11 +135,7 @@ fn write_borsh<T: BorshSerialize>(
 }
 
 /// Decode the config PDA, binding it to the `tree_id` the caller asked for.
-///
-/// The callee program ids live here and nowhere else: an instruction arg
-/// naming the merkle or token program is attacker-controllable, and these
-/// handlers hand the callee `pda_seeds` that authorize it to claim this
-/// program's PDAs. Read the target from config, never from the caller.
+/// Callee program ids are read from here, never from an instruction arg.
 fn require_config(config: &AccountWithMetadata, tree_id: &[u8; 32]) -> ConfigState {
     let config_state =
         ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
@@ -175,6 +166,16 @@ pub fn initialize(
     assert!(
         active_duration_for_new_memberships_sec > 0,
         "Active duration must be positive"
+    );
+    // A zero price makes every deposit zero, which leaves nothing to refund
+    // and nothing to forfeit — the collateral the whole design rests on.
+    assert!(price_per_unit > 0, "Price per unit must be positive");
+    // The grace period is the window in which an exiting member's leaf is
+    // still live and still slashable. At zero a membership is erasable the
+    // instant its holder calls ForceExpire.
+    assert!(
+        grace_period_duration_for_new_memberships_sec > 0,
+        "Grace period duration must be positive"
     );
 
     let config_state = ConfigState {
@@ -246,13 +247,6 @@ pub fn register(
     ));
     let deposit_amount = calculate_payment_amount(rate_limit, config_state.price_per_unit);
 
-    // The deposit moves in NATIVE balance, so nothing here is self-reported:
-    // the protocol resolves the payer's real pre-state, refuses a decrease on
-    // an unauthorized account (UnauthorizedBalanceDecrease), and refuses a
-    // diff whose credits do not equal its debits (MismatchedTotalBalance).
-    //
-    // The escrow is a PDA of this program, so the macro's `pda` constraint is
-    // what guarantees where the credit lands.
     assert!(payer.is_authorized, "Payer must authorize the deposit");
     assert!(
         payer.account.balance >= deposit_amount,
@@ -289,9 +283,6 @@ pub fn register(
     );
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
-    // A credit needs no authorization, so taking the deposit is assignment on
-    // accounts this handler already declares. Paying it back is not: see
-    // `escrow_payout`.
     payer.account.balance -= deposit_amount;
     escrow.account.balance += deposit_amount;
 
@@ -378,22 +369,20 @@ pub fn slash(
         merkle_payload_remove(membership_state.leaf_index),
     );
 
-    // Forfeited, not destroyed: a diff's credits must equal its debits, so
-    // there is no way to burn native. The treasury is where it goes instead.
     assert_eq!(
         *treasury.account_id.value(),
         config_state.treasury_account_id,
         "Wrong treasury"
     );
-    let mut calls = vec![merkle_remove];
-    if membership_state.deposit_amount > 0 {
-        calls.push(escrow_payout(
+    let calls = vec![
+        merkle_remove,
+        escrow_payout(
             &escrow,
             &treasury,
             &tree_id,
             membership_state.deposit_amount,
-        ));
-    }
+        ),
+    ];
 
     let states = vec![
         config.account,
@@ -406,33 +395,15 @@ pub fn slash(
     SpelOutput::execute(states, calls)
 }
 
-/// Renew a membership from inside its grace period, at the same price its
-/// rate limit would cost to register.
-///
-/// Anyone may pay for anyone's renewal — the membership records no owner, and
-/// a third party topping up a member is harmless. What is NOT harmless is
-/// renewal being FREE: `erase` only reclaims a membership's `rate_limit` once
-/// it is expired, so a free extension lets any passer-by pin an abandoned
-/// membership's share of `max_total_rate_limit` forever, one cheap tx per
-/// grace window, and eventually block all new registrations. Charging the
-/// registration price makes that grief cost exactly as much as holding the
-/// slot legitimately, and gives `active_duration_sec` economic force.
+/// Renew a membership from inside its grace period. Holder only, and free:
+/// the escrowed deposit is what pays for the slot, so a renewal moves no
+/// value. Also reverses a `force_expire`.
 pub fn extend(
-    config: AccountWithMetadata,
     mut membership: AccountWithMetadata,
-    mut payer: AccountWithMetadata,
-    mut treasury: AccountWithMetadata,
+    holder: AccountWithMetadata,
     clock_account: AccountWithMetadata,
-    tree_id: [u8; 32],
 ) -> Output {
     let now_ms = require_clock_ms(&clock_account);
-
-    let config_state =
-        ConfigState::try_from_slice(config.account.data.as_ref()).expect("decode ConfigState");
-    assert_eq!(
-        config_state.tree_id, tree_id,
-        "tree_id arg must match config"
-    );
 
     let membership_bytes = membership.account.data.as_ref();
     assert!(
@@ -442,6 +413,9 @@ pub fn extend(
     let mut membership_state =
         MembershipState::try_from_slice(membership_bytes).expect("decode MembershipState");
 
+    assert!(holder.is_authorized, "Holder must authorize the renewal");
+    require_holder(&holder, &membership_state);
+
     assert!(
         is_in_grace_period(
             membership_state.grace_period_start_timestamp_ms,
@@ -450,30 +424,6 @@ pub fn extend(
         ),
         "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
     );
-    // Renewal is open to anyone, so without this a third party could reverse a
-    // holder's exit and keep their deposit escrowed.
-    assert_eq!(
-        membership_state.exiting, 0,
-        "CannotExtendExitingMembership: the holder has started this membership's wind-down"
-    );
-
-    // Priced off the membership's own rate limit, exactly as registration is.
-    let payment_amount =
-        calculate_payment_amount(membership_state.rate_limit, config_state.price_per_unit);
-
-    // Native, exactly as `register` pays: authorization and conservation are
-    // the protocol's to enforce, the destination is ours.
-    assert!(payer.is_authorized, "Payer must authorize payment");
-    assert!(
-        payer.account.balance >= payment_amount,
-        "Insufficient balance"
-    );
-
-    let treasury_id: [u8; 32] = *treasury.account_id.value();
-    assert_eq!(
-        treasury_id, config_state.treasury_account_id,
-        "Wrong treasury"
-    );
 
     membership_state.grace_period_start_timestamp_ms = membership_state
         .grace_period_start_timestamp_ms
@@ -481,16 +431,7 @@ pub fn extend(
         .saturating_add(secs_to_millis(membership_state.active_duration_sec));
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
-    payer.account.balance -= payment_amount;
-    treasury.account.balance += payment_amount;
-
-    let states = vec![
-        config.account,
-        membership.account,
-        payer.account,
-        treasury.account,
-        clock_account.account,
-    ];
+    let states = vec![membership.account, holder.account, clock_account.account];
     SpelOutput::execute(states, vec![])
 }
 
@@ -538,9 +479,6 @@ pub fn erase(
         "subtree_id must match membership leaf_index"
     );
 
-    // Erase is permissionless and the caller names the refund destination;
-    // this is what stops that being their own. Checked with the other
-    // preconditions rather than in the payout branch below.
     require_holder(&holder, &membership_state);
 
     config_state.current_total_rate_limit = config_state
@@ -560,15 +498,10 @@ pub fn erase(
         merkle_payload_remove(membership_state.leaf_index),
     );
 
-    let mut calls = vec![merkle_remove];
-    if membership_state.deposit_amount > 0 {
-        calls.push(escrow_payout(
-            &escrow,
-            &holder,
-            &tree_id,
-            membership_state.deposit_amount,
-        ));
-    }
+    let calls = vec![
+        merkle_remove,
+        escrow_payout(&escrow, &holder, &tree_id, membership_state.deposit_amount),
+    ];
 
     let states = vec![
         config.account,
@@ -582,12 +515,10 @@ pub fn erase(
     SpelOutput::execute(states, calls)
 }
 
-/// Bring a membership's grace period forward to now, at its holder's request
-/// — the counterweight to renewal being permissionless, which would otherwise
-/// let a third party keep a stranger's deposit escrowed indefinitely.
+/// Bring a membership's grace period forward to now, at its holder's request.
 ///
-/// The deposit is not released here: the leaf stays in the tree until `erase`,
-/// so the wind-down window is also the interval in which `slash` can forfeit it.
+/// Does not release the deposit: the leaf stays in the tree until `erase`, so
+/// the grace period is also the interval in which `slash` can still forfeit it.
 pub fn force_expire(
     mut membership: AccountWithMetadata,
     holder: AccountWithMetadata,
@@ -605,15 +536,10 @@ pub fn force_expire(
 
     assert!(holder.is_authorized, "Holder must authorize the exit");
     require_holder(&holder, &membership_state);
-    assert!(
-        membership_state.deposit_amount > 0,
-        "CannotForceExpireFreeMembership: no deposit is escrowed for this membership"
-    );
 
     // Only ever earlier, so this can never postpone expiry.
     membership_state.grace_period_start_timestamp_ms =
         membership_state.grace_period_start_timestamp_ms.min(now_ms);
-    membership_state.exiting = 1;
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
     let states = vec![membership.account, holder.account, clock_account.account];

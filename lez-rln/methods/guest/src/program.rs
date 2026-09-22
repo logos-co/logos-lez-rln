@@ -54,7 +54,6 @@ pub struct MembershipState {
     pub grace_period_duration_sec: u32,
     pub holder: [u8; 32],
     pub deposit_amount: u128,
-    pub exiting: u8,
 }
 
 const _: () = {
@@ -114,7 +113,6 @@ mod layout_equivalence {
             grace_period_duration_sec: 6,
             holder: [7u8; 32],
             deposit_amount: 8,
-            exiting: 9,
         };
         let shared = SharedMembershipState {
             leaf_index: 1,
@@ -125,7 +123,6 @@ mod layout_equivalence {
             grace_period_duration_sec: 6,
             holder: [7u8; 32],
             deposit_amount: 8,
-            exiting: 9,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -234,24 +231,17 @@ pub mod rln_registration {
 
     #[instruction]
     pub fn extend(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
         membership: AccountWithMetadata,
-        #[account(signer)] payer: AccountWithMetadata,
-        treasury: AccountWithMetadata,
+        #[account(signer)] holder: AccountWithMetadata,
         clock_account: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
     ) -> SpelResult {
-        let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
-        Ok(handlers::extend(
-            config,
-            membership,
-            payer,
-            treasury,
-            clock_account,
-            tree_id,
-        ))
+        // Both are PDA seeds only; the membership account they derive is what
+        // binds this call to a tree.
+        let _ = (tree_id, id_commitment);
+        Ok(handlers::extend(membership, holder, clock_account))
     }
 
     #[instruction]

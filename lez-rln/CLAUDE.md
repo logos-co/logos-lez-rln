@@ -1,4 +1,4 @@
-# lez-rln — non-obvious facts (measured at commit 0780862, 2026-08)
+# lez-rln — non-obvious facts (measured on feat/native-deposits, 2026-09)
 
 ## Guest binaries: two stale-binary traps
 - Building or testing the host crate NEVER rebuilds the guest — lez-rln has
@@ -85,24 +85,45 @@ separately on the account's own authorization. The note this replaces was
 written against rule 7 and described `register_free` and `claim_tokens`, none
 of which exist.
 
-## Renewal is priced, not permissioned
-`extend` deliberately does not check caller identity — `MembershipState`
-records no owner, and a third party paying for someone's renewal is
-harmless. The griefing vector was that renewal was FREE: `erase` reclaims a
-membership's `rate_limit` only once it expires, so anyone could keep
-abandoned memberships alive one cheap tx per grace window and pin
-`current_total_rate_limit` at `max_total_rate_limit`, blocking all new
-registrations. `extend` now charges `rate_limit * price_per_unit` — the same
-as registering — which also gives `active_duration` economic force.
+## Renewal is holder-only and free
+`extend` takes no payment and accepts only the account recorded as
+`membership.holder`. It declares no config account at all — the membership PDA
+seed binds `tree_id`, and nothing in config is read.
 
-With a REFUNDABLE deposit, that same permissionless renewal also freezes a
-stranger's funds, which the charge does not fix. `force_expire` is the
-counterweight: the holder pulls `grace_period_start_timestamp_ms` forward via
-`min` (never postponing expiry) and sets `exiting`, which `extend` then refuses.
-It does NOT release the deposit — the leaf stays in the tree until `erase`, so
-the wind-down window is also the interval in which `slash` can still forfeit it.
-Releasing on request would let a spammer register, spam and withdraw before
-anyone reconstructed their secret.
+The griefing vector it defends against is rate-limit pinning: `erase` reclaims
+a membership's `rate_limit` only once it has expired, so anyone able to renew
+indefinitely could hold `current_total_rate_limit` at `max_total_rate_limit`
+and block every new registration. Pricing renewal was the first answer and it
+was the wrong shape — with a REFUNDABLE deposit, a permissionless renewal also
+freezes a stranger's funds, which a charge does not fix. Restricting renewal to
+the holder closes both: an abandoned membership has nobody left to renew it, so
+it lapses and becomes erasable, and nobody can extend a stranger's escrow.
+
+That makes renewal free without reopening the grief, because the escrowed
+deposit is what pays for the slot and it stays locked for the membership's
+whole life. Consequence to keep in mind: the treasury's only income is slash
+forfeits.
+
+`force_expire` is the holder's early exit — it pulls
+`grace_period_start_timestamp_ms` back via `min` (never postponing expiry).
+There is no `exiting` latch: `extend` pushes the expiry back out, so a holder
+can call off its own exit and nobody else can, which is the same asymmetry.
+
+`force_expire` does NOT release the deposit. The leaf stays in the tree until
+`erase`, so the grace period is also the interval in which `slash` can still
+forfeit it — releasing on request would let a spammer register, spam and
+withdraw before anyone reconstructed their secret. **`grace_period_duration`
+is therefore the collateral window**, which is why `initialize` refuses a zero
+one, and refuses a zero `price_per_unit` for the same reason: at price zero
+there is no collateral at all.
+
+## An id_commitment is single-use for the life of the tree
+`erase` and `slash` empty the membership PDA but cannot un-own it — LEZ copies
+`pre.program_owner` forward and only ever ACQUIRES ownership, and nothing
+prunes emptied accounts. The `#[account(init, pda = ...)]` attribute that makes
+registration one-shot expands to an `Account::default()` check, so it also
+makes it permanent. Re-entering the registry means a fresh identity.
+Regression: `an_id_commitment_cannot_be_reused_after_erase`.
 
 ## A debit needs authorization; a credit needs nothing
 v0.2.5 rule 2 gates a `BalanceDiff::Sub` on `pre.is_authorized` — NOT on
@@ -121,6 +142,38 @@ Three consequences this program is built on:
   `state_with_programs` must seed it or every erase fails.
 - `slash` FORFEITS the deposit to the treasury rather than burning it, because
   burning is not expressible.
+- Nothing can squat the escrow: writing data to it would make the squatter its
+  owner, but ownership gates DATA writes only and no handler writes escrow
+  data, while the debit is authorized by the chained call's seed.
+- `extend` moves nothing at all, so it needs neither.
+
+## The clock is not monotonic, and the collateral window rests on it
+`CLOCK_50` is rewritten only on block ids that are multiples of 50, so a guest's
+`now_ms` is up to 49 blocks stale — the bound is in BLOCKS, not milliseconds.
+
+More importantly: the clock program writes whatever timestamp the block header
+carries, block timestamps come from `chrono::Utc::now()` at production time, and
+**nothing enforces that successive block timestamps are non-decreasing**. Only
+`block_id` monotonicity is checked. Searched `chain_state`, `common` and
+`sequencer/core` in the pinned tree: no comparison between a block's timestamp
+and its predecessor's exists.
+
+What that costs this program: `force_expire` sets
+`grace_start = min(grace_start, now_ms)` and `erase` requires
+`now >= grace_start + grace_dur`. A backwards clock excursion larger than
+`grace_period_duration` would let a holder exit at the depressed timestamp and
+then erase immediately once the clock recovers — collecting the deposit without
+ever having been slashable. That is precisely the "withdraw before anyone
+reconstructs their secret" case the wind-down design exists to prevent.
+
+Not defended in-guest, deliberately: every cheap in-guest bound is either wrong
+after an `extend` (a lower bound derived from `grace_start - active_duration`
+rejects a legitimate exit taken right after a renewal) or defeats the feature (a
+clamp on how far back `force_expire` may reach is exactly the early exit it
+provides). Defending it properly needs a stored high-water timestamp, which is
+not worth 8 bytes against a failure mode that requires the chain clock to move
+backwards by more than a week. Treat it as a chain-level assumption, and revisit
+if `grace_period_duration` is ever configured short.
 
 ## Gas, not binary size, is the binding limit
 v0.2.5 meters a charged transaction at one gas per cycle and caps it at
@@ -130,6 +183,12 @@ on this tree (depth 9): register 9.09M (91%), slash 8.81M (88%), erase 8.20M
 register, not the ~200KB of binary headroom. `register_transaction_fits_the_gas_ceiling`
 and the two `*_fits_the_gas_ceiling` tests beside it print the numbers — read
 them before adding work to any instruction.
+
+The same constant is also a per-BLOCK total: `accumulate_exec_gas` sums every
+charged transaction in a block against `MAX_GAS_EXEC`. At 91% for a single
+register, **a block holds one registration and nothing else** — which is why
+two registrations cannot be batched, and why a lapse-and-re-register costs at
+least two blocks of downtime.
 
 ## The tree holds 512 leaves, and that is a lifetime count
 `next_index` only advances and an erased leaf's index is never reused, so
