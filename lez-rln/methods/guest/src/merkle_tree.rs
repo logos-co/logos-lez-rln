@@ -1,23 +1,23 @@
 //! Incremental Merkle Tree implementation with subtree-based storage.
 //!
 //! This module provides the core logic for an incremental Merkle tree that
-//! splits the tree at level 10 into a top tree (levels 0-10, stored in the
-//! main account) and 1024 bottom subtrees (each a complete depth-10 tree
-//! in its own account).
+//! splits the tree at `TOP_DEPTH` into a top tree (stored in the main account)
+//! and `2^TOP_DEPTH` bottom subtrees of `SUBTREE_LEAVES` leaves each (every
+//! one in its own account). All four constants live in `rln_layouts`.
 //!
 //! # Architecture
 //!
 //! - **Main account**: Stores tree metadata (depth, next_index, root, cached defaults) plus top
 //!   tree nodes in sparse format (grows dynamically)
-//! - **Bottom subtree accounts**: Each stores a depth-10 subtree in sparse format
+//! - **Bottom subtree accounts**: Each stores one `BOTTOM_DEPTH` subtree in sparse format
 //!
 //! Each insert/remove touches exactly 2 accounts: the main account and one
 //! bottom subtree account. Sparse storage format: `[count(u16le), (offset(u16le), hash(32))...]`
 //!
 //! # Key Formulas
 //!
-//! - `subtree_id = leaf_index / 1024`
-//! - `local_index = leaf_index % 1024`
+//! - `subtree_id = leaf_index / SUBTREE_LEAVES`
+//! - `local_index = leaf_index % SUBTREE_LEAVES`
 //! - BFS node offset: `(2^level - 1) + index_within_level`
 //!
 //! # Authorization
@@ -30,7 +30,7 @@ use nssa_core::account::{Account, AccountWithMetadata};
 pub use rln_layouts::{
     BOTTOM_DEPTH, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
     OFFSET_ROOT_HISTORY, OFFSET_TOP_TREE_DATA, ROOT_HISTORY_SIZE, SUBTREE_LEAVES, TOP_DEPTH,
-    TREE_DEPTH, read_sparse_node, subtree_node_offset,
+    TREE_DEPTH, TREE_LEAVES, read_sparse_node, subtree_node_offset,
 };
 
 use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
@@ -190,6 +190,14 @@ pub fn insert_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> 
         expected_index == next_index,
         "Insert must be sequential: expected index {} but tree next_index is {}",
         expected_index,
+        next_index
+    );
+    // The top-tree walk below addresses nodes by a compile-time BFS offset with
+    // no per-level bound, so an index past the last leaf resolves onto live
+    // nodes of other subtrees and yields a wrong root without failing.
+    assert!(
+        next_index < TREE_LEAVES,
+        "tree is full: next_index {} is past the last leaf",
         next_index
     );
 
@@ -1279,9 +1287,7 @@ mod tests {
 
     #[test]
     fn test_multiple_subtrees_independent_roots() {
-        // Insert 1 leaf in subtree 0, record root.
-        // Insert 1 leaf in subtree 1 (index 1024), record root.
-        // They should differ (both leaves are distinct).
+        // One leaf in subtree 0 and one in subtree 1 give different roots.
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
 
         // Insert leaf at index 0
@@ -1293,13 +1299,10 @@ mod tests {
         let post1 = insert_leaf(pre_states, &instr);
         let root_one_leaf_subtree0 = read_root(post1[0].data.as_ref());
 
-        // Now insert at index 1024 (subtree 1) using a fresh subtree account
-        // but carrying forward the main account from above
-        let main_data = post1[0].data.as_ref();
-        // Set next_index to 1024 to skip the rest of subtree 0
-        let mut modified_main = main_data.to_vec();
+        // Skip to the first index of subtree 1, carrying the main account forward.
+        let mut modified_main = post1[0].data.as_ref().to_vec();
         modified_main[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
-            .copy_from_slice(&1024u64.to_le_bytes());
+            .copy_from_slice(&(SUBTREE_LEAVES as u64).to_le_bytes());
 
         let main_for_subtree1 = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
@@ -1316,7 +1319,7 @@ mod tests {
         };
 
         let mut instr2 = Vec::with_capacity(40);
-        instr2.extend_from_slice(&1024u64.to_le_bytes());
+        instr2.extend_from_slice(&(SUBTREE_LEAVES as u64).to_le_bytes());
         instr2.extend_from_slice(&[2u8; 32]);
 
         let post2 = insert_leaf(vec![main_for_subtree1, fresh_subtree1], &instr2);
@@ -1330,6 +1333,41 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "tree is full")]
+    fn test_insert_past_the_last_leaf_is_refused() {
+        let (pre_states, instr) = build_insert_first_leaf_data(
+            AccountForTests::main_initialized(),
+            AccountForTests::subtree_empty(),
+            [1u8; 32],
+        );
+        let post1 = insert_leaf(pre_states, &instr);
+
+        let mut modified_main = post1[0].data.as_ref().to_vec();
+        modified_main[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
+            .copy_from_slice(&TREE_LEAVES.to_le_bytes());
+
+        let main_full = AccountWithMetadata {
+            account_id: IdForTests::main_account_id(),
+            account: Account {
+                data: modified_main.try_into().unwrap(),
+                ..Default::default()
+            },
+            is_authorized: true,
+        };
+        let fresh_subtree = AccountWithMetadata {
+            account_id: IdForTests::subtree_account_id(),
+            account: Account::default(),
+            is_authorized: true,
+        };
+
+        let mut instr2 = Vec::with_capacity(40);
+        instr2.extend_from_slice(&TREE_LEAVES.to_le_bytes());
+        instr2.extend_from_slice(&[2u8; 32]);
+
+        let _ = insert_leaf(vec![main_full, fresh_subtree], &instr2);
+    }
+
+    #[test]
     fn test_full_subtree_then_remove_all() {
         // Fill subtree 0, then remove all leaves — root should restore to empty
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
@@ -1339,7 +1377,7 @@ mod tests {
         let root_after_fill = read_root(main_account.data.as_ref());
         assert_ne!(root_after_fill, empty_root);
 
-        // Remove all 1024 leaves in reverse order
+        // Remove every leaf in reverse order
         let mut current_main = main_account;
         let mut current_subtree = subtrees[&0].clone();
 

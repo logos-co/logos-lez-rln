@@ -75,30 +75,30 @@ cargo run --bin run_rln_proof    # generate + verify RLN proof against on-chain 
 
 ## Merkle Tree Program
 
-The incremental Merkle tree (depth 20, ~1M leaves) is split across multiple on-chain accounts to keep each operation's data footprint small.
+The incremental Merkle tree (depth 9, 512 leaves) is split across multiple on-chain accounts to keep each operation's data footprint small. Depth is a cost decision, not a capacity one: an insert costs one Poseidon compression per level, and a register transaction has room for nine.
 
 ### Storage Layout
 
-The tree is divided at level 10 into a **top tree** and **1024 bottom subtrees**:
+The tree is divided at level 4 into a **top tree** and **16 bottom subtrees** of 32 leaves each:
 
 ```
-           [root]              <- top tree (levels 0-10)
+           [root]              <- top tree (levels 0-4)
           /      \                stored in main account
         ...      ...
        / \ ... / \
-      S0  S1  ... S1023        <- subtree roots
-     /\   /\      /\           <- bottom subtrees (levels 11-20)
+      S0  S1  ...  S15         <- subtree roots
+     /\   /\      /\           <- bottom subtrees (levels 5-9)
     ...  ...     ...              each in its own PDA account
 ```
 
-- **Main account** (seeds `["main", tree_id]`): Tree metadata (depth, next_index, root, 4 previous roots, 21 cached default hashes) + top tree nodes in sparse format. Starts at 841 bytes, grows as nodes are added.
-- **Subtree accounts** (seeds `["subtree", tree_id, subtree_id]`): Each stores a depth-10 subtree in sparse format.
+- **Main account** (seeds `["main", tree_id]`): Tree metadata (depth, next_index, root, 4 previous roots, 10 cached default hashes) + top tree nodes in sparse format. Starts at 489 bytes, grows as nodes are added.
+- **Subtree accounts** (seeds `["subtree", tree_id, subtree_id]`): Each stores a depth-5 subtree in sparse format.
 
 Each insert or remove touches exactly **2 accounts**: the main account and one bottom subtree.
 
 ### Sparse Node Storage
 
-Both the top tree and subtrees use a compact sparse format instead of storing all 2^11 - 1 nodes:
+Both the top tree and subtrees use a compact sparse format instead of storing every node:
 
 ```
 [count: u16le] [offset: u16le, hash: 32 bytes] [offset: u16le, hash: 32 bytes] ...

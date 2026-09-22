@@ -18,6 +18,11 @@
   two `.bin`s. Docker is NOT required — build.rs builds the guest locally
   (docker mode cannot resolve the sibling lssa/spel path deps; see the
   build.rs header).
+- Builds are reproducible but LINE-SENSITIVE: panic `Location` metadata
+  embeds file:line, so adding a blank line or editing a comment in the guest
+  produces a different program id — and therefore different PDAs and a dead
+  deployment. Proven by controlled experiment. Consequence: finish guest
+  comment churn BEFORE provisioning, never after.
 
 ## Running state_tests.rs
 Plain `cargo test` prints "0 passed, N filtered out" and exits 0 — it ran
@@ -28,15 +33,6 @@ path or tests die in dyld with SIGABRT
     RISC0_DEV_MODE=1 \
     DYLD_FRAMEWORK_PATH=/Library/Developer/CommandLineTools/Library/Frameworks \
     cargo test --release --features rc5-state-tests
-
-## Handler security convention
-`account.program_owner` on caller-supplied accounts is attacker-controllable
-(anyone can pre-insert an account owned by an arbitrary program carrying
-forged balance data). Any handler touching token holdings must take the
-token program from `config_state.token_program_id`, assert the holding's
-owner equals it, and use the config value as the ChainedCall target — never
-`account.program_owner`. Regression tests:
-`test_*_rejects_*foreign_program` in state_tests.rs (added at 0780862).
 
 ## Init handlers must carry `init`
 Public transactions need no signature (`build_public_tx` passes empty nonces
@@ -56,10 +52,8 @@ survived, leaving them unable to re-register. Regressions:
 `test_registration_init_prevents_reinit` does NOT cover this: it replays the
 whole init batch and short-circuits on the first tx.
 
-The token initializers are additionally covered by
-`token_core::new_fungible_definition`, which asserts both accounts are
-`Account::default()` — the merkle program had no equivalent. When adding a
-program that owns accounts, give it one.
+When adding a program that owns accounts, give it the same
+`Account::default()` check.
 
 ## Chained-call targets come from config, never from instruction args
 The same rule the token-holding convention below states, generalized: a
@@ -75,34 +69,21 @@ is gone from `rln_layouts::Instruction` entirely — the wire cannot express the
 attack. This makes config a prerequisite, satisfied because `Initialize` runs
 first. Regression: `test_init_merkle_uses_config_program_not_caller_arg`.
 
-The same rule once covered `InitializeCreditToken` / `InitializePaymentToken`
-and the `receipt` / `supply` / `payment` / `payment_supply` PDAs. Those
-instructions and PDAs no longer exist: the registry takes the native asset
-only, so it chains to nothing but the merkle program.
+The registry takes the native asset only, so it chains to nothing but the
+merkle program.
 
-## A declared plain-wallet account breaks the program on its second use
-LEZ rule 7 (`NonDefaultAccountWithDefaultOwner`) rejects any account in a
-program's output that is DEFAULT-owned and no longer `Account::default()`.
-Every declared account IS echoed into the output — v0.2.2's
-`DeclaredAccountMissingFromOutput` leaves no way to omit one, and the
-rc6-era spel filter that used to strip these echoes was deleted for exactly
-that reason. Signing increments the nonce, so a declared plain-wallet signer
-works ONCE and is then rejected forever, with the reason visible only in the
-sequencer's log.
+## Unowned accounts holding only a balance are fine
+v0.2.2's rule 7 (`NonDefaultAccountWithDefaultOwner`), which rejected any
+DEFAULT-owned account in a program's output that was no longer
+`Account::default()`, is GONE in v0.2.5. Its successor
+`DataBearingUnownedAccount` fires only on an unowned account carrying DATA.
 
-`register_free`'s registrar is the case in point, and it now asserts the
-registrar is program-owned so the misconfiguration fails loudly on the first
-call instead. Deployments must seed the registrar (e.g. claim tokens into it)
-before its first registration. Regressions:
-`test_register_free_works_repeatedly_for_one_registrar` and
-`test_register_free_rejects_a_plain_wallet_registrar` — note that
-`test_register_free_quota_exhaustion` CANNOT catch this, since its second tx
-dies on the quota assert before validation runs.
-
-`claim_tokens`' `dest_holding` is the benign version: its first claim needs a
-pristine account anyway, and the token program then owns it, so rule 7 is
-skipped from then on. Only a plain wallet that has already transacted is
-permanently unusable as a claim destination.
+So a plain unowned account that has already transacted — the treasury, a fee
+payer, any wallet — can be declared repeatedly without the program breaking on
+its second use. Ownership gates DATA writes only; a balance decrease is gated
+separately on the account's own authorization. The note this replaces was
+written against rule 7 and described `register_free` and `claim_tokens`, none
+of which exist.
 
 ## Renewal is priced, not permissioned
 `extend` deliberately does not check caller identity — `MembershipState`
@@ -112,8 +93,18 @@ membership's `rate_limit` only once it expires, so anyone could keep
 abandoned memberships alive one cheap tx per grace window and pin
 `current_total_rate_limit` at `max_total_rate_limit`, blocking all new
 registrations. `extend` now charges `rate_limit * price_per_unit` — the same
-as registering — which also gives `active_duration` economic force. Both
-payment accounts are token-owned, so this is rule-7 safe.
+as registering — which also gives `active_duration` economic force.
+
+## The tree holds 512 leaves, and that is a lifetime count
+`next_index` only advances and an erased leaf's index is never reused, so
+`TREE_LEAVES` bounds total registrations over the tree's life, not concurrent
+members. Past it the top-tree walk addresses nodes by a compile-time BFS offset
+with no per-level bound, so an insert aliases live nodes of other subtrees and
+returns a wrong root WITHOUT failing — every member's proof then stops
+verifying, and `config`/`tree_main` are `init`-guarded, so the deployment
+cannot be repaired. `insert_leaf` and `register` both assert the bound.
+`MerkleOpcode::Set` exists with no callers and is the only index-reuse path if
+capacity ever has to grow.
 
 ## Testnet operations
 
@@ -149,10 +140,6 @@ payment accounts are token-owned, so this is rule-7 safe.
   `test_register_same_commitment_twice_fails`.
 - Deploying new program instances to https://testnet.lez.logos.co/ is
   normal, routine development practice (`tools/deployments/provision.sh`).
-- `deployments/shared-faucet` records a DEAD deployment: the chain it was
-  provisioned against no longer exists, and its program predates both
-  security fixes above. Its ids (registry, tree, program) are stale — expect
-  to re-provision from scratch rather than to verify against it.
 - `state_tests` reads the guest `.bin`s from the same `docker/` dir the
   deploy host uses, which is also the record of what is live. Set
   `LEZ_RLN_GUEST_DIR` to a fresh build's `release/` dir to test guest changes

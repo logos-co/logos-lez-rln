@@ -1,4 +1,4 @@
-//! Guest cycle-count measurement harness (Phase 0.2).
+//! Guest cycle-count measurement harness.
 //!
 //! Measures the RV32IM user-cycle cost of the merkle program's Initialize and
 //! Insert paths — the two operations that press against the per-execution

@@ -152,6 +152,13 @@ pub const BOTTOM_DEPTH: usize = 5;
 /// Number of leaves per bottom subtree (`2^BOTTOM_DEPTH`).
 pub const SUBTREE_LEAVES: usize = 32;
 
+/// Leaves the tree holds (`2^TREE_DEPTH`).
+///
+/// `next_index` only ever advances and an erased leaf's index is never reused,
+/// so this bounds the registry's lifetime registrations, not its concurrent
+/// members.
+pub const TREE_LEAVES: u64 = 1 << TREE_DEPTH;
+
 // These four are independent literals, and nothing used to check they agreed.
 // Setting one and forgetting another compiled cleanly and produced a tree whose
 // nodes alias each other, so state it once here where it fails at build time.
