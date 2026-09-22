@@ -60,4 +60,11 @@ pub enum Instruction {
         id_commitment: [u8; 32],
         subtree_id: u32,
     },
+    /// Bring a membership's grace period forward to now, so its deposit
+    /// becomes refundable once that window closes. Holder only. Appended
+    /// rather than inserted: the index is the wire encoding.
+    ForceExpire {
+        tree_id: [u8; 32],
+        id_commitment: [u8; 32],
+    },
 }

@@ -40,7 +40,7 @@ pub struct ConfigState {
 
 /// Borsh layout for a per-member account in the SPEL registration program.
 ///
-/// Fixed size: 64 bytes.
+/// Fixed size: 113 bytes.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct MembershipState {
     pub leaf_index: u64,
@@ -50,6 +50,14 @@ pub struct MembershipState {
     pub grace_period_start_timestamp_ms: u64,
     pub active_duration_sec: u32,
     pub grace_period_duration_sec: u32,
+    /// The account that paid the deposit, and the only one `Erase` refunds it
+    /// to. `Slash` forfeits it to the treasury instead.
+    pub holder: [u8; 32],
+    /// Native atomic units held in the tree's escrow on this membership's
+    /// behalf.
+    pub deposit_amount: u128,
+    /// Non-zero once `ForceExpire` has run; `Extend` then refuses.
+    pub exiting: u8,
 }
 
 /// Serialized size of [`ConfigState`], in bytes.
@@ -61,7 +69,7 @@ pub struct MembershipState {
 pub const CONFIG_STATE_SIZE: usize = 144;
 
 /// Serialized size of [`MembershipState`], in bytes.
-pub const MEMBERSHIP_STATE_SIZE: usize = 64;
+pub const MEMBERSHIP_STATE_SIZE: usize = 113;
 
 #[cfg(test)]
 mod tests {
@@ -148,6 +156,9 @@ mod tests {
             grace_period_start_timestamp_ms: 4,
             active_duration_sec: 5,
             grace_period_duration_sec: 6,
+            holder: [7; 32],
+            deposit_amount: 8,
+            exiting: 9,
         };
         let bytes = borsh::to_vec(&membership).expect("MembershipState serializes");
         assert_eq!(bytes.len(), MEMBERSHIP_STATE_SIZE);

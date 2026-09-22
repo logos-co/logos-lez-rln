@@ -21,6 +21,15 @@ pub fn derive_config_account(program_id: &AccountId, tree_id: &[u8; 32]) -> Acco
     derive_pda(program_id, &[&label_seed("config"), tree_id])
 }
 
+/// Deposit escrow: `seeds = [literal("escrow"), arg("tree_id")]`.
+///
+/// Holds every membership's deposit for this tree. Never claimed — it only
+/// ever carries native balance, credited by `Register` and paid out by a
+/// chained transfer naming this seed.
+pub fn derive_escrow_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
+    derive_pda(program_id, &[&label_seed("escrow"), tree_id])
+}
+
 /// Membership account: `seeds = [literal("membership"), arg("tree_id"), arg("id_commitment")]`.
 pub fn derive_membership_account(
     program_id: &AccountId,

@@ -132,12 +132,13 @@ where each seed is zero-padded to 32 bytes (string labels), little-endian-prefix
 | Config           | `["config", tree_id]`                       | Merkle program ID, tree ID, price, treasury, rate limit tracking, membership durations |
 | Tree main        | `["main", tree_id]`                         | Merkle tree metadata + top tree (see above)           |
 | Subtrees         | `["subtree", tree_id, subtree_id]`          | Bottom subtrees (see above)                           |
-| Membership       | `["membership", tree_id, id_commitment]`    | Per-identity (leaf_index, rate_limit, expiry timestamps) |
+| Escrow           | `["escrow", tree_id]`                       | Holds every membership's deposit for this tree         |
+| Membership       | `["membership", tree_id, id_commitment]`    | Per-identity (leaf_index, rate_limit, expiry timestamps, holder, deposit) |
 
-The treasury is deliberately **not** a PDA. A PDA is spendable only through a
-chained call carrying its seeds, issued by its owning program, and this program
-has no instruction that would issue one — so a PDA treasury would accrue revenue
-nothing could ever move. It is a plain account named in the config instead.
+The treasury is deliberately **not** a PDA: it only accrues, and whoever holds it
+spends it by signing. The escrow is the opposite case — it has to be spendable by
+the *program*, and a PDA is the only account that can be, through a chained call
+carrying its seed. `Erase` and `Slash` are the instructions that issue one.
 
 ### Instructions
 
@@ -145,17 +146,21 @@ Instructions are passed as a serde `Instruction` enum defined in `rln-layouts/sr
 
 **Initialize** — Writes the config PDA: merkle program ID, tree ID, price, treasury, rate-limit cap and membership durations. Setup is still split across two transactions (a fused init exceeds the 32M per-session cycle cap): `InitializeMerkleTree` chains to the merkle program to initialize the tree.
 
-**Register** — Atomic payment + registration, in one asset. Debits `rate_limit * price_per_unit` of **native** balance from the signing account and credits the treasury, computes `leaf = hash(id_commitment, rate_limit)`, creates a membership PDA, and chains to the merkle program to insert the leaf. The signer is also the transaction's fee payer, so one account and one balance cover the whole thing.
+**Register** — Atomic deposit + registration, in one asset. Debits `rate_limit * price_per_unit` of **native** balance from the signing account into the tree's `escrow` PDA, records that account as the membership's `holder` with the amount, computes `leaf = hash(id_commitment, rate_limit)`, creates a membership PDA, and chains to the merkle program to insert the leaf. The signer is also the transaction's fee payer, so one account and one balance cover the whole thing. The deposit is collateral, not revenue: `Erase` returns it and `Slash` forfeits it.
 
-The balance move is a field assignment rather than a chained call: the SPEL macro derives each account's `BalanceDiff` from the post-account a handler returns. The protocol then enforces what the old token-holding asserts stood in for — only an authorized account can be debited, the guest cannot misreport a pre-state, and credits must equal debits across the diff. The one thing it does not decide is where the credit lands, so the treasury-id check is the only routing assert left.
+The balance move is a field assignment rather than a chained call: the SPEL macro derives each account's `BalanceDiff` from the post-account a handler returns. The protocol then enforces what the old token-holding asserts stood in for — only an authorized account can be debited, the guest cannot misreport a pre-state, and credits must equal debits across the diff. The one thing it does not decide is where the credit lands; for the escrow that is the macro's `pda` constraint, and for `Extend`'s fee it is the treasury-id assert.
+
+Paying a deposit back is not symmetric with taking one. A credit needs no authorization, but a debit needs the account authorized — and a program's own PDA is authorized only as the callee of a chained call naming its seed. So `Erase` and `Slash` each carry a chained `authenticated_transfer` out of the escrow, which is the one place the deposit model costs an extra guest execution (about 25k cycles).
 
 Unlinkable registration does not need a credit token: LEZ privacy is transparent to guest logic, so the paying account may itself be **private** — `pre_states` carries `is_authorized` either way, and a private account proves it through its nullifier secret key.
 
-**Slash** — Anyone can remove a spammer by providing their `identity_secret`. The program verifies `id_commitment = hash(identity_secret)`, looks up the membership, and chains to the merkle program to remove the leaf. Frees the consumed rate limit.
+**Slash** — Anyone can remove a spammer by providing their `identity_secret`. The program verifies `id_commitment = hash(identity_secret)`, looks up the membership, chains to the merkle program to remove the leaf, and forfeits the escrowed deposit to the treasury. Frees the consumed rate limit. Forfeited rather than burned: a diff's credits must equal its debits, so native balance cannot be destroyed.
 
-**Extend** — Renews an existing membership's active period from the current clock (a membership in its grace period can be extended rather than re-registered). Anyone may call it, including on someone else's behalf, but it costs the same as registering that membership's rate limit — free renewal would let a third party pin an abandoned membership's share of the rate-limit budget indefinitely.
+**Extend** — Renews an existing membership from inside its grace period, at the same price as registering that rate limit, paid to the treasury and not refundable. Anyone may call it, including on someone else's behalf — free renewal would let a third party pin an abandoned membership's share of the rate-limit budget indefinitely. Refused once the holder has called `ForceExpire`.
 
-**Erase** — Removes an expired membership and chains to the merkle program to remove its leaf, returning the member's rate limit to the pool.
+**ForceExpire** — Brings a membership's grace period forward to now (`min(grace_start, now)`, so it can never postpone expiry) and marks it exiting. Holder only. This is the counterweight to renewal being permissionless: without it a third party could keep a stranger's membership alive, and their deposit escrowed, indefinitely. The leaf stays in the tree until `Erase`, so the wind-down window is also the interval in which `Slash` can still forfeit the deposit — an exit that released funds immediately would outrun slashing.
+
+**Erase** — Removes an expired membership, chains to the merkle program to remove its leaf, returns the rate limit to the pool, and refunds the escrowed deposit to the recorded `holder`. Permissionless; the caller names the destination but the program rejects any account that is not the one that paid.
 
 There is no faucet and no free-registration path. A faucet is not expressible
 for the native asset — no program can mint it — so balance arrives only at

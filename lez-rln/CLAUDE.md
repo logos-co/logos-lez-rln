@@ -95,6 +95,42 @@ abandoned memberships alive one cheap tx per grace window and pin
 registrations. `extend` now charges `rate_limit * price_per_unit` — the same
 as registering — which also gives `active_duration` economic force.
 
+With a REFUNDABLE deposit, that same permissionless renewal also freezes a
+stranger's funds, which the charge does not fix. `force_expire` is the
+counterweight: the holder pulls `grace_period_start_timestamp_ms` forward via
+`min` (never postponing expiry) and sets `exiting`, which `extend` then refuses.
+It does NOT release the deposit — the leaf stays in the tree until `erase`, so
+the wind-down window is also the interval in which `slash` can still forfeit it.
+Releasing on request would let a spammer register, spam and withdraw before
+anyone reconstructed their secret.
+
+## A debit needs authorization; a credit needs nothing
+v0.2.5 rule 2 gates a `BalanceDiff::Sub` on `pre.is_authorized` — NOT on
+ownership, which is what v0.2.2 gated it on. Credits are unrestricted, and rule
+5 requires a diff's credits to equal its debits, so native balance can be
+neither minted nor burned.
+
+Three consequences this program is built on:
+- Taking a deposit is a field assignment (`escrow.account.balance += x`), because
+  crediting needs no authorization.
+- Paying one back is NOT. A program's own PDA is authorized only as the callee
+  of a chained call naming its seed (`compute_public_authorized_pdas` returns
+  empty when there is no caller, and the top-level call has none), so `erase`
+  and `slash` each carry an `authenticated_transfer::custody_transfer`. That
+  program is a genesis builtin; the registry does not deploy it, but
+  `state_with_programs` must seed it or every erase fails.
+- `slash` FORFEITS the deposit to the treasury rather than burning it, because
+  burning is not expressible.
+
+## Gas, not binary size, is the binding limit
+v0.2.5 meters a charged transaction at one gas per cycle and caps it at
+`MAX_GAS_EXEC` = 10M; the whole chained-call chain shares one budget. Measured
+on this tree (depth 9): register 9.09M (91%), slash 8.81M (88%), erase 8.20M
+(82%). A refund leg costs ~25k, so the margin that matters is the ~900k above
+register, not the ~200KB of binary headroom. `register_transaction_fits_the_gas_ceiling`
+and the two `*_fits_the_gas_ceiling` tests beside it print the numbers — read
+them before adding work to any instruction.
+
 ## The tree holds 512 leaves, and that is a lifetime count
 `next_index` only advances and an erased leaf's index is never reused, so
 `TREE_LEAVES` bounds total registrations over the tree's life, not concurrent

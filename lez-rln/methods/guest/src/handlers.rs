@@ -39,6 +39,38 @@ fn subtree_seed(tree_id: &[u8; 32], subtree_id: u32) -> [u8; 32] {
     combine_seeds(&[&label_seed("subtree"), tree_id, &u32_seed(subtree_id)])
 }
 
+fn escrow_seed(tree_id: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("escrow"), tree_id])
+}
+
+/// Move `amount` of native balance out of the tree's escrow.
+///
+/// A debit needs the account authorized, and a program's own PDA is authorized
+/// only as the callee of a chained call naming its seed — so paying a deposit
+/// back cannot be the plain assignment that taking one is.
+fn escrow_payout(
+    escrow: &AccountWithMetadata,
+    destination: &AccountWithMetadata,
+    tree_id: &[u8; 32],
+    amount: u128,
+) -> ChainedCall {
+    authenticated_transfer_core::custody_transfer(
+        escrow.account_id,
+        PdaSeed::new(escrow_seed(tree_id)),
+        destination.account_id,
+        amount,
+    )
+}
+
+/// Assert `account` is the one the membership recorded as its depositor.
+fn require_holder(account: &AccountWithMetadata, membership_state: &MembershipState) {
+    assert_eq!(
+        *account.account_id.value(),
+        membership_state.holder,
+        "account is not this membership's holder"
+    );
+}
+
 fn merkle_payload_insert(next_index: u64, leaf_value: &[u8; 32]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(41);
     payload.push(MerkleOpcode::Insert as u8);
@@ -73,11 +105,14 @@ fn merkle_chained_call(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_membership_state(
     next_index: u64,
     rate_limit: u64,
     id_commitment: [u8; 32],
     grace_period_start_timestamp_ms: u64,
+    holder: [u8; 32],
+    deposit_amount: u128,
     config_state: &ConfigState,
 ) -> MembershipState {
     MembershipState {
@@ -87,6 +122,9 @@ fn new_membership_state(
         grace_period_start_timestamp_ms,
         active_duration_sec: config_state.active_duration_for_new_memberships_sec,
         grace_period_duration_sec: config_state.grace_period_duration_for_new_memberships_sec,
+        holder,
+        deposit_amount,
+        exiting: 0,
     }
 }
 
@@ -179,7 +217,7 @@ pub fn register(
     mut config: AccountWithMetadata,
     tree_main: AccountWithMetadata,
     mut payer: AccountWithMetadata,
-    mut treasury: AccountWithMetadata,
+    mut escrow: AccountWithMetadata,
     bottom_subtree: AccountWithMetadata,
     clock_account: AccountWithMetadata,
     mut membership: AccountWithMetadata,
@@ -206,27 +244,19 @@ pub fn register(
     let grace_period_start_timestamp_ms = now_ms.saturating_add(secs_to_millis(
         config_state.active_duration_for_new_memberships_sec,
     ));
-    let payment_amount = calculate_payment_amount(rate_limit, config_state.price_per_unit);
+    let deposit_amount = calculate_payment_amount(rate_limit, config_state.price_per_unit);
 
-    // The price moves in NATIVE balance, so nothing here is self-reported: the
-    // protocol resolves the payer's real pre-state, refuses a decrease on an
-    // unauthorized account (UnauthorizedBalanceDecrease), and refuses a diff
-    // whose credits do not equal its debits (MismatchedTotalBalance). That is
-    // what the old "holding must be owned by the token program" assert was
-    // standing in for, now enforced by consensus instead of by this guest.
+    // The deposit moves in NATIVE balance, so nothing here is self-reported:
+    // the protocol resolves the payer's real pre-state, refuses a decrease on
+    // an unauthorized account (UnauthorizedBalanceDecrease), and refuses a
+    // diff whose credits do not equal its debits (MismatchedTotalBalance).
     //
-    // The one thing the protocol will not decide is WHERE the credit lands, so
-    // the treasury check below stays and is the only routing guarantee left.
-    assert!(payer.is_authorized, "Payer must authorize payment");
+    // The escrow is a PDA of this program, so the macro's `pda` constraint is
+    // what guarantees where the credit lands.
+    assert!(payer.is_authorized, "Payer must authorize the deposit");
     assert!(
-        payer.account.balance >= payment_amount,
+        payer.account.balance >= deposit_amount,
         "Insufficient balance"
-    );
-
-    let treasury_id: [u8; 32] = *treasury.account_id.value();
-    assert_eq!(
-        treasury_id, config_state.treasury_account_id,
-        "Wrong treasury"
     );
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
@@ -253,16 +283,17 @@ pub fn register(
         rate_limit,
         id_commitment,
         grace_period_start_timestamp_ms,
+        *payer.account_id.value(),
+        deposit_amount,
         &config_state,
     );
     write_borsh(&mut membership, &membership_state, "MembershipState");
 
-    // The SPEL macro derives each account's BalanceDiff from the post-account
-    // returned here, so moving value is assignment on accounts this handler
-    // already declares — no chained call to authenticated_transfer, and no
-    // second zkVM session for a two-line move.
-    payer.account.balance -= payment_amount;
-    treasury.account.balance += payment_amount;
+    // A credit needs no authorization, so taking the deposit is assignment on
+    // accounts this handler already declares. Paying it back is not: see
+    // `escrow_payout`.
+    payer.account.balance -= deposit_amount;
+    escrow.account.balance += deposit_amount;
 
     let merkle_insert = merkle_chained_call(
         config_state.merkle_program_id,
@@ -277,7 +308,7 @@ pub fn register(
         config.account,
         tree_main.account,
         payer.account,
-        treasury.account,
+        escrow.account,
         bottom_subtree.account,
         clock_account.account,
         membership.account,
@@ -285,11 +316,14 @@ pub fn register(
     SpelOutput::execute(states, vec![merkle_insert])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn slash(
     mut config: AccountWithMetadata,
     tree_main: AccountWithMetadata,
     mut membership: AccountWithMetadata,
     bottom_subtree: AccountWithMetadata,
+    escrow: AccountWithMetadata,
+    treasury: AccountWithMetadata,
     tree_id: [u8; 32],
     id_commitment: [u8; 32],
     identity_secret: [u8; 32],
@@ -344,13 +378,32 @@ pub fn slash(
         merkle_payload_remove(membership_state.leaf_index),
     );
 
+    // Forfeited, not destroyed: a diff's credits must equal its debits, so
+    // there is no way to burn native. The treasury is where it goes instead.
+    assert_eq!(
+        *treasury.account_id.value(),
+        config_state.treasury_account_id,
+        "Wrong treasury"
+    );
+    let mut calls = vec![merkle_remove];
+    if membership_state.deposit_amount > 0 {
+        calls.push(escrow_payout(
+            &escrow,
+            &treasury,
+            &tree_id,
+            membership_state.deposit_amount,
+        ));
+    }
+
     let states = vec![
         config.account,
         tree_main.account,
         membership.account,
         bottom_subtree.account,
+        escrow.account,
+        treasury.account,
     ];
-    SpelOutput::execute(states, vec![merkle_remove])
+    SpelOutput::execute(states, calls)
 }
 
 /// Renew a membership from inside its grace period, at the same price its
@@ -397,6 +450,12 @@ pub fn extend(
         ),
         "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
     );
+    // Renewal is open to anyone, so without this a third party could reverse a
+    // holder's exit and keep their deposit escrowed.
+    assert_eq!(
+        membership_state.exiting, 0,
+        "CannotExtendExitingMembership: the holder has started this membership's wind-down"
+    );
 
     // Priced off the membership's own rate limit, exactly as registration is.
     let payment_amount =
@@ -435,12 +494,15 @@ pub fn extend(
     SpelOutput::execute(states, vec![])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn erase(
     mut config: AccountWithMetadata,
     tree_main: AccountWithMetadata,
     mut membership: AccountWithMetadata,
     bottom_subtree: AccountWithMetadata,
     clock_account: AccountWithMetadata,
+    escrow: AccountWithMetadata,
+    holder: AccountWithMetadata,
     tree_id: [u8; 32],
     subtree_id: u32,
 ) -> Output {
@@ -476,6 +538,11 @@ pub fn erase(
         "subtree_id must match membership leaf_index"
     );
 
+    // Erase is permissionless and the caller names the refund destination;
+    // this is what stops that being their own. Checked with the other
+    // preconditions rather than in the payout branch below.
+    require_holder(&holder, &membership_state);
+
     config_state.current_total_rate_limit = config_state
         .current_total_rate_limit
         .saturating_sub(membership_state.rate_limit);
@@ -493,12 +560,62 @@ pub fn erase(
         merkle_payload_remove(membership_state.leaf_index),
     );
 
+    let mut calls = vec![merkle_remove];
+    if membership_state.deposit_amount > 0 {
+        calls.push(escrow_payout(
+            &escrow,
+            &holder,
+            &tree_id,
+            membership_state.deposit_amount,
+        ));
+    }
+
     let states = vec![
         config.account,
         tree_main.account,
         membership.account,
         bottom_subtree.account,
         clock_account.account,
+        escrow.account,
+        holder.account,
     ];
-    SpelOutput::execute(states, vec![merkle_remove])
+    SpelOutput::execute(states, calls)
+}
+
+/// Bring a membership's grace period forward to now, at its holder's request
+/// — the counterweight to renewal being permissionless, which would otherwise
+/// let a third party keep a stranger's deposit escrowed indefinitely.
+///
+/// The deposit is not released here: the leaf stays in the tree until `erase`,
+/// so the wind-down window is also the interval in which `slash` can forfeit it.
+pub fn force_expire(
+    mut membership: AccountWithMetadata,
+    holder: AccountWithMetadata,
+    clock_account: AccountWithMetadata,
+) -> Output {
+    let now_ms = require_clock_ms(&clock_account);
+
+    let membership_bytes = membership.account.data.as_ref();
+    assert!(
+        !membership_bytes.is_empty(),
+        "Membership account is empty - nothing to expire"
+    );
+    let mut membership_state =
+        MembershipState::try_from_slice(membership_bytes).expect("decode MembershipState");
+
+    assert!(holder.is_authorized, "Holder must authorize the exit");
+    require_holder(&holder, &membership_state);
+    assert!(
+        membership_state.deposit_amount > 0,
+        "CannotForceExpireFreeMembership: no deposit is escrowed for this membership"
+    );
+
+    // Only ever earlier, so this can never postpone expiry.
+    membership_state.grace_period_start_timestamp_ms =
+        membership_state.grace_period_start_timestamp_ms.min(now_ms);
+    membership_state.exiting = 1;
+    write_borsh(&mut membership, &membership_state, "MembershipState");
+
+    let states = vec![membership.account, holder.account, clock_account.account];
+    SpelOutput::execute(states, vec![])
 }
