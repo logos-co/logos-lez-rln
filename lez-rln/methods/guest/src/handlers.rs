@@ -13,8 +13,8 @@ use nssa_core::{
     program::{ChainedCall, PdaSeed},
 };
 use rln_layouts::{
-    MerkleOpcode, SUBTREE_LEAVES, combine_seeds, is_expired, is_in_grace_period, label_seed,
-    secs_to_millis, u32_seed,
+    MerkleOpcode, SUBTREE_LEAVES, TREE_LEAVES, combine_seeds, is_expired, is_in_grace_period,
+    label_seed, secs_to_millis, u32_seed,
 };
 use spel_framework::prelude::SpelOutput;
 
@@ -230,6 +230,10 @@ pub fn register(
     );
 
     let next_index = read_tree_next_index(tree_main.account.data.as_ref());
+    assert!(
+        next_index < TREE_LEAVES,
+        "TreeFull: every leaf index has been used"
+    );
     let expected_subtree_id = (next_index / SUBTREE_LEAVES as u64) as u32;
     assert_eq!(
         subtree_id, expected_subtree_id,

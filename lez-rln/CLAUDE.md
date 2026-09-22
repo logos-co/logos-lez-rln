@@ -115,6 +115,17 @@ registrations. `extend` now charges `rate_limit * price_per_unit` — the same
 as registering — which also gives `active_duration` economic force. Both
 payment accounts are token-owned, so this is rule-7 safe.
 
+## The tree holds 512 leaves, and that is a lifetime count
+`next_index` only advances and an erased leaf's index is never reused, so
+`TREE_LEAVES` bounds total registrations over the tree's life, not concurrent
+members. Past it the top-tree walk addresses nodes by a compile-time BFS offset
+with no per-level bound, so an insert aliases live nodes of other subtrees and
+returns a wrong root WITHOUT failing — every member's proof then stops
+verifying, and `config`/`tree_main` are `init`-guarded, so the deployment
+cannot be repaired. `insert_leaf` and `register` both assert the bound.
+`MerkleOpcode::Set` exists with no callers and is the only index-reuse path if
+capacity ever has to grow.
+
 ## Testnet operations
 
 - A program-deploy tx larger than the sequencer's max_block_size is deferred

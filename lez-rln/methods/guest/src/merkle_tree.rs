@@ -30,7 +30,7 @@ use nssa_core::account::{Account, AccountWithMetadata};
 pub use rln_layouts::{
     BOTTOM_DEPTH, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
     OFFSET_ROOT_HISTORY, OFFSET_TOP_TREE_DATA, ROOT_HISTORY_SIZE, SUBTREE_LEAVES, TOP_DEPTH,
-    TREE_DEPTH, read_sparse_node, subtree_node_offset,
+    TREE_DEPTH, TREE_LEAVES, read_sparse_node, subtree_node_offset,
 };
 
 use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
@@ -190,6 +190,14 @@ pub fn insert_leaf(pre_states: Vec<AccountWithMetadata>, instruction: &[u8]) -> 
         expected_index == next_index,
         "Insert must be sequential: expected index {} but tree next_index is {}",
         expected_index,
+        next_index
+    );
+    // The top-tree walk below addresses nodes by a compile-time BFS offset with
+    // no per-level bound, so an index past the last leaf resolves onto live
+    // nodes of other subtrees and yields a wrong root without failing.
+    assert!(
+        next_index < TREE_LEAVES,
+        "tree is full: next_index {} is past the last leaf",
         next_index
     );
 
@@ -1279,9 +1287,7 @@ mod tests {
 
     #[test]
     fn test_multiple_subtrees_independent_roots() {
-        // Insert 1 leaf in subtree 0, record root.
-        // Insert 1 leaf in subtree 1 (index 1024), record root.
-        // They should differ (both leaves are distinct).
+        // One leaf in subtree 0 and one in subtree 1 give different roots.
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
 
         // Insert leaf at index 0
@@ -1293,13 +1299,10 @@ mod tests {
         let post1 = insert_leaf(pre_states, &instr);
         let root_one_leaf_subtree0 = read_root(post1[0].data.as_ref());
 
-        // Now insert at index 1024 (subtree 1) using a fresh subtree account
-        // but carrying forward the main account from above
-        let main_data = post1[0].data.as_ref();
-        // Set next_index to 1024 to skip the rest of subtree 0
-        let mut modified_main = main_data.to_vec();
+        // Skip to the first index of subtree 1, carrying the main account forward.
+        let mut modified_main = post1[0].data.as_ref().to_vec();
         modified_main[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
-            .copy_from_slice(&1024u64.to_le_bytes());
+            .copy_from_slice(&(SUBTREE_LEAVES as u64).to_le_bytes());
 
         let main_for_subtree1 = AccountWithMetadata {
             account_id: IdForTests::main_account_id(),
@@ -1316,7 +1319,7 @@ mod tests {
         };
 
         let mut instr2 = Vec::with_capacity(40);
-        instr2.extend_from_slice(&1024u64.to_le_bytes());
+        instr2.extend_from_slice(&(SUBTREE_LEAVES as u64).to_le_bytes());
         instr2.extend_from_slice(&[2u8; 32]);
 
         let post2 = insert_leaf(vec![main_for_subtree1, fresh_subtree1], &instr2);
@@ -1327,6 +1330,41 @@ mod tests {
         // Both should differ from empty
         assert_ne!(root_one_leaf_subtree0, cached_nodes[0]);
         assert_ne!(root_two_subtrees, cached_nodes[0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "tree is full")]
+    fn test_insert_past_the_last_leaf_is_refused() {
+        let (pre_states, instr) = build_insert_first_leaf_data(
+            AccountForTests::main_initialized(),
+            AccountForTests::subtree_empty(),
+            [1u8; 32],
+        );
+        let post1 = insert_leaf(pre_states, &instr);
+
+        let mut modified_main = post1[0].data.as_ref().to_vec();
+        modified_main[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8]
+            .copy_from_slice(&TREE_LEAVES.to_le_bytes());
+
+        let main_full = AccountWithMetadata {
+            account_id: IdForTests::main_account_id(),
+            account: Account {
+                data: modified_main.try_into().unwrap(),
+                ..Default::default()
+            },
+            is_authorized: true,
+        };
+        let fresh_subtree = AccountWithMetadata {
+            account_id: IdForTests::subtree_account_id(),
+            account: Account::default(),
+            is_authorized: true,
+        };
+
+        let mut instr2 = Vec::with_capacity(40);
+        instr2.extend_from_slice(&TREE_LEAVES.to_le_bytes());
+        instr2.extend_from_slice(&[2u8; 32]);
+
+        let _ = insert_leaf(vec![main_full, fresh_subtree], &instr2);
     }
 
     #[test]

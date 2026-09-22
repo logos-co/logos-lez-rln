@@ -2110,6 +2110,46 @@ mod tests {
         );
     }
 
+    /// `next_index` only advances, and the top-tree walk has no per-level
+    /// bound: an index past the last leaf aliases live nodes of other subtrees
+    /// and produces a wrong root without failing. Both guests refuse it.
+    #[test]
+    fn register_is_refused_once_every_leaf_index_is_used() {
+        let mut setup = state_with_initialized_registration().expect("setup");
+        let tree_main_id = derive_tree_main_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
+
+        let prior = setup.state.get_account_by_id(tree_main_id);
+        let mut data = prior.data.as_ref().to_vec();
+        data[rln_layouts::OFFSET_NEXT_INDEX..rln_layouts::OFFSET_NEXT_INDEX + 8]
+            .copy_from_slice(&rln_layouts::TREE_LEAVES.to_le_bytes());
+        setup.state.force_insert_account(
+            tree_main_id,
+            Account {
+                data: data.try_into().unwrap(),
+                ..prior
+            },
+        );
+
+        let tx = build_register_tx(
+            &setup,
+            &TREE_ID,
+            valid_field_element(0xC2),
+            100,
+            Nonce(0),
+            rln_layouts::TREE_LEAVES,
+        );
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 1, 0)
+                .is_err(),
+            "the tree must refuse a registration past its last leaf"
+        );
+    }
+
     #[test]
     fn test_register_same_commitment_twice_fails() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
