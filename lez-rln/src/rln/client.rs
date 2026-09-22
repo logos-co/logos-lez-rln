@@ -97,10 +97,10 @@ pub async fn is_initialized(
 }
 
 /// Sleep long enough for the sequencer to seal a block, between back-to-back
-/// program deployments. Two ~455 KiB program-deploy txs cannot share one block:
-/// each block is capped at `max_block_size` (512,000 B on testnet, 1 MiB local),
-/// so the second is deferred to a later block. Default 90 s covers both local
-/// dev (~15 s blocks) and testnet (~60 s); override via `LEZ_RLN_BLOCK_SEAL_SECS`.
+/// program deployments: a block is capped at `max_block_size`, and a deploy
+/// that does not fit the remainder is deferred with no client feedback.
+/// Default 90 s covers local dev (~15 s blocks) and testnet (~60 s); override
+/// via `LEZ_RLN_BLOCK_SEAL_SECS`.
 pub async fn wait_for_block_seal() {
     let secs = std::env::var("LEZ_RLN_BLOCK_SEAL_SECS")
         .ok()
@@ -120,10 +120,9 @@ pub fn wait_account_attempts() -> u32 {
 }
 
 /// RLN tree id, read from `LEZ_RLN_TREE_ID_HEX` (32 bytes, 64 hex chars).
-/// Strict: aborts with an actionable error if unset or malformed. Kept out
-/// of source to prevent the drift class where a deployment bump in this
-/// file silently desyncs from shell scripts that key persistent caches
-/// off the hex form (see project_tree_id_drift memory note).
+/// Strict: aborts with an actionable error if unset or malformed. Kept out of
+/// source because shell scripts key persistent caches off the hex form, and a
+/// bump here would silently desync them.
 pub fn tree_id_from_env() -> [u8; 32] {
     let hex = std::env::var("LEZ_RLN_TREE_ID_HEX").unwrap_or_else(|_| {
         eprintln!(
@@ -193,7 +192,7 @@ fn load_account_file(tree_id: &[u8; 32], prefix: &str) -> Option<AccountId> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// Get the path to the supply holding file for a given tree_id.
+/// Path to the file recording which account this tree's registrations pay from.
 pub fn get_payment_account_path(tree_id: &[u8; 32]) -> PathBuf {
     account_file_path(tree_id, "payment_account")
 }
@@ -292,6 +291,12 @@ async fn is_program_deployed(
 /// address nobody holds a key to. The conversion between the two id types is
 /// the byte-preserving reinterpretation LEZ documents, so this is exactly the
 /// address v0.2.2 used.
+///
+/// The cost of that same permissiveness: the address is a pure function of our
+/// bytecode and anyone may claim it first, with bytecode of their own, since
+/// `CreateHeader` checks only that the target is unclaimed. A squatted address
+/// cannot be vacated and cannot be moved without changing the bytecode, so on a
+/// fresh chain deploy before publishing the image id.
 fn header_account(program: &Program) -> AccountId {
     AccountId::from(program.id())
 }
@@ -627,8 +632,8 @@ async fn send_init_tx(
     wait_for_account_data(wallet_core, wait_on, wait_account_attempts()).await;
 }
 
-/// Run full setup: deploy programs, create token, initialize registration.
-/// Returns the user payment holding account ID.
+/// Deploy both programs, create the treasury, and initialize the registry.
+/// Returns the account registrations pay from.
 pub async fn run_setup(
     wallet_core: &mut WalletCore,
     registration_program: &Program,
@@ -679,8 +684,8 @@ pub async fn run_setup(
     println!("  Treasury: {treasury_id}");
 
     println!("Setup Step 3: Initializing registration program...");
-    // Still two transactions rather than one: a fused Initialize+merkle blows
-    // the 32M per-session cycle cap when the chained call executes inline.
+    // Two transactions rather than one: a fused Initialize+merkle exceeds the
+    // execution-gas cap once the chained call runs inline.
     send_init_tx(
         wallet_core,
         registration_program,

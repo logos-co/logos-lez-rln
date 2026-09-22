@@ -2,21 +2,15 @@
 resolver = "3"
 members = ["."]
 
-# Guest [profile.release]: the binding constraint is the executed cycle budget,
-# not binary size. Measured via src/cycle_harness.rs (gated rc5-state-tests):
-# merkle Initialize 18.2M and Insert 18.7M user cycles — ~55% of the sequencer's
-# 2^25 (33.55M) per-execution session limit, i.e. ~1.8x headroom. A codegen
-# change that pushes cycles past that ceiling is silently dropped from blocks
-# (reason only in the sequencer log). `strip` and `debug=false` touch only
-# non-loaded sections and are cycle-neutral; `opt-level="s"/"z"` is the one
-# genuinely cycle-risky knob. Rule: gate every profile change on the cycle
-# harness, and land the risc0-bigint2 Poseidon precompile (field::modmul_256)
-# before opt-level=z — that is what buys back the headroom.
+# Guest [profile.release]: the binding constraint is executed gas, not binary
+# size. `strip` and `debug=false` touch only non-loaded sections and are
+# cycle-neutral; `opt-level="s"/"z"` is the one genuinely cycle-risky knob.
+# Gate every profile change on the measurements in src/cycle_harness.rs and the
+# `*_fits_the_gas_ceiling` tests in src/state_tests.rs.
 #
 # The deploy artifact is the llvm-stripped R0BF .bin the build.rs post-step
-# produces (~455 KB for registration), not the unstripped ~648 KB ELF. The
-# binding size limit is the operator's max_block_size — measured on the public
-# testnet between ~266 KB and ~459 KB — not a fixed 511 KB.
+# produces, not the unstripped ELF. The binding size limit is the operator's
+# max_block_size — measured on the public testnet between ~266 KB and ~459 KB.
 
 [package]
 name = "logos_lez_rln_guest"
@@ -27,14 +21,12 @@ edition = "2024"
 path = "src/lib.rs"
 
 # Gated on cycle_harness (src/cycle_harness.rs). Measured effects vs default:
-#   lto=fat + codegen-units=1  : -34 KB, cycles SLIGHTLY LOWER (Insert 18.69M->18.58M) — SAFE.
-#   + opt-level="z"            : a further -123 KB, but BLOWS the 2^25 cycle cap
-#                               (Init/Insert both exceed 33,554,432 -> guest dropped
-#                               on-chain; 52/81 tests fail). opt-level=z de-optimizes
-#                               the software Poseidon field arithmetic despite the
-#                               source-level unroll hints. It is unlocked ONLY after the
-#                               risc0-bigint2 Poseidon precompile buys ~5-7x cycle
-#                               headroom (see plan Phase 3A). Do NOT re-add it before then.
+#   lto=fat + codegen-units=1  : smaller AND slightly fewer cycles — SAFE.
+#   + opt-level="z"            : smaller again, but de-optimizes the software
+#                               Poseidon field arithmetic badly enough to blow
+#                               the cycle budget despite the source-level unroll
+#                               hints. Unlocked only once a Poseidon precompile
+#                               buys back the headroom.
 [profile.release]
 lto = "fat"
 codegen-units = 1

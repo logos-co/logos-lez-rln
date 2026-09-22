@@ -163,9 +163,8 @@ pub async fn fetch_cached_defaults(
 
 /// Fetches a node hash from the tree.
 ///
-/// For the full tree (depth 20), nodes at levels 0-10 are in the top tree
-/// (stored in the main account), and nodes at levels 11-20 are in bottom
-/// subtree accounts.
+/// Nodes at levels 0-TOP_DEPTH are in the top tree (stored in the main
+/// account); deeper nodes are in bottom subtree accounts.
 ///
 /// Returns the cached default if the node doesn't exist or is zero.
 pub async fn fetch_node_hash(

@@ -19,8 +19,8 @@
 //! # Storage Model
 //!
 //! - **Main Account**: Stores tree metadata (depth, next_index, root, cached defaults) and top tree
-//!   nodes (levels 0-10) in sparse format
-//! - **Subtree Accounts**: Each stores a depth-10 bottom subtree in sparse format
+//!   nodes (levels 0-TOP_DEPTH) in sparse format
+//! - **Subtree Accounts**: Each stores one bottom subtree in sparse format
 //!
 //! # Compatibility
 //!

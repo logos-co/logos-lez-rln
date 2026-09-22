@@ -1,23 +1,23 @@
 //! Incremental Merkle Tree implementation with subtree-based storage.
 //!
 //! This module provides the core logic for an incremental Merkle tree that
-//! splits the tree at level 10 into a top tree (levels 0-10, stored in the
-//! main account) and 1024 bottom subtrees (each a complete depth-10 tree
-//! in its own account).
+//! splits the tree at `TOP_DEPTH` into a top tree (stored in the main account)
+//! and `2^TOP_DEPTH` bottom subtrees of `SUBTREE_LEAVES` leaves each (every
+//! one in its own account). All four constants live in `rln_layouts`.
 //!
 //! # Architecture
 //!
 //! - **Main account**: Stores tree metadata (depth, next_index, root, cached defaults) plus top
 //!   tree nodes in sparse format (grows dynamically)
-//! - **Bottom subtree accounts**: Each stores a depth-10 subtree in sparse format
+//! - **Bottom subtree accounts**: Each stores one `BOTTOM_DEPTH` subtree in sparse format
 //!
 //! Each insert/remove touches exactly 2 accounts: the main account and one
 //! bottom subtree account. Sparse storage format: `[count(u16le), (offset(u16le), hash(32))...]`
 //!
 //! # Key Formulas
 //!
-//! - `subtree_id = leaf_index / 1024`
-//! - `local_index = leaf_index % 1024`
+//! - `subtree_id = leaf_index / SUBTREE_LEAVES`
+//! - `local_index = leaf_index % SUBTREE_LEAVES`
 //! - BFS node offset: `(2^level - 1) + index_within_level`
 //!
 //! # Authorization
@@ -1377,7 +1377,7 @@ mod tests {
         let root_after_fill = read_root(main_account.data.as_ref());
         assert_ne!(root_after_fill, empty_root);
 
-        // Remove all 1024 leaves in reverse order
+        // Remove every leaf in reverse order
         let mut current_main = main_account;
         let mut current_subtree = subtrees[&0].clone();
 

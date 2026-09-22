@@ -30,8 +30,8 @@ use rln::prelude::{
 /// Ten is the smallest zerokit publishes. It ships those artifacts in its
 /// repository but excludes them from the crates.io package to stay under the
 /// size limit, so they are vendored here; their circuit version is the one the
-/// crate already carries, since the repository's depth-20 pair is byte for byte
-/// the pair embedded in `rln` 3.0.0.
+/// crate already carries, since the repository's pair is byte for byte the pair
+/// embedded in `rln` 3.0.0.
 pub const CIRCUIT_DEPTH: usize = 10;
 
 const DEPTH_10_GRAPH: &[u8] = include_bytes!("../resources/tree_depth_10/graph.bin");

@@ -390,9 +390,8 @@ mod tests {
     // Token Account Helpers
     // ========================================================================
     //
-    // Token accounts cannot be directly inserted (force_insert_account is
-    // private to nssa crate). These helpers create the data layouts for
-    // verification after transactions.
+    // These build the token data layouts the token-program tests verify
+    // against; the registry itself no longer touches tokens.
 
     /// Creates borsh-serialized token holding account data for a fungible token.
     #[allow(dead_code)]
@@ -2899,7 +2898,7 @@ mod tests {
 
     /// Fetches a node hash from on-chain state using the subtree model.
     ///
-    /// For levels <= TOP_DEPTH (10), nodes are in the main account's top tree data (sparse format).
+    /// For levels <= TOP_DEPTH, nodes are in the main account's top tree data (sparse format).
     /// For levels > TOP_DEPTH, nodes are in bottom subtree accounts (sparse format).
     /// Returns the cached default if the node doesn't exist.
     fn fetch_node_from_state(
