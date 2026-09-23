@@ -68,11 +68,12 @@ mod tests {
         CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT, CONFIG_OFFSET_MERKLE_PROGRAM_ID,
         CONFIG_OFFSET_PRICE_PER_UNIT, CONFIG_OFFSET_TOTAL_REGISTRATIONS,
         CONFIG_OFFSET_TREASURY_ACCOUNT_ID, CONFIG_OFFSET_TREE_ID, CONFIG_SIZE,
-        MEMBERSHIP_OFFSET_ACTIVE_DURATION, MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION,
-        MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP, MEMBERSHIP_OFFSET_ID_COMMITMENT,
-        MEMBERSHIP_OFFSET_LEAF_INDEX, MEMBERSHIP_OFFSET_RATE_LIMIT, MEMBERSHIP_SIZE, TREE_DEPTH,
-        derive_config_account, derive_membership_account, derive_subtree_account,
-        derive_tree_main_account, subtree_id_for_index,
+        MEMBERSHIP_OFFSET_ACTIVE_DURATION, MEMBERSHIP_OFFSET_DEPOSIT_AMOUNT,
+        MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION, MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP,
+        MEMBERSHIP_OFFSET_HOLDER, MEMBERSHIP_OFFSET_ID_COMMITMENT, MEMBERSHIP_OFFSET_LEAF_INDEX,
+        MEMBERSHIP_OFFSET_RATE_LIMIT, MEMBERSHIP_SIZE, TREE_DEPTH, derive_config_account,
+        derive_membership_account, derive_subtree_account, derive_tree_main_account,
+        subtree_id_for_index,
     };
 
     // ========================================================================
@@ -173,6 +174,10 @@ mod tests {
         derive_subtree_account(&program_id, tree_id, subtree_id)
     }
 
+    fn derive_escrow_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
+        crate::rln::derive_escrow_account(&program_id, tree_id)
+    }
+
     fn derive_config_pda(program_id: AccountId, tree_id: &[u8; 32]) -> AccountId {
         derive_config_account(&program_id, tree_id)
     }
@@ -206,6 +211,9 @@ mod tests {
         let mut state = V03State::new().with_programs([
             programs::token(),
             programs::clock(),
+            // Refunds leave the escrow through a chained custody transfer, so
+            // the registry cannot execute an erase or a slash without it.
+            programs::authenticated_transfer(),
             merkle_program.clone(),
             registration_program.clone(),
         ]);
@@ -1243,23 +1251,16 @@ mod tests {
     // Register Transaction Builder
     // ========================================================================
 
+    /// `fee_core::market::MAX_GAS_EXEC`. One transaction's whole chained-call
+    /// chain shares this, and a block's charged transactions are summed
+    /// against it too.
+    const MAX_GAS_EXEC: u64 = 10_000_000;
+
     /// What a whole register transaction costs, against the ceiling that
-    /// actually rejects it.
-    ///
-    /// LEZ v0.2.5 meters a charged transaction by its declared `gas_limit`, one
-    /// gas per cycle, and `fee_core::market::MAX_GAS_EXEC` caps that at ten
-    /// million — a transaction over it can never be included in any block. The
-    /// budget is per *transaction*, so it covers the registration guest and the
-    /// chained merkle insert together. Measuring the merkle guest alone (see
-    /// `cycle_harness`) understates it. The price no longer costs a chained
-    /// call at all: it moves as two balance assignments inside `register`.
-    ///
-    /// Printed rather than only asserted: the number picks the tree depth, and
-    /// the margin is what says whether the next depth up would fit.
+    /// actually rejects it. Printed rather than only asserted: the number is
+    /// what picks the tree depth.
     #[test]
     fn register_transaction_fits_the_gas_ceiling() {
-        const MAX_GAS_EXEC: u64 = 10_000_000;
-
         let Some(setup) = state_with_initialized_registration() else {
             eprintln!("skipping gas measurement: guest .bin not built");
             return;
@@ -1310,7 +1311,6 @@ mod tests {
             tree_id,
             &setup.payer_id,
             &setup.payer_key,
-            &setup.treasury_id,
             id_commitment,
             rate_limit,
             payer_nonce,
@@ -1324,7 +1324,7 @@ mod tests {
     /// - pre_states[0]: Config
     /// - pre_states[1]: Tree main
     /// - pre_states[2]: Payer (signer; debited in NATIVE balance)
-    /// - pre_states[3]: Treasury (credited in NATIVE balance)
+    /// - pre_states[3]: Escrow PDA (credited in NATIVE balance)
     /// - pre_states[4]: Bottom subtree account
     /// - pre_states[5]: CLOCK_50 system account (read-only timestamp)
     /// - pre_states[6]: Membership PDA (init)
@@ -1337,7 +1337,6 @@ mod tests {
         tree_id: &[u8; 32],
         payer_id: &AccountId,
         payer_key: &PrivateKey,
-        treasury_id: &AccountId,
         id_commitment: [u8; 32],
         rate_limit: u64,
         payer_nonce: Nonce,
@@ -1367,7 +1366,10 @@ mod tests {
             config_id,
             tree_main_id,
             *payer_id,
-            *treasury_id,
+            derive_escrow_pda(
+                crate::spel_seeds::program_account(&registration.id()),
+                tree_id,
+            ),
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             membership_id,
@@ -1394,20 +1396,42 @@ mod tests {
         )
     }
 
-    /// Builds a slash transaction (opcode 4).
+    /// Builds a slash transaction.
     ///
     /// Account order:
     /// - pre_states[0]: Config
     /// - pre_states[1]: Tree main
     /// - pre_states[2]: Membership PDA
     /// - pre_states[3]: Bottom subtree account
-    #[allow(dead_code)]
+    /// - pre_states[4]: Escrow PDA (debited via a chained custody transfer)
+    /// - pre_states[5]: Treasury (credited the forfeited deposit)
     fn build_slash_tx(
         setup: &TestSetup,
         tree_id: &[u8; 32],
         identity_secret: [u8; 32],
         id_commitment: [u8; 32],
         leaf_index: u64,
+    ) -> PublicTransaction {
+        let treasury = setup.treasury_id;
+        build_slash_tx_paying(
+            setup,
+            tree_id,
+            identity_secret,
+            id_commitment,
+            leaf_index,
+            &treasury,
+        )
+    }
+
+    /// `treasury` must be the one config names; tests pass another to exercise
+    /// the rejection.
+    fn build_slash_tx_paying(
+        setup: &TestSetup,
+        tree_id: &[u8; 32],
+        identity_secret: [u8; 32],
+        id_commitment: [u8; 32],
+        leaf_index: u64,
+        treasury: &AccountId,
     ) -> PublicTransaction {
         let config_id = derive_config_pda(
             crate::spel_seeds::program_account(&setup.registration.id()),
@@ -1429,8 +1453,18 @@ mod tests {
             sid,
         );
 
-        // Account list: config, tree_main, membership, subtree
-        let account_ids = vec![config_id, tree_main_id, membership_id, subtree_account_id];
+        // Account list: config, tree_main, membership, subtree, escrow, treasury
+        let account_ids = vec![
+            config_id,
+            tree_main_id,
+            membership_id,
+            subtree_account_id,
+            derive_escrow_pda(
+                crate::spel_seeds::program_account(&setup.registration.id()),
+                tree_id,
+            ),
+            *treasury,
+        ];
 
         let instruction = Instruction::Slash {
             tree_id: *tree_id,
@@ -2419,11 +2453,10 @@ mod tests {
     // Native Payment Tests
     // ========================================================================
     //
-    // The registry knows one asset and it is the native one. `register` and
-    // `extend` move the price by assigning to the payer's and treasury's
-    // `account.balance`, and the SPEL macro turns those assignments into
-    // BalanceDiffs. What that buys is enforcement by consensus rather than by
-    // the guest: the protocol resolves the payer's real pre-state, refuses a
+    // The registry knows one asset and it is the native one. `register` escrows
+    // the deposit by assigning to `account.balance`, and the SPEL macro turns
+    // those assignments into BalanceDiffs. Consensus enforces them, not the
+    // guest: the protocol resolves the payer's real pre-state, refuses a
     // decrease on an unauthorized account (UnauthorizedBalanceDecrease), and
     // refuses any diff whose credits do not equal its debits
     // (MismatchedTotalBalance).
@@ -2446,35 +2479,41 @@ mod tests {
             derive_config_pda(program, tree_id),
             derive_tree_main_pda(program, tree_id),
             setup.payer_id,
-            setup.treasury_id,
+            derive_escrow_pda(program, tree_id),
             derive_subtree_pda(program, tree_id, subtree_id_for_index(next_index)),
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             derive_membership_pda(program, tree_id, id_commitment),
         ]
     }
 
-    /// The registration price leaves the payer and arrives at the treasury, to
-    /// the unit, in native balance.
+    /// The deposit leaves the payer and arrives in the escrow, to the unit,
+    /// in native balance — and the treasury is not touched, because a deposit
+    /// is collateral rather than revenue.
     ///
-    /// The treasury is deliberately never seeded: no program can mint native
+    /// The escrow is deliberately never seeded: no program can mint native
     /// balance, but a *credit* lands on an account that has never been written
-    /// to, which is what lets a deployment name a treasury without creating it.
+    /// to, so the escrow needs no initializer.
     #[test]
-    fn register_debits_payer_and_credits_treasury_natively() {
+    fn register_debits_payer_and_escrows_the_deposit() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
 
         let rate_limit = 300u64;
         let price = u128::from(rate_limit) * PRICE_PER_UNIT;
 
+        let escrow_id = derive_escrow_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        );
         let payer_before = native_balance(&setup.state, &setup.payer_id);
+        let escrow_before = native_balance(&setup.state, &escrow_id);
         let treasury_before = native_balance(&setup.state, &setup.treasury_id);
         assert_eq!(
             payer_before, DEFAULT_PAYER_BALANCE,
             "the payer starts with the balance it was funded with"
         );
         assert_eq!(
-            treasury_before, 0,
-            "the treasury account has never been written to"
+            escrow_before, 0,
+            "the escrow account has never been written to"
         );
 
         let register_tx = build_register_tx(
@@ -2496,49 +2535,71 @@ mod tests {
             "the payer is debited exactly rate_limit * price_per_unit"
         );
         assert_eq!(
+            native_balance(&setup.state, &escrow_id),
+            escrow_before + price,
+            "the escrow is credited exactly the same amount"
+        );
+        assert_eq!(
             native_balance(&setup.state, &setup.treasury_id),
-            treasury_before + price,
-            "the treasury is credited exactly the same amount"
+            treasury_before,
+            "a deposit is not revenue: the treasury is untouched by register"
         );
     }
 
-    /// SECURITY (payment routing): consensus decides that the price is paid and
-    /// that it is paid by the signer, but not WHERE it lands. The treasury-id
-    /// check in the guest is the only thing that does, and it is the only
-    /// routing guarantee `register` still has — so it gets its own test.
+    /// SECURITY (deposit routing): consensus decides that the deposit is paid
+    /// and that it is paid by the signer, but not WHERE it lands. The escrow is
+    /// a PDA, so the macro's `pda` constraint is what decides that now — and
+    /// since it replaced a hand-written treasury assert, it gets its own test.
     #[test]
-    fn register_rejects_a_treasury_that_is_not_the_configured_one() {
+    fn register_rejects_an_escrow_that_is_not_the_derived_pda() {
         let mut setup = state_with_initialized_registration().expect("Setup should succeed");
 
-        let (_attacker_key, attacker_treasury) = create_test_keypair(9);
+        let program = crate::spel_seeds::program_account(&setup.registration.id());
+        let (_attacker_key, attacker_escrow) = create_test_keypair(9);
         assert_ne!(
-            attacker_treasury, setup.treasury_id,
-            "the substituted treasury must actually differ"
+            attacker_escrow,
+            derive_escrow_pda(program, &TREE_ID),
+            "the substituted escrow must actually differ"
         );
 
-        let register_tx = build_register_tx_parts(
-            &setup.registration,
-            &TREE_ID,
-            &setup.payer_id,
-            &setup.payer_key,
-            &attacker_treasury,
-            valid_field_element(0x42),
-            300,
-            Nonce(0),
-            0,
+        let id_commitment = valid_field_element(0x42);
+        let account_ids = vec![
+            derive_config_pda(program, &TREE_ID),
+            derive_tree_main_pda(program, &TREE_ID),
+            setup.payer_id,
+            attacker_escrow,
+            derive_subtree_pda(program, &TREE_ID, 0),
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+            derive_membership_pda(program, &TREE_ID, &id_commitment),
+        ];
+        let message = Message::try_new(
+            program,
+            account_ids,
+            vec![Nonce(0)],
+            Instruction::Register {
+                tree_id: TREE_ID,
+                id_commitment,
+                rate_limit: 300,
+                subtree_id: 0,
+            },
+        )
+        .expect("valid message");
+        let register_tx = PublicTransaction::new(
+            message.clone(),
+            WitnessSet::for_message(&message, &[&setup.payer_key]),
         );
+
         let result = setup
             .state
             .transition_from_public_transaction(&register_tx, 1, 0);
         assert!(
             result.is_err(),
-            "register must reject a treasury the config does not name; got Ok: {result:?}"
+            "register must reject an escrow that is not its derived PDA; got Ok: {result:?}"
         );
-
         assert_eq!(
-            native_balance(&setup.state, &attacker_treasury),
+            native_balance(&setup.state, &attacker_escrow),
             0,
-            "the substituted treasury must not have been paid"
+            "the substituted account must not have been credited"
         );
         assert_eq!(
             native_balance(&setup.state, &setup.payer_id),
@@ -2546,12 +2607,7 @@ mod tests {
             "a rejected registration must not debit the payer"
         );
         assert!(
-            !membership_exists(
-                &setup.state,
-                &setup.registration,
-                &TREE_ID,
-                &valid_field_element(0x42)
-            ),
+            !membership_exists(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
             "a rejected registration must not mint a membership"
         );
     }
@@ -2638,8 +2694,14 @@ mod tests {
             "a registration must move native balance, never mint or burn it"
         );
         assert!(
-            native_balance(&setup.state, &setup.treasury_id) > 0,
-            "conservation is vacuous unless the transfer actually happened"
+            native_balance(
+                &setup.state,
+                &derive_escrow_pda(
+                    crate::spel_seeds::program_account(&setup.registration.id()),
+                    &TREE_ID,
+                ),
+            ) > 0,
+            "conservation is vacuous unless the deposit actually moved"
         );
     }
 
@@ -2690,6 +2752,7 @@ mod tests {
             ..Account::default()
         };
         let payer_commitment = Commitment::new(&payer_id, &payer_pre);
+        let program_of = |r: &Program| crate::spel_seeds::program_account(&r.id());
         state = state.with_private_accounts([(
             payer_commitment,
             Nullifier::for_account_initialization(&payer_id),
@@ -2701,9 +2764,12 @@ mod tests {
             "the payer holds its balance privately: nothing at its account id in public state"
         );
         assert_eq!(
-            native_balance(&state, &treasury_id),
+            native_balance(
+                &state,
+                &derive_escrow_pda(program_of(&registration), &TREE_ID)
+            ),
             0,
-            "the treasury account has never been written to"
+            "the escrow account has never been written to"
         );
 
         let program = crate::spel_seeds::program_account(&registration.id());
@@ -2711,7 +2777,7 @@ mod tests {
             derive_config_pda(program, &TREE_ID),
             derive_tree_main_pda(program, &TREE_ID),
             payer_id,
-            treasury_id,
+            derive_escrow_pda(program, &TREE_ID),
             derive_subtree_pda(program, &TREE_ID, subtree_id),
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
             derive_membership_pda(program, &TREE_ID, &id_commitment),
@@ -2721,8 +2787,8 @@ mod tests {
         // privacy-preserving transaction is authorized only by signing (see
         // `ValidatedStateDiff::from_privacy_preserving_transaction`, which
         // rebuilds these from the signer set), and none of these sign: the PDAs
-        // are written by ownership, and the treasury is only credited — a
-        // credit needs no authorization.
+        // are written by ownership, and the escrow is only credited — a credit
+        // needs no authorization.
         let public_pre =
             |id: AccountId| AccountWithMetadata::new(state.get_account_by_id(id), false, id);
         let pre_states = vec![
@@ -2796,9 +2862,15 @@ mod tests {
             "the membership PDA must exist: a private payer registers like any other"
         );
         assert_eq!(
-            native_balance(&state, &treasury_id),
+            native_balance(&state, &derive_escrow_pda(program, &TREE_ID)),
             price,
-            "the treasury is credited exactly the price, debited from an account with no public balance"
+            "the escrow is credited exactly the deposit, debited from an account with no public \
+             balance"
+        );
+        assert_eq!(
+            native_balance(&state, &treasury_id),
+            0,
+            "a deposit is not revenue: the treasury is untouched"
         );
 
         // The debit itself is only observable as a commitment: the post-state
@@ -3528,19 +3600,29 @@ mod tests {
     // Expiration — transaction builders
     // ========================================================================
 
-    /// Renewal is PAID (same price as registering the membership's rate
-    /// limit), so the payer signs and is debited in native balance — extend is
-    /// no longer a zero-signer transaction.
+    /// The membership's own holder renews it, which is the only caller the
+    /// guest accepts. Nothing is debited.
     fn build_extend_tx(
         setup: &TestSetup,
         tree_id: &[u8; 32],
         id_commitment: [u8; 32],
-        payer_nonce: Nonce,
+        holder_nonce: Nonce,
     ) -> PublicTransaction {
-        let config_id = derive_config_pda(
-            crate::spel_seeds::program_account(&setup.registration.id()),
-            tree_id,
-        );
+        let holder = setup.payer_id;
+        let key = setup.payer_key.clone();
+        build_extend_tx_signed_by(setup, tree_id, id_commitment, &holder, &key, holder_nonce)
+    }
+
+    /// `signer` must be the membership's recorded holder; tests pass a
+    /// different account deliberately to exercise the rejection.
+    fn build_extend_tx_signed_by(
+        setup: &TestSetup,
+        tree_id: &[u8; 32],
+        id_commitment: [u8; 32],
+        signer_id: &AccountId,
+        signer_key: &PrivateKey,
+        signer_nonce: Nonce,
+    ) -> PublicTransaction {
         let membership_id = derive_membership_pda(
             crate::spel_seeds::program_account(&setup.registration.id()),
             tree_id,
@@ -3548,10 +3630,8 @@ mod tests {
         );
 
         let account_ids = vec![
-            config_id,
             membership_id,
-            setup.payer_id,
-            setup.treasury_id,
+            *signer_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
         ];
 
@@ -3563,22 +3643,25 @@ mod tests {
         let message = Message::try_new(
             crate::spel_seeds::program_account(&setup.registration.id()),
             account_ids,
-            vec![payer_nonce], // nonce for the payer (index 2)
+            vec![signer_nonce],
             instruction,
         )
         .expect("valid message");
 
         PublicTransaction::new(
             message.clone(),
-            WitnessSet::for_message(&message, &[&setup.payer_key]),
+            WitnessSet::for_message(&message, &[signer_key]),
         )
     }
 
-    fn build_erase_tx(
+    /// `holder_id` must be the membership's recorded depositor; tests pass a
+    /// different account deliberately to exercise the rejection.
+    fn build_erase_tx_to(
         setup: &TestSetup,
         tree_id: &[u8; 32],
         id_commitment: [u8; 32],
         leaf_index: u64,
+        holder_id: &AccountId,
     ) -> PublicTransaction {
         let config_id = derive_config_pda(
             crate::spel_seeds::program_account(&setup.registration.id()),
@@ -3606,6 +3689,11 @@ mod tests {
             membership_id,
             subtree_account_id,
             AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+            derive_escrow_pda(
+                crate::spel_seeds::program_account(&setup.registration.id()),
+                tree_id,
+            ),
+            *holder_id,
         ];
 
         let instruction = Instruction::Erase {
@@ -3623,6 +3711,56 @@ mod tests {
         .expect("valid message");
 
         PublicTransaction::new(message.clone(), WitnessSet::for_message(&message, &[]))
+    }
+
+    /// Erase refunding to the account that registered in `TestSetup`.
+    fn build_erase_tx(
+        setup: &TestSetup,
+        tree_id: &[u8; 32],
+        id_commitment: [u8; 32],
+        leaf_index: u64,
+    ) -> PublicTransaction {
+        let holder = setup.payer_id;
+        build_erase_tx_to(setup, tree_id, id_commitment, leaf_index, &holder)
+    }
+
+    fn build_force_expire_tx(
+        setup: &TestSetup,
+        tree_id: &[u8; 32],
+        id_commitment: [u8; 32],
+        holder_id: &AccountId,
+        holder_key: &PrivateKey,
+        holder_nonce: Nonce,
+    ) -> PublicTransaction {
+        let membership_id = derive_membership_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            tree_id,
+            &id_commitment,
+        );
+
+        let account_ids = vec![
+            membership_id,
+            *holder_id,
+            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
+        ];
+
+        let instruction = Instruction::ForceExpire {
+            tree_id: *tree_id,
+            id_commitment,
+        };
+
+        let message = Message::try_new(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            account_ids,
+            vec![holder_nonce],
+            instruction,
+        )
+        .expect("valid message");
+
+        PublicTransaction::new(
+            message.clone(),
+            WitnessSet::for_message(&message, &[holder_key]),
+        )
     }
 
     // ========================================================================
@@ -3850,15 +3988,13 @@ mod tests {
         );
     }
 
-    // SECURITY (rate-limit pinning): extend deliberately does NOT check caller
-    // identity — a membership records no owner, and letting a third party pay
-    // for someone's renewal is harmless. What stops the grief is the PRICE.
-    // While renewal was free, anyone could keep an abandoned membership alive
-    // one cheap tx per grace window; `erase` only reclaims rate_limit once a
-    // membership expires, so an attacker could pin current_total_rate_limit at
-    // max_total_rate_limit and block every new registration indefinitely.
+    // SECURITY (rate-limit pinning): `erase` only reclaims a membership's
+    // rate_limit once it has expired, so a caller who can renew indefinitely
+    // can pin current_total_rate_limit at max_total_rate_limit and block every
+    // new registration. Restricting renewal to the holder is what closes that:
+    // an abandoned membership has nobody left to renew it, so it lapses.
     #[test]
-    fn test_extend_by_a_third_party_is_allowed_but_charged() {
+    fn extend_by_the_holder_is_free() {
         let Some(mut setup) = setup_with_expiration() else {
             return;
         };
@@ -3870,36 +4006,35 @@ mod tests {
         let in_grace_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
         set_clock_50(&mut setup.state, in_grace_ms, 100);
 
-        let paid_before = native_balance(&setup.state, &setup.payer_id);
+        let holder_before = native_balance(&setup.state, &setup.payer_id);
         let treasury_before = native_balance(&setup.state, &setup.treasury_id);
+        let escrow_before = native_balance(&setup.state, &escrow_id_of(&setup));
+
         let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
         setup
             .state
             .transition_from_public_transaction(&extend_tx, 2, 0)
-            .expect("a paying third party may renew");
+            .expect("the holder may renew its own membership");
 
-        let paid_after = native_balance(&setup.state, &setup.payer_id);
-        let expected = EXP_RATE_LIMIT as u128 * PRICE_PER_UNIT;
         assert_eq!(
-            paid_before - paid_after,
-            expected,
-            "renewal must cost the same as registering that rate limit"
+            native_balance(&setup.state, &setup.payer_id),
+            holder_before,
+            "renewal moves no value out of the holder"
         );
         assert_eq!(
-            native_balance(&setup.state, &setup.treasury_id) - treasury_before,
-            expected,
-            "and the renewal price must land on the configured treasury"
+            native_balance(&setup.state, &setup.treasury_id),
+            treasury_before,
+            "and none into the treasury"
         );
-        assert!(
-            expected > 0,
-            "a zero-priced renewal would restore the grief"
+        assert_eq!(
+            native_balance(&setup.state, &escrow_id_of(&setup)),
+            escrow_before,
+            "the deposit already escrowed is what pays for the slot"
         );
     }
 
-    /// The grief itself: without funds the renewal fails, so pinning a
-    /// membership's rate limit forever is no longer free.
     #[test]
-    fn test_extend_fails_when_payer_cannot_cover_the_price() {
+    fn extend_by_a_third_party_is_refused() {
         let Some(mut setup) = setup_with_expiration() else {
             return;
         };
@@ -3908,27 +4043,60 @@ mod tests {
         let id_commitment = valid_field_element(0xA7);
         register_for_expiration_test(&mut setup, id_commitment);
 
-        // Drain the payer's native balance, keeping its nonce (the register
-        // above already signed once), then try to renew.
         let in_grace_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
         set_clock_50(&mut setup.state, in_grace_ms, 100);
-        let prior = setup.state.get_account_by_id(setup.payer_id);
-        setup.state.force_insert_account(
-            setup.payer_id,
-            Account {
-                balance: 0,
-                ..prior
-            },
-        );
 
-        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
+        let (stranger_key, stranger_id) = create_test_keypair(92);
+        fund_native(&mut setup.state, &stranger_id, DEFAULT_PAYER_BALANCE);
+        let grace_before =
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment);
+
+        let extend_tx = build_extend_tx_signed_by(
+            &setup,
+            &TREE_ID,
+            id_commitment,
+            &stranger_id,
+            &stranger_key,
+            Nonce(0),
+        );
         assert!(
             setup
                 .state
                 .transition_from_public_transaction(&extend_tx, 2, 0)
                 .is_err(),
-            "an unfunded renewal must fail"
+            "only the holder may renew, however much the caller is willing to pay"
         );
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            grace_before,
+            "a refused renewal must not move the expiry"
+        );
+    }
+
+    /// Renewal touches the expiry and nothing else — in particular not the
+    /// record `erase` reads to pick the refund destination.
+    #[test]
+    fn extend_leaves_the_holder_and_the_deposit_untouched() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xA8);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let holder_before = read_holder(&setup, &id_commitment);
+        let deposit_before = read_deposit(&setup, &id_commitment);
+
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1, 100);
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 2, 0)
+            .expect("extend during grace must succeed");
+
+        assert_eq!(read_holder(&setup, &id_commitment), holder_before);
+        assert_eq!(read_deposit(&setup, &id_commitment), deposit_before);
     }
 
     #[test]
@@ -4026,5 +4194,576 @@ mod tests {
 
         let after = get_current_total_rate_limit(&setup.state, &setup.registration, &TREE_ID);
         assert_eq!(after, 0, "current_total_rate_limit must drop back to 0");
+    }
+
+    /// The two instructions that carry a chained `custody_transfer`.
+    fn assert_fits_gas_ceiling(state: &V03State, tx: &PublicTransaction, label: &str) {
+        let (_diff, outcome) = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
+            tx,
+            state,
+            2,
+            0,
+            MAX_GAS_EXEC,
+        )
+        .unwrap_or_else(|e| panic!("{label} must execute within the ceiling: {e:?}"));
+        let used = outcome.cycles;
+        let pct = (used as f64 / MAX_GAS_EXEC as f64) * 100.0;
+        println!("{label} transaction: {used} cycles ({pct:.1}% of MAX_GAS_EXEC)");
+        assert!(
+            used <= MAX_GAS_EXEC,
+            "{label} costs {used} cycles against a {MAX_GAS_EXEC} ceiling"
+        );
+    }
+
+    #[test]
+    fn erase_with_its_refund_fits_the_gas_ceiling() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xA6);
+        register_for_expiration_test(&mut setup, id_commitment);
+        set_clock_50(
+            &mut setup.state,
+            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
+            100,
+        );
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        assert_fits_gas_ceiling(&setup.state, &erase_tx, "erase");
+    }
+
+    #[test]
+    fn slash_with_its_forfeit_fits_the_gas_ceiling() {
+        let mut setup = state_with_initialized_registration().expect("setup");
+        let (identity_secret, id_commitment) = create_slashable_identity(0x42);
+        let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, Nonce(0), 0);
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("register should succeed");
+        let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
+        assert_fits_gas_ceiling(&setup.state, &slash_tx, "slash");
+    }
+
+    // ========================================================================
+    // Deposits — escrow, refund, forfeit
+    // ========================================================================
+
+    const EXP_DEPOSIT: u128 = EXP_RATE_LIMIT as u128 * PRICE_PER_UNIT;
+
+    fn escrow_id_of(setup: &TestSetup) -> AccountId {
+        derive_escrow_pda(
+            crate::spel_seeds::program_account(&setup.registration.id()),
+            &TREE_ID,
+        )
+    }
+
+    fn escrow_balance(setup: &TestSetup) -> u128 {
+        native_balance(&setup.state, &escrow_id_of(setup))
+    }
+
+    fn read_membership_field(
+        setup: &TestSetup,
+        id_commitment: &[u8; 32],
+        at: usize,
+        n: usize,
+    ) -> Vec<u8> {
+        let data = read_membership(&setup.state, &setup.registration, &TREE_ID, id_commitment)
+            .expect("membership must exist");
+        data[at..at + n].to_vec()
+    }
+
+    fn read_holder(setup: &TestSetup, id_commitment: &[u8; 32]) -> [u8; 32] {
+        read_membership_field(setup, id_commitment, MEMBERSHIP_OFFSET_HOLDER, 32)
+            .try_into()
+            .unwrap()
+    }
+
+    fn read_deposit(setup: &TestSetup, id_commitment: &[u8; 32]) -> u128 {
+        u128::from_le_bytes(
+            read_membership_field(setup, id_commitment, MEMBERSHIP_OFFSET_DEPOSIT_AMOUNT, 16)
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn advance_past_expiry(setup: &mut TestSetup) {
+        set_clock_50(
+            &mut setup.state,
+            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
+            100,
+        );
+    }
+
+    #[test]
+    fn register_records_the_holder_and_the_deposit() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xD1);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        assert_eq!(
+            read_holder(&setup, &id_commitment),
+            *setup.payer_id.value(),
+            "the paying account must be recorded as the holder"
+        );
+        assert_eq!(read_deposit(&setup, &id_commitment), EXP_DEPOSIT);
+    }
+
+    #[test]
+    fn erase_refunds_the_deposit_to_the_recorded_holder() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xD2);
+
+        let payer_before = native_balance(&setup.state, &setup.payer_id);
+        register_for_expiration_test(&mut setup, id_commitment);
+        assert_eq!(escrow_balance(&setup), EXP_DEPOSIT);
+        advance_past_expiry(&mut setup);
+
+        // Erase carries no signature: the refund follows the record, not the
+        // submitter.
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 2, 0)
+            .expect("erase of an expired membership must succeed");
+
+        assert_eq!(
+            native_balance(&setup.state, &setup.payer_id),
+            payer_before,
+            "the holder must be made whole"
+        );
+        assert_eq!(escrow_balance(&setup), 0, "escrow must be drained");
+    }
+
+    #[test]
+    fn erase_refuses_a_refund_to_a_non_holder() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xD3);
+        register_for_expiration_test(&mut setup, id_commitment);
+        advance_past_expiry(&mut setup);
+
+        let treasury = setup.treasury_id;
+        let thief = build_erase_tx_to(&setup, &TREE_ID, id_commitment, 0, &treasury);
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&thief, 2, 0)
+                .is_err(),
+            "erase must refuse to pay an account that is not the holder"
+        );
+        assert_eq!(
+            escrow_balance(&setup),
+            EXP_DEPOSIT,
+            "a refused erase must leave the deposit escrowed"
+        );
+    }
+
+    #[test]
+    fn slash_forfeits_the_deposit_to_the_treasury() {
+        // Burning is impossible — a diff's credits must equal its debits — so
+        // forfeiting is what makes the deposit collateral.
+        let mut setup = state_with_initialized_registration().expect("setup");
+        let (identity_secret, id_commitment) = create_slashable_identity(0x42);
+        let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, Nonce(0), 0);
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("register should succeed");
+
+        let deposit = 300u128 * PRICE_PER_UNIT;
+        let payer_after_register = native_balance(&setup.state, &setup.payer_id);
+        let treasury_before = native_balance(&setup.state, &setup.treasury_id);
+        let escrow_before = native_balance(&setup.state, &escrow_id_of(&setup));
+        assert_eq!(
+            escrow_before, deposit,
+            "the registration must have escrowed the deposit"
+        );
+
+        let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&slash_tx, 2, 0)
+            .expect("slash should succeed");
+
+        assert_eq!(
+            native_balance(&setup.state, &setup.treasury_id),
+            treasury_before + deposit,
+            "the forfeited deposit lands on the treasury"
+        );
+        assert_eq!(
+            native_balance(&setup.state, &setup.payer_id),
+            payer_after_register,
+            "a slashed member must not be refunded"
+        );
+        assert_eq!(
+            native_balance(&setup.state, &escrow_id_of(&setup)),
+            escrow_before - deposit,
+            "and the escrow must be drained by exactly that deposit"
+        );
+    }
+
+    #[test]
+    fn escrow_returns_to_zero_after_erasing_every_membership() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+
+        let commitments = [
+            valid_field_element(0xD6),
+            valid_field_element(0xD7),
+            valid_field_element(0xD8),
+        ];
+        for (i, id_commitment) in commitments.iter().enumerate() {
+            let tx = build_register_tx(
+                &setup,
+                &TREE_ID,
+                *id_commitment,
+                EXP_RATE_LIMIT,
+                Nonce(i as u128),
+                i as u64,
+            );
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 1, 0)
+                .expect("register should succeed");
+        }
+        assert_eq!(
+            escrow_balance(&setup),
+            EXP_DEPOSIT * commitments.len() as u128
+        );
+
+        advance_past_expiry(&mut setup);
+        for (i, id_commitment) in commitments.iter().enumerate() {
+            let tx = build_erase_tx(&setup, &TREE_ID, *id_commitment, i as u64);
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 2, 0)
+                .expect("erase should succeed");
+        }
+        assert_eq!(
+            escrow_balance(&setup),
+            0,
+            "every deposit in, every deposit out"
+        );
+    }
+
+    /// An erased membership's PDA keeps this program as its owner — LEZ never
+    /// returns an account to `Account::default()` — so the `init` constraint
+    /// that makes registration one-shot also makes it permanent. An
+    /// id_commitment is single-use for the life of the tree.
+    #[test]
+    fn an_id_commitment_cannot_be_reused_after_erase() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xC1);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        advance_past_expiry(&mut setup);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 2, 0)
+            .expect("an expired membership must be erasable");
+
+        let reregister =
+            build_register_tx(&setup, &TREE_ID, id_commitment, EXP_RATE_LIMIT, Nonce(1), 1);
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&reregister, 3, 0)
+                .is_err(),
+            "the membership PDA stays owned after erase, so the commitment is spent"
+        );
+    }
+
+    /// The forfeit destination is read from config, so a caller naming its own
+    /// treasury must be refused — otherwise slashing pays the slasher.
+    #[test]
+    fn slash_refuses_a_treasury_that_is_not_the_configured_one() {
+        let mut setup = state_with_initialized_registration().expect("setup");
+        let (identity_secret, id_commitment) = create_slashable_identity(0x43);
+        let register_tx = build_register_tx(&setup, &TREE_ID, id_commitment, 300, Nonce(0), 0);
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("register should succeed");
+
+        let (_attacker_key, attacker_id) = create_test_keypair(93);
+        let slash_tx = build_slash_tx_paying(
+            &setup,
+            &TREE_ID,
+            identity_secret,
+            id_commitment,
+            0,
+            &attacker_id,
+        );
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&slash_tx, 2, 0)
+                .is_err(),
+            "the forfeit must go where config says, not where the caller says"
+        );
+    }
+
+    /// At price zero every deposit is zero, which leaves nothing to refund and
+    /// nothing to forfeit — the collateral the whole design rests on.
+    #[test]
+    fn initialize_rejects_a_zero_price() {
+        let (mut state, merkle, registration) =
+            state_with_programs().expect("Programs should load");
+        let treasury_id = AccountId::new([11; 32]);
+        let init_txs =
+            build_registration_init_txs(&registration, &merkle, &TREE_ID, 0, &treasury_id);
+        assert!(
+            apply_registration_init(&mut state, &init_txs).is_err(),
+            "a zero-priced registry must not initialize"
+        );
+    }
+
+    /// The grace period is the window in which an exiting member's leaf is
+    /// still live and still slashable. At zero, a holder could exit and erase
+    /// in consecutive blocks and never be at risk.
+    #[test]
+    fn initialize_rejects_a_zero_grace_period() {
+        let (mut state, merkle, registration) =
+            state_with_programs().expect("Programs should load");
+        let treasury_id = AccountId::new([11; 32]);
+        let init_txs = build_registration_init_txs_with_durations(
+            &registration,
+            &merkle,
+            &TREE_ID,
+            PRICE_PER_UNIT,
+            &treasury_id,
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            0,
+        );
+        assert!(
+            apply_registration_init(&mut state, &init_txs).is_err(),
+            "a zero grace period must not initialize"
+        );
+    }
+
+    // ========================================================================
+    // Holder-initiated exit
+    // ========================================================================
+
+    fn force_expire_as_holder(
+        setup: &TestSetup,
+        id_commitment: [u8; 32],
+        nonce: Nonce,
+    ) -> PublicTransaction {
+        let holder = setup.payer_id;
+        let key = setup.payer_key.clone();
+        build_force_expire_tx(setup, &TREE_ID, id_commitment, &holder, &key, nonce)
+    }
+
+    #[test]
+    fn force_expire_starts_the_grace_period_now() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xE0);
+        register_for_expiration_test(&mut setup, id_commitment);
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            GENESIS_TIMESTAMP_MS + ACTIVE_MS,
+        );
+
+        let exit_at = GENESIS_TIMESTAMP_MS + 100;
+        set_clock_50(&mut setup.state, exit_at, 60);
+        let tx = force_expire_as_holder(&setup, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&tx, 2, 0)
+            .expect("the holder must be able to force expiry");
+
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            exit_at,
+            "grace must start at the moment of the request"
+        );
+    }
+
+    #[test]
+    fn force_expire_rejects_a_non_holder() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xE1);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let (stranger_key, stranger_id) = create_test_keypair(91);
+        fund_native(&mut setup.state, &stranger_id, DEFAULT_PAYER_BALANCE);
+        let tx = build_force_expire_tx(
+            &setup,
+            &TREE_ID,
+            id_commitment,
+            &stranger_id,
+            &stranger_key,
+            Nonce(0),
+        );
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&tx, 2, 0)
+                .is_err(),
+            "only the membership's holder may wind it down"
+        );
+    }
+
+    #[test]
+    fn force_expire_never_postpones_expiry() {
+        // `min`: from inside grace this is a no-op, never a fresh window.
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xE2);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let grace_start_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS;
+        set_clock_50(&mut setup.state, grace_start_ms + 10, 60);
+        let tx = force_expire_as_holder(&setup, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&tx, 2, 0)
+            .expect("force-expire in grace should succeed");
+
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            grace_start_ms,
+            "an in-grace exit must not move the expiry out"
+        );
+    }
+
+    /// `force_expire` records nothing but an earlier expiry, so the holder can
+    /// push it back out again. Nobody else can, because nobody else may renew.
+    #[test]
+    fn extend_by_the_holder_reverses_a_force_expire() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xE3);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let exit_at = GENESIS_TIMESTAMP_MS + 100;
+        set_clock_50(&mut setup.state, exit_at, 60);
+        let tx = force_expire_as_holder(&setup, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&tx, 2, 0)
+            .expect("force-expire should succeed");
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            exit_at,
+        );
+
+        // The exit opened the grace window, so renewal is available at once.
+        let extend_tx = build_extend_tx(&setup, &TREE_ID, id_commitment, Nonce(2));
+        setup
+            .state
+            .transition_from_public_transaction(&extend_tx, 3, 0)
+            .expect("the holder may call off its own exit");
+
+        assert_eq!(
+            read_grace_start_ms(&setup.state, &setup.registration, &TREE_ID, &id_commitment),
+            exit_at + GRACE_MS + ACTIVE_MS,
+            "renewal must push the expiry back out"
+        );
+    }
+
+    #[test]
+    fn force_expire_then_erase_returns_the_whole_deposit() {
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let id_commitment = valid_field_element(0xE4);
+
+        let payer_before = native_balance(&setup.state, &setup.payer_id);
+        register_for_expiration_test(&mut setup, id_commitment);
+
+        let exit_at = GENESIS_TIMESTAMP_MS + 100;
+        set_clock_50(&mut setup.state, exit_at, 60);
+        let tx = force_expire_as_holder(&setup, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&tx, 2, 0)
+            .expect("force-expire should succeed");
+
+        // Still locked for the grace window the exit started.
+        let too_early = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        assert!(
+            setup
+                .state
+                .transition_from_public_transaction(&too_early, 3, 0)
+                .is_err(),
+            "the deposit must stay escrowed until the wind-down window closes"
+        );
+
+        set_clock_50(&mut setup.state, exit_at + GRACE_MS + 1, 70);
+        let erase_tx = build_erase_tx(&setup, &TREE_ID, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&erase_tx, 4, 0)
+            .expect("erase after the wind-down window must succeed");
+
+        assert_eq!(
+            native_balance(&setup.state, &setup.payer_id),
+            payer_before,
+            "the exiting holder must get the whole deposit back"
+        );
+    }
+
+    #[test]
+    fn slash_still_forfeits_mid_wind_down() {
+        // Why the deposit is held until expiry: exiting does not outrun a slash.
+        let Some(mut setup) = setup_with_expiration() else {
+            return;
+        };
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let (identity_secret, id_commitment) = create_slashable_identity(0xD5);
+        let register_tx =
+            build_register_tx(&setup, &TREE_ID, id_commitment, EXP_RATE_LIMIT, Nonce(0), 0);
+        setup
+            .state
+            .transition_from_public_transaction(&register_tx, 1, 0)
+            .expect("register should succeed");
+
+        let tx = force_expire_as_holder(&setup, id_commitment, Nonce(1));
+        setup
+            .state
+            .transition_from_public_transaction(&tx, 2, 0)
+            .expect("force-expire should succeed");
+
+        let treasury_before = native_balance(&setup.state, &setup.treasury_id);
+        let slash_tx = build_slash_tx(&setup, &TREE_ID, identity_secret, id_commitment, 0);
+        setup
+            .state
+            .transition_from_public_transaction(&slash_tx, 3, 0)
+            .expect("slash must still succeed mid wind-down");
+
+        assert_eq!(
+            native_balance(&setup.state, &setup.treasury_id),
+            treasury_before + EXP_DEPOSIT,
+            "the deposit must still be forfeitable while the holder is exiting"
+        );
     }
 }

@@ -14,7 +14,7 @@ use crate::{
     fr_bytes::fr_to_bytes_le,
     merkle_tree::SUBTREE_LEAVES,
     rln::{
-        CONFIG_OFFSET_TREASURY_ACCOUNT_ID, Instruction, derive_config_account,
+        Instruction, MEMBERSHIP_OFFSET_HOLDER, derive_config_account, derive_escrow_account,
         derive_subtree_account, derive_tree_main_account,
     },
 };
@@ -668,14 +668,6 @@ pub async fn run_setup(
 
     wait_for_block_seal().await;
 
-    // The treasury is a plain public account, deliberately not a PDA: a PDA is
-    // spendable only through a chained call carrying its seeds, issued by its
-    // owning program, and this program has no instruction that would issue
-    // one. It needs no initialization either — a native credit lands on an
-    // account that has never been written to, and leaves it unowned. That is
-    // also why nothing can squat the funds: ownership gates DATA writes, while
-    // a balance decrease is gated separately on the account's own
-    // authorization.
     println!("Setup Step 2: Creating the treasury account...");
     let (treasury_id, _) = wallet_core.create_new_account_public(None);
     wallet_core
@@ -801,17 +793,10 @@ pub async fn register_identity(
         tree_id,
     );
 
-    let config_data = wallet_core
-        .get_account_public(config_account)
-        .await
-        .expect("Failed to fetch config account. Is the registration initialized?");
-
-    let config_bytes = config_data.data.as_ref();
-    let treasury_bytes: [u8; 32] = config_bytes
-        [CONFIG_OFFSET_TREASURY_ACCOUNT_ID..CONFIG_OFFSET_TREASURY_ACCOUNT_ID + 32]
-        .try_into()
-        .expect("Invalid treasury account ID in config");
-    let treasury_account_id = AccountId::new(treasury_bytes);
+    let escrow_account = derive_escrow_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+    );
 
     let main_account_data = wallet_core
         .get_account_public(tree_main_account)
@@ -837,7 +822,7 @@ pub async fn register_identity(
         config_account,
         tree_main_account,
         *payer_id,
-        treasury_account_id,
+        escrow_account,
         subtree_account,
         clock_account_id(),
         membership_account,
@@ -874,52 +859,25 @@ pub async fn register_identity(
 
 /// Renew a membership that is currently inside its grace period.
 ///
-/// Renewal costs the same as registering the membership's rate limit, so
-/// `payer_id` must hold that much NATIVE balance on top of the fee reserve; it
-/// signs and is debited. Anyone may pay for anyone's renewal — the charge, not
-/// the caller's identity, is what stops a third party from pinning an
-/// abandoned membership's rate limit forever.
+/// Holder only, and free — `holder_id` signs and pays only the transaction
+/// fee. The guest refuses any other signer.
 pub async fn extend_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
-    payer_id: &AccountId,
-    treasury_id: &AccountId,
+    holder_id: &AccountId,
 ) {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
-    let config_account = derive_config_account(
-        &crate::spel_seeds::program_account(&registration_program.id()),
-        tree_id,
-    );
     let membership_account = crate::rln::derive_membership_account(
         &crate::spel_seeds::program_account(&registration_program.id()),
         tree_id,
         id_commitment,
     );
 
-    let accounts = vec![
-        config_account,
-        membership_account,
-        *payer_id,
-        *treasury_id,
-        clock_account_id(),
-    ];
-
-    // Priced off the membership's own rate limit, which the guest reads and
-    // the host would have to fetch; MAX_RATE_LIMIT is the ceiling, so checking
-    // against it refuses an account that could not afford any renewal without
-    // a second round trip. A payer that clears this can still be refused by
-    // the guest for its actual price, which is the authority.
-    assert_can_afford(
-        wallet_core,
-        payer_id,
-        PRICE_PER_UNIT.saturating_mul(u128::from(crate::rln::MAX_RATE_LIMIT)),
-        "extend",
-    )
-    .await;
+    let accounts = vec![membership_account, *holder_id, clock_account_id()];
 
     let instruction = Instruction::Extend {
         tree_id: *tree_id,
@@ -931,15 +889,54 @@ pub async fn extend_membership(
         wallet_core,
         crate::spel_seeds::program_account(&registration_program.id()),
         accounts,
-        payer_id,
+        holder_id,
         instruction_data,
         "Failed to extend membership",
     )
     .await;
 }
 
-/// Erase an expired membership. Any funded account can call this; callers
-/// pre-grace-period or mid-grace-period are rejected by the guest.
+/// Start a membership's wind-down, bringing its grace period forward to now.
+/// Holder only; the deposit becomes refundable via `erase_membership` once
+/// that window closes.
+pub async fn force_expire_membership(
+    wallet_core: &WalletCore,
+    registration_program: &Program,
+    tree_id: &[u8; 32],
+    id_commitment: &[u8; 32],
+    holder_id: &AccountId,
+) {
+    crate::fr_bytes::bytes_le_to_fr(id_commitment)
+        .expect("id_commitment is not a valid BN254 field element");
+
+    let membership_account = crate::rln::derive_membership_account(
+        &crate::spel_seeds::program_account(&registration_program.id()),
+        tree_id,
+        id_commitment,
+    );
+
+    let accounts = vec![membership_account, *holder_id, clock_account_id()];
+
+    let instruction = Instruction::ForceExpire {
+        tree_id: *tree_id,
+        id_commitment: *id_commitment,
+    };
+    let instruction_data =
+        Program::serialize_instruction(instruction).expect("instruction serializes");
+    send_metered_tx(
+        wallet_core,
+        crate::spel_seeds::program_account(&registration_program.id()),
+        accounts,
+        holder_id,
+        instruction_data,
+        "Failed to force-expire membership",
+    )
+    .await;
+}
+
+/// Erase an expired membership, refunding its deposit to the recorded holder.
+/// Any funded account can call this; the guest rejects a membership that has
+/// not expired.
 pub async fn erase_membership(
     wallet_core: &WalletCore,
     registration_program: &Program,
@@ -971,12 +968,34 @@ pub async fn erase_membership(
         subtree_id,
     );
 
+    // The refund destination is the membership's own record, not the caller's
+    // choice: the guest rejects any other account.
+    let membership_data = wallet_core
+        .get_account_public(membership_account)
+        .await
+        .expect("Failed to fetch the membership being erased");
+    let membership_bytes = membership_data.data.as_ref();
+    assert!(
+        membership_bytes.len() >= MEMBERSHIP_OFFSET_HOLDER + 32,
+        "Membership account is {} bytes — no such membership, or already erased",
+        membership_bytes.len()
+    );
+    let holder_bytes: [u8; 32] = membership_bytes
+        [MEMBERSHIP_OFFSET_HOLDER..MEMBERSHIP_OFFSET_HOLDER + 32]
+        .try_into()
+        .expect("32-byte holder field");
+
     let accounts = vec![
         config_account,
         tree_main_account,
         membership_account,
         subtree_account,
         clock_account_id(),
+        derive_escrow_account(
+            &crate::spel_seeds::program_account(&registration_program.id()),
+            tree_id,
+        ),
+        AccountId::new(holder_bytes),
     ];
 
     let instruction = Instruction::Erase {

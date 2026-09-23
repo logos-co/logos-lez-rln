@@ -41,13 +41,15 @@ pub const MEMBERSHIP_OFFSET_ID_COMMITMENT: usize = 16;
 pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP: usize = 48;
 pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = 56;
 pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize = 60;
-pub const MEMBERSHIP_SIZE: usize = 64;
+pub const MEMBERSHIP_OFFSET_HOLDER: usize = 64;
+pub const MEMBERSHIP_OFFSET_DEPOSIT_AMOUNT: usize = 96;
+pub const MEMBERSHIP_SIZE: usize = rln_layouts::state::MEMBERSHIP_STATE_SIZE;
 
 pub use rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
 
 #[cfg(test)]
 mod tests {
-    use rln_layouts::ConfigState;
+    use rln_layouts::{ConfigState, MembershipState};
 
     use super::*;
 
@@ -131,6 +133,89 @@ mod tests {
                     .unwrap()
             ),
             0x1213,
+        );
+    }
+
+    /// Same pin for `MembershipState`. `MEMBERSHIP_OFFSET_HOLDER` picks the
+    /// account `Erase` refunds to, so an offset that has drifted does not read
+    /// a wrong number — it sends the deposit to a wrong account, or refuses
+    /// every erase.
+    #[test]
+    fn membership_offsets_match_the_shared_layout() {
+        let membership = MembershipState {
+            leaf_index: 0x0102,
+            rate_limit: 0x0304,
+            id_commitment: [0x44; 32],
+            grace_period_start_timestamp_ms: 0x0506,
+            active_duration_sec: 0x0708,
+            grace_period_duration_sec: 0x090A,
+            holder: [0x55; 32],
+            deposit_amount: 0xFEED_FACE,
+        };
+        let b = borsh::to_vec(&membership).expect("MembershipState serializes");
+
+        assert_eq!(
+            b.len(),
+            MEMBERSHIP_SIZE,
+            "MEMBERSHIP_SIZE tracks the layout"
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                b[MEMBERSHIP_OFFSET_LEAF_INDEX..MEMBERSHIP_OFFSET_LEAF_INDEX + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x0102,
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                b[MEMBERSHIP_OFFSET_RATE_LIMIT..MEMBERSHIP_OFFSET_RATE_LIMIT + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x0304,
+        );
+        assert_eq!(
+            &b[MEMBERSHIP_OFFSET_ID_COMMITMENT..MEMBERSHIP_OFFSET_ID_COMMITMENT + 32],
+            &[0x44; 32],
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                b[MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP
+                    ..MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x0506,
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                b[MEMBERSHIP_OFFSET_ACTIVE_DURATION..MEMBERSHIP_OFFSET_ACTIVE_DURATION + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x0708,
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                b[MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION
+                    ..MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x090A,
+        );
+        assert_eq!(
+            &b[MEMBERSHIP_OFFSET_HOLDER..MEMBERSHIP_OFFSET_HOLDER + 32],
+            &[0x55; 32],
+        );
+        assert_eq!(
+            u128::from_le_bytes(
+                b[MEMBERSHIP_OFFSET_DEPOSIT_AMOUNT..MEMBERSHIP_OFFSET_DEPOSIT_AMOUNT + 16]
+                    .try_into()
+                    .unwrap()
+            ),
+            0xFEED_FACE,
         );
     }
 }

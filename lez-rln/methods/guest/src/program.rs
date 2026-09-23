@@ -52,6 +52,8 @@ pub struct MembershipState {
     pub grace_period_start_timestamp_ms: u64,
     pub active_duration_sec: u32,
     pub grace_period_duration_sec: u32,
+    pub holder: [u8; 32],
+    pub deposit_amount: u128,
 }
 
 const _: () = {
@@ -109,6 +111,8 @@ mod layout_equivalence {
             grace_period_start_timestamp_ms: 4,
             active_duration_sec: 5,
             grace_period_duration_sec: 6,
+            holder: [7u8; 32],
+            deposit_amount: 8,
         };
         let shared = SharedMembershipState {
             leaf_index: 1,
@@ -117,6 +121,8 @@ mod layout_equivalence {
             grace_period_start_timestamp_ms: 4,
             active_duration_sec: 5,
             grace_period_duration_sec: 6,
+            holder: [7u8; 32],
+            deposit_amount: 8,
         };
         assert_eq!(
             borsh::to_vec(&local).unwrap(),
@@ -168,7 +174,7 @@ pub mod rln_registration {
         #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("main"), arg("tree_id")])] tree_main: AccountWithMetadata,
         #[account(signer)] payer: AccountWithMetadata,
-        treasury: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow: AccountWithMetadata,
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
         clock_account: AccountWithMetadata,
@@ -183,7 +189,7 @@ pub mod rln_registration {
             config,
             tree_main,
             payer,
-            treasury,
+            escrow,
             bottom_subtree,
             clock_account,
             membership,
@@ -202,6 +208,8 @@ pub mod rln_registration {
         membership: AccountWithMetadata,
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow: AccountWithMetadata,
+        treasury: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
         identity_secret: [u8; 32],
@@ -212,6 +220,8 @@ pub mod rln_registration {
             tree_main,
             membership,
             bottom_subtree,
+            escrow,
+            treasury,
             tree_id,
             id_commitment,
             identity_secret,
@@ -221,24 +231,17 @@ pub mod rln_registration {
 
     #[instruction]
     pub fn extend(
-        #[account(pda = [literal("config"), arg("tree_id")])] config: AccountWithMetadata,
         #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
         membership: AccountWithMetadata,
-        #[account(signer)] payer: AccountWithMetadata,
-        treasury: AccountWithMetadata,
+        #[account(signer)] holder: AccountWithMetadata,
         clock_account: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
     ) -> SpelResult {
-        let _ = id_commitment; // PDA seed only; consumed by the #[account] macro
-        Ok(handlers::extend(
-            config,
-            membership,
-            payer,
-            treasury,
-            clock_account,
-            tree_id,
-        ))
+        // Both are PDA seeds only; the membership account they derive is what
+        // binds this call to a tree.
+        let _ = (tree_id, id_commitment);
+        Ok(handlers::extend(membership, holder, clock_account))
     }
 
     #[instruction]
@@ -250,6 +253,8 @@ pub mod rln_registration {
         #[account(pda = [literal("subtree"), arg("tree_id"), arg("subtree_id")])]
         bottom_subtree: AccountWithMetadata,
         clock_account: AccountWithMetadata,
+        #[account(pda = [literal("escrow"), arg("tree_id")])] escrow: AccountWithMetadata,
+        holder: AccountWithMetadata,
         tree_id: [u8; 32],
         id_commitment: [u8; 32],
         subtree_id: u32,
@@ -261,8 +266,25 @@ pub mod rln_registration {
             membership,
             bottom_subtree,
             clock_account,
+            escrow,
+            holder,
             tree_id,
             subtree_id,
         ))
+    }
+
+    #[instruction]
+    pub fn force_expire(
+        #[account(pda = [literal("membership"), arg("tree_id"), arg("id_commitment")])]
+        membership: AccountWithMetadata,
+        #[account(signer)] holder: AccountWithMetadata,
+        clock_account: AccountWithMetadata,
+        tree_id: [u8; 32],
+        id_commitment: [u8; 32],
+    ) -> SpelResult {
+        // Both are PDA seeds only; the membership account they derive is what
+        // binds this call to a tree.
+        let _ = (tree_id, id_commitment);
+        Ok(handlers::force_expire(membership, holder, clock_account))
     }
 }
