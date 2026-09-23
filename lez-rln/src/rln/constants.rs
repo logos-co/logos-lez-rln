@@ -154,7 +154,11 @@ mod tests {
         };
         let b = borsh::to_vec(&membership).expect("MembershipState serializes");
 
-        assert_eq!(b.len(), MEMBERSHIP_SIZE, "MEMBERSHIP_SIZE tracks the layout");
+        assert_eq!(
+            b.len(),
+            MEMBERSHIP_SIZE,
+            "MEMBERSHIP_SIZE tracks the layout"
+        );
         assert_eq!(
             u64::from_le_bytes(
                 b[MEMBERSHIP_OFFSET_LEAF_INDEX..MEMBERSHIP_OFFSET_LEAF_INDEX + 8]

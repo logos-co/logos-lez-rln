@@ -69,9 +69,8 @@ mod tests {
         CONFIG_OFFSET_PRICE_PER_UNIT, CONFIG_OFFSET_TOTAL_REGISTRATIONS,
         CONFIG_OFFSET_TREASURY_ACCOUNT_ID, CONFIG_OFFSET_TREE_ID, CONFIG_SIZE,
         MEMBERSHIP_OFFSET_ACTIVE_DURATION, MEMBERSHIP_OFFSET_DEPOSIT_AMOUNT,
-        MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION,
-        MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP, MEMBERSHIP_OFFSET_HOLDER,
-        MEMBERSHIP_OFFSET_ID_COMMITMENT, MEMBERSHIP_OFFSET_LEAF_INDEX,
+        MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION, MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP,
+        MEMBERSHIP_OFFSET_HOLDER, MEMBERSHIP_OFFSET_ID_COMMITMENT, MEMBERSHIP_OFFSET_LEAF_INDEX,
         MEMBERSHIP_OFFSET_RATE_LIMIT, MEMBERSHIP_SIZE, TREE_DEPTH, derive_config_account,
         derive_membership_account, derive_subtree_account, derive_tree_main_account,
         subtree_id_for_index,
@@ -2454,10 +2453,10 @@ mod tests {
     // Native Payment Tests
     // ========================================================================
     //
-    // The registry knows one asset and it is the native one. `register`
-    // escrows the deposit by assigning to `account.balance`, and the SPEL
-    // macro turns those assignments into BalanceDiffs. What that buys is enforcement by consensus rather than by
-    // the guest: the protocol resolves the payer's real pre-state, refuses a
+    // The registry knows one asset and it is the native one. `register` escrows
+    // the deposit by assigning to `account.balance`, and the SPEL macro turns
+    // those assignments into BalanceDiffs. Consensus enforces them, not the
+    // guest: the protocol resolves the payer's real pre-state, refuses a
     // decrease on an unauthorized account (UnauthorizedBalanceDecrease), and
     // refuses any diff whose credits do not equal its debits
     // (MismatchedTotalBalance).
@@ -2765,7 +2764,10 @@ mod tests {
             "the payer holds its balance privately: nothing at its account id in public state"
         );
         assert_eq!(
-            native_balance(&state, &derive_escrow_pda(program_of(&registration), &TREE_ID)),
+            native_balance(
+                &state,
+                &derive_escrow_pda(program_of(&registration), &TREE_ID)
+            ),
             0,
             "the escrow account has never been written to"
         );
@@ -4475,14 +4477,8 @@ mod tests {
             .transition_from_public_transaction(&erase_tx, 2, 0)
             .expect("an expired membership must be erasable");
 
-        let reregister = build_register_tx(
-            &setup,
-            &TREE_ID,
-            id_commitment,
-            EXP_RATE_LIMIT,
-            Nonce(1),
-            1,
-        );
+        let reregister =
+            build_register_tx(&setup, &TREE_ID, id_commitment, EXP_RATE_LIMIT, Nonce(1), 1);
         assert!(
             setup
                 .state
