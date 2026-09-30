@@ -4853,6 +4853,7 @@ dependencies = [
  "risc0-zkvm",
  "rln",
  "rln-layouts",
+ "sequencer_service_protocol",
  "sequencer_service_rpc",
  "token_core",
  "tokio",
