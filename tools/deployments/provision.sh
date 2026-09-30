@@ -64,6 +64,9 @@ fi
 # declares too little has its transaction refused for running out of gas, with
 # nothing in the reply naming the limit it hit. MAX_GAS_EXEC (10M) is the
 # ceiling the protocol enforces; declaring more is refused outright.
+# The key is for the module's wallet that later opens this home: run_setup's own
+# deploy and init txs go through the upstream wallet's send path, which ignores
+# it and declares 2,000,000 (LEZ_RLN_GAS_LIMIT reaches only register/extend/erase).
 jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
 echo "provision: tree=$TREE sequencer=$SEQUENCER payer=$PAYER (deploying via run_setup — several min)"
