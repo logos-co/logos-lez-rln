@@ -5,7 +5,8 @@ use rln_layouts::exit::{EXIT_CLOCK_NOT_INITIALIZED, EXIT_STALE_CLOCK};
 
 // Re-export rate limit and expiration constants / helpers from shared crate
 pub use crate::layouts::{
-    CLOCK_50_ACCOUNT_ID_BYTES, MAX_RATE_LIMIT, MIN_RATE_LIMIT, is_expired, is_in_grace_period,
+    CLOCK_50_ACCOUNT_ID_BYTES, CLOCK_CLAIM_TOLERANCE_MS, MAX_RATE_LIMIT, MIN_RATE_LIMIT,
+    is_expired, is_in_grace_period,
 };
 use crate::{
     ensure,
@@ -75,8 +76,10 @@ pub fn require_clock_account(clock: &AccountMeta) {
     );
 }
 
-/// Apply side of the clock guard: the clock shard's timestamp must equal the
-/// claimed `now_ms`.
+/// Apply side of the clock guard: the claimed `now_ms` must be at most
+/// `CLOCK_CLAIM_TOLERANCE_MS` behind the clock shard's timestamp, and never
+/// ahead of it. An equality claim would revert any transaction that straddles
+/// a `CLOCK_50` step; see the constant for why an older claim is safe.
 ///
 /// A zero timestamp is refused: CLOCK_50 carries the genesis zero until the
 /// sequencer's first refresh of it (every 50 blocks), and a membership stamped
@@ -91,9 +94,10 @@ pub fn assert_clock_is(clock_pre_data: &[u8], now_ms: u64) {
         "ClockNotInitialized: CLOCK_50 has not been written yet"
     );
     ensure!(
-        timestamp == now_ms,
+        now_ms <= timestamp && timestamp - now_ms <= CLOCK_CLAIM_TOLERANCE_MS,
         EXIT_STALE_CLOCK,
-        "Claimed now_ms {now_ms} does not match CLOCK_50's timestamp {timestamp}"
+        "Claimed now_ms {now_ms} is not within {CLOCK_CLAIM_TOLERANCE_MS} ms before \
+         CLOCK_50's timestamp {timestamp}"
     );
 }
 
@@ -235,15 +239,30 @@ mod tests {
         );
     }
 
+    const T: u64 = 10_000_000;
+
     #[test]
     fn assert_clock_is_accepts_matching_timestamp() {
-        assert_clock_is(&clock_bytes(1_234), 1_234);
+        assert_clock_is(&clock_bytes(T), T);
+    }
+
+    /// The clock stepped after the claim was read: still accepted.
+    #[test]
+    fn assert_clock_is_accepts_a_claim_up_to_the_tolerance_behind() {
+        assert_clock_is(&clock_bytes(T), T - 1);
+        assert_clock_is(&clock_bytes(T), T - CLOCK_CLAIM_TOLERANCE_MS);
     }
 
     #[test]
-    #[should_panic(expected = "does not match")]
-    fn assert_clock_is_rejects_wrong_claim() {
-        assert_clock_is(&clock_bytes(1_234), 1_235);
+    #[should_panic(expected = "exit 10: Claimed now_ms")]
+    fn assert_clock_is_rejects_a_claim_ahead_of_the_clock() {
+        assert_clock_is(&clock_bytes(T), T + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "exit 10: Claimed now_ms")]
+    fn assert_clock_is_rejects_a_claim_older_than_the_tolerance() {
+        assert_clock_is(&clock_bytes(T), T - CLOCK_CLAIM_TOLERANCE_MS - 1);
     }
 
     #[test]

@@ -191,7 +191,9 @@ membership PDA (apply refuses a non-empty shard, which is what makes an
 `id_commitment` unique), and chains to the merkle program to append the leaf
 at the tree's `next_index` (the tree picks the index; the instruction names
 none). The clock
-timestamp is claimed and guarded by a read-only effect on `CLOCK_50`. The
+timestamp is claimed and guarded by a read-only effect on `CLOCK_50`: the claim
+may trail the clock by up to `CLOCK_CLAIM_TOLERANCE_MS` (one clock step, so a
+register straddling a step still lands) and never lead it. The
 signer is also the transaction's fee payer, so one account and one balance
 cover the whole thing.
 

@@ -56,7 +56,8 @@ pub enum Effect {
     },
     /// Membership shard: write the new membership. One-shot.
     InitMembership(MembershipState),
-    /// Clock shard (foreign, read-only): its timestamp equals the claim.
+    /// Clock shard (foreign, read-only): the claim is at most
+    /// `CLOCK_CLAIM_TOLERANCE_MS` behind its timestamp, never ahead.
     ClockIs(u64),
     /// Config shard: assert the claimed ids, then uncount a member of
     /// `rate_limit` (slash, erase).
@@ -1338,9 +1339,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "does not match")]
-    fn apply_clock_is_rejects_wrong_claim() {
+    #[should_panic(expected = "is not within")]
+    fn apply_clock_is_rejects_a_claim_ahead_of_the_clock() {
         let _ = apply(Effect::ClockIs(NOW_MS + 1), &clock_bytes(NOW_MS));
+    }
+
+    #[test]
+    fn apply_clock_is_accepts_a_claim_one_step_behind() {
+        assert!(apply(Effect::ClockIs(NOW_MS), &clock_bytes(NOW_MS + 750_000)).is_none());
     }
 
     #[test]

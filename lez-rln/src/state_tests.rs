@@ -546,8 +546,8 @@ mod tests {
         Fr, Hasher, IdentityKeys, PoseidonHash, RLNMerkleProof, RLNWitnessInput, hash_to_field_le,
     };
     use rln_layouts::{
-        Instruction, MerkleInstruction, OFFSET_NEXT_INDEX, OFFSET_TREE_DATA, SPARSE_ENTRY_LEN,
-        TREE_LEAVES, TREE_SHARD_MAX_BYTES,
+        CLOCK_CLAIM_TOLERANCE_MS, Instruction, MerkleInstruction, OFFSET_NEXT_INDEX,
+        OFFSET_TREE_DATA, SPARSE_ENTRY_LEN, TREE_LEAVES, TREE_SHARD_MAX_BYTES,
         exit::{
             EXIT_LEAF_MISMATCH, EXIT_STALE_CLOCK, EXIT_STALE_RATE_LIMIT, EXIT_TREE_FULL,
             exit_code_name,
@@ -1157,8 +1157,8 @@ mod tests {
     fn register_rejects_a_wrong_now_ms_claim() {
         let mut setup = setup_or_skip();
         let ix = register_ix(&setup.state, valid_field_element(0x42), 300);
-        // A backdated clock would shorten nothing, a future one would extend
-        // the membership for free: both are refused.
+        // A future clock would extend the membership for free; a claim older
+        // than the tolerance is a stale read. Both are refused.
         assert_register_refused(
             &mut setup,
             with_claim!(
@@ -1174,11 +1174,70 @@ mod tests {
             with_claim!(
                 ix,
                 Register {
-                    now_ms: GENESIS_TIMESTAMP_MS - 1
+                    now_ms: GENESIS_TIMESTAMP_MS - CLOCK_CLAIM_TOLERANCE_MS - 1
                 }
             ),
-            "a past now_ms",
+            "a now_ms older than the tolerance",
         );
+    }
+
+    /// `CLOCK_50` steps once per 50 blocks; a register read just before a
+    /// step and included just after it carries a claim one step behind. That
+    /// is accepted, and the membership is dated by the claim — earlier than
+    /// the chain's time, which only shortens the member's own window.
+    #[test]
+    fn a_clock_claim_slightly_behind_the_clock_is_accepted() {
+        let mut setup = setup_or_skip();
+        let idc = valid_field_element(0x42);
+        let ix = register_ix(&setup.state, idc, 300);
+        let read_at = clock_ms(&setup.state);
+        set_clock_50(&mut setup.state, read_at + 750_000, 100);
+
+        let tx = register_tx(&setup, ix);
+        apply(&mut setup.state, &tx).expect("a claim one clock step behind is accepted");
+        assert_eq!(
+            membership(&setup.state, &idc)
+                .unwrap()
+                .grace_period_start_timestamp_ms,
+            read_at + ACTIVE_MS,
+            "dated by the claim, not by the clock"
+        );
+
+        // The tolerance itself is inclusive.
+        let idc = valid_field_element(0x43);
+        let ix = with_claim!(
+            register_ix(&setup.state, idc, 300),
+            Register {
+                now_ms: clock_ms(&setup.state) - CLOCK_CLAIM_TOLERANCE_MS
+            }
+        );
+        let tx = register_tx(&setup, ix);
+        apply(&mut setup.state, &tx).expect("a claim exactly the tolerance behind is accepted");
+    }
+
+    /// A claim ahead of the clock, or further behind it than the tolerance,
+    /// exits `EXIT_STALE_CLOCK` and leaves nothing behind.
+    #[test]
+    fn a_clock_claim_ahead_or_older_than_the_tolerance_is_refused() {
+        let mut setup = setup_or_skip();
+        let idc = valid_field_element(0x42);
+        let now = clock_ms(&setup.state);
+        for (what, claim) in [
+            ("1 ms ahead", now + 1),
+            (
+                "1 ms past the tolerance",
+                now - CLOCK_CLAIM_TOLERANCE_MS - 1,
+            ),
+        ] {
+            let ix = with_claim!(
+                register_ix(&setup.state, idc, 300),
+                Register { now_ms: claim }
+            );
+            let tx = register_tx(&setup, ix);
+            assert_exit(apply(&mut setup.state, &tx), EXIT_STALE_CLOCK, what);
+            assert!(membership(&setup.state, &idc).is_none(), "{what}");
+            assert_eq!(config(&setup.state).total_registrations, 0, "{what}");
+        }
     }
 
     #[test]
@@ -2174,11 +2233,11 @@ mod tests {
                 with_claim!(ix.clone(), Extend { rate_limit: 100 }),
             ),
             (
-                "a wrong now_ms",
+                "a now_ms ahead of the clock",
                 with_claim!(
                     ix,
                     Extend {
-                        now_ms: GENESIS_TIMESTAMP_MS + ACTIVE_MS
+                        now_ms: GENESIS_TIMESTAMP_MS + ACTIVE_MS + 2
                     }
                 ),
             ),

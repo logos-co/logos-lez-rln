@@ -72,6 +72,23 @@ pub fn clock_program_account_id() -> [u8; 32] {
     builtin_program_account_id(b"clock")
 }
 
+/// How far BEHIND `CLOCK_50`'s timestamp a claimed `now_ms` may be.
+///
+/// `CLOCK_50` moves in steps, once per 50 blocks: 750 s at testnet's 15 s
+/// blocks. A client reads it, builds a transaction, and the step may land
+/// before inclusion; an equality claim then reverts a perfectly honest
+/// register. 900 s covers one step plus 20% for block-time jitter; a claim
+/// two steps stale is refused (`EXIT_STALE_CLOCK`) and the client re-reads.
+///
+/// The claim, not the chain's clock, is what a membership is dated by, so
+/// the tolerance is how much EARLIER than the chain's time a membership may
+/// be dated: the member's active window starts (and ends) up to 15 minutes
+/// early, which only shortens their own membership. A claim AHEAD of the
+/// clock — the one direction that would lengthen it — is refused outright.
+/// Erase judges expiry at the claim, so an older claim only makes erasing
+/// harder; extend may land up to the tolerance after a grace period closed.
+pub const CLOCK_CLAIM_TOLERANCE_MS: u64 = 900_000;
+
 pub const MILLIS_PER_SECOND: u64 = 1_000;
 
 #[inline]
