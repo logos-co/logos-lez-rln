@@ -7,11 +7,10 @@
 //! source dev/env.sh && cargo run --bin register_commitments -- commitments.csv
 //! ```
 
-use std::{fs, time::Duration};
+use std::fs;
 
 use logos_lez_rln::{
     fr_bytes::bytes_le_to_fr,
-    merkle_tree::wait_for_leaf,
     rln::{
         client::{
             init_wallet, rate_commitment_from_fr, register_identity, resolve_payer,
@@ -87,34 +86,21 @@ async fn main() {
             *rate_limit,
         )
         .await;
+        let Some(leaf_index) = leaf_index else {
+            eprintln!(
+                "WARNING: leaf 0x{} not confirmed, continuing...",
+                hex::encode(&leaf_bytes[..8])
+            );
+            continue;
+        };
 
         eprintln!(
-            "    leaf_index={} id_commitment=0x{} rate_commitment=0x{}",
-            leaf_index,
-            hex::encode(&id_commitment[..8]),
-            hex::encode(&leaf_bytes[..8])
-        );
-
-        let finalized = wait_for_leaf(
-            &wallet_core,
-            &programs,
-            &tree_id,
-            leaf_index,
-            &leaf_bytes,
-            60,
-            Duration::from_millis(500),
-        )
-        .await;
-        if !finalized {
-            eprintln!("WARNING: Leaf {} not confirmed, continuing...", leaf_index);
-        }
-
-        eprintln!(
-            "  Registered {}/{}: leaf_index={} commitment={}...",
+            "  Registered {}/{}: leaf_index={} commitment=0x{}... rate_commitment=0x{}...",
             i + 1,
             entries.len(),
             leaf_index,
-            hex::encode(&id_commitment[..8])
+            hex::encode(&id_commitment[..8]),
+            hex::encode(&leaf_bytes[..8])
         );
     }
 

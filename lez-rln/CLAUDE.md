@@ -31,11 +31,21 @@
 ## Execution model: plan, then apply, one shard per session
 - A program's `plan` sees `AccountMeta { account_id, is_authorized,
   program_account_id }` and the instruction — never account data. Everything
-  a handler used to read from an account (tree `next_index`, clock timestamp,
-  config price / callee id, membership leaf index) travels in the instruction
-  as a CLAIM (`rln_layouts::Instruction`, "Claimed values"), and the `apply`
-  session that does see the shard asserts the claim. A wrong claim panics the
-  apply and the whole transaction fails.
+  a handler used to read from an account (clock timestamp, config price /
+  callee id, membership rate limit) travels in the instruction as a CLAIM
+  (`rln_layouts::Instruction`, "Claimed values"), and the `apply` session that
+  does see the shard asserts the claim. A wrong claim panics the apply and the
+  whole transaction fails.
+- The leaf index is deliberately NOT a claim: the merkle `Insert` takes it
+  from the tree's own `next_index`. An index claim goes stale the moment any
+  other registration lands first, so two registrations built from the same
+  state would contend and one would revert; without it they compose
+  (`same_block_registrations_compose`). Slash/erase send the index as a hint
+  and the merkle `Remove` checks the leaf there equals
+  `H(id_commitment, rate_limit)` — the membership apply has already pinned
+  `rate_limit`, so a wrong hint removes nothing
+  (`remove_refuses_a_wrong_index_or_leaf`). Clients locate a leaf by scanning
+  the tree (`merkle_tree::find_leaf_index`); no account stores it.
 - In a public transaction, effects are applied immediately after their plan,
   BEFORE the plan's chained calls run (`execution_state.rs::run`). In a
   privacy-preserving transaction public effects are deferred to settlement
@@ -59,6 +69,11 @@
   Poseidon is the budget, which is why the tree is depth 9 and a tenth level
   (+~0.9M) does not fit. Re-measure with `cycle_harness` and
   `register_transaction_fits_the_gas_ceiling` after any guest change.
+- Slash is the tightest transaction, not register: its plan hashes the
+  identity secret AND the member's leaf (for the merkle `Remove` content
+  check) before the nine-Poseidon root update — 9,736,047 cycles, 97.4% of the
+  ceiling (erase 9,135,211; `slash_and_erase_transactions_fit_the_gas_ceiling`).
+  Any guest change that adds a hash to slash does not fit.
 
 ## Init guards are apply-side empty checks
 Public transactions need no signature for PDA rows, so any instruction that
@@ -100,9 +115,9 @@ registering — which also gives `active_duration` economic force.
 members. The whole tree is one sparse node map in one shard (u16 BFS offsets,
 `TREE_SHARD_MAX_BYTES` under the 100 KiB shard cap, asserted at build time);
 an index past the last leaf would alias live nodes and return a wrong root
-WITHOUT failing, so `insert_leaf` and the register plan both assert the
-bound. `MerkleInstruction::Set` exists with no callers and is the only
-index-reuse path if capacity ever has to grow.
+WITHOUT failing, so `insert_leaf` asserts the bound (the register plan cannot:
+it never sees `next_index`). `MerkleInstruction::Set` exists with no callers
+and is the only index-reuse path if capacity ever has to grow.
 
 ## Running state_tests.rs
 Plain `cargo test` prints "0 passed, N filtered out" and exits 0 — it ran

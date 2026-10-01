@@ -91,11 +91,17 @@ LEZ runs a program in two phases. **Plan** sees only account ids and
 authorization flags plus the instruction, and emits *effects* (one per shard it
 touches) and chained calls. **Apply** runs once per effect, sees exactly one
 shard's bytes, and returns that shard's new bytes. Every value a handler needs
-from an account — the tree's `next_index`, the clock's timestamp, the config's
-price and merkle program id, a membership's leaf index — therefore travels in
-the instruction as a **claim**, and the apply that can see the account asserts
-it. Effects are applied before the plan's chained calls run, so a false claim
-fails the transaction before anything downstream executes.
+from an account — the clock's timestamp, the config's price and merkle program
+id, a membership's rate limit — therefore travels in the instruction as a
+**claim**, and the apply that can see the account asserts it. Effects are
+applied before the plan's chained calls run, so a false claim fails the
+transaction before anything downstream executes.
+
+The leaf index is not a claim. The merkle program assigns it on insert (its own
+`next_index`), so two registrations built from the same chain state both land,
+at consecutive indices. No account records it: clients find a member's leaf by
+scanning the tree for `hash(id_commitment, rate_limit)`
+(`merkle_tree::find_leaf_index`).
 
 Each account is a map of per-program **shards**. Registration state lives in
 the registration program's shard of its PDAs, the tree in the merkle program's
@@ -133,8 +139,8 @@ default hashes.
 | Operation  | Accounts | Payload                        |
 |------------|----------|--------------------------------|
 | Initialize | main     |                                |
-| Insert     | main     | `expected_index: u64, leaf`    |
-| Remove     | main     | `index: u64`                   |
+| Insert     | main     | `leaf` (index = tree's `next_index`) |
+| Remove     | main     | `index: u64, leaf` (leaf at `index` must equal `leaf`) |
 
 The merkle tree program is never called directly by clients. The RLN
 registration program calls it via **chained calls** carrying the `main` PDA
@@ -158,7 +164,7 @@ zero-padded to 32 bytes (string labels) or passed through (32-byte args).
 |------------------|---------------------------------------------|-------------------------------------------------------|
 | Config           | `["config", tree_id]`                       | Merkle program ID, tree ID, price, treasury, rate limit tracking, membership durations |
 | Tree main        | `["main", tree_id]`                         | The whole merkle tree (merkle program's shard)        |
-| Membership       | `["membership", tree_id, id_commitment]`    | Per-identity (leaf_index, rate_limit, expiry timestamps) |
+| Membership       | `["membership", tree_id, id_commitment]`    | Per-identity (rate_limit, expiry timestamps) |
 
 The treasury is deliberately **not** a PDA. A PDA is spendable only through a
 chained call carrying its seeds, issued by its owning program, and this program
@@ -182,16 +188,18 @@ is handed the `main` PDA seed.
 transfer of `rate_limit * price_per_unit` from the signing account to the
 treasury, computes `leaf = hash(id_commitment, rate_limit)`, creates a
 membership PDA (apply refuses a non-empty shard, which is what makes an
-`id_commitment` unique), and chains to the merkle program to insert the leaf at
-the claimed `next_index` (the merkle apply refuses any other index). The clock
+`id_commitment` unique), and chains to the merkle program to append the leaf
+at the tree's `next_index` (the tree picks the index; the instruction names
+none). The clock
 timestamp is claimed and guarded by a read-only effect on `CLOCK_50`. The
 signer is also the transaction's fee payer, so one account and one balance
 cover the whole thing.
 
 **Slash** — Anyone can remove a spammer by providing their `identity_secret`.
 The program verifies `id_commitment = hash(identity_secret)`, the membership
-apply checks the claimed leaf index and rate limit, and a chained call removes
-the leaf. Frees the consumed rate limit.
+apply checks the claimed rate limit, and a chained call removes the leaf at the
+caller's leaf-index hint, which the merkle apply refuses unless that leaf is
+`hash(id_commitment, rate_limit)`. Frees the consumed rate limit.
 
 **Extend** — Renews an existing membership's active period from the current
 clock (a membership in its grace period can be extended rather than
@@ -201,7 +209,8 @@ let a third party pin an abandoned membership's share of the rate-limit budget
 indefinitely.
 
 **Erase** — Removes an expired membership and chains to the merkle program to
-remove its leaf, returning the member's rate limit to the pool.
+remove its leaf (index checked by content, as for Slash), returning the
+member's rate limit to the pool.
 
 There is no faucet and no free-registration path. A faucet is not expressible
 for the native asset — no program can mint it — so balance arrives only at

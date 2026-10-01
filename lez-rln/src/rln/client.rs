@@ -21,8 +21,8 @@ use wallet::{
 };
 
 use crate::{
-    fr_bytes::fr_to_bytes_le,
-    merkle_tree::{ParsedTreeMain, TREE_LEAVES, fetch_tree_shard, tree_shard_selector},
+    fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
+    merkle_tree::{fetch_tree_shard, find_leaf_index, tree_shard_selector, wait_for_leaf},
     rln::{
         CONFIG_SIZE, Instruction, MEMBERSHIP_SIZE, ProgramIds, derive_config_account,
         derive_membership_account,
@@ -291,6 +291,30 @@ pub fn rate_commitment_from_fr(id_commitment_fr: &Fr, rate_limit: u64) -> [u8; 3
     let rate_commitment =
         Hasher::<PoseidonHash>::hash_pair(*id_commitment_fr, Fr::from(rate_limit));
     fr_to_bytes_le(&rate_commitment)
+}
+
+/// The leaf a membership occupies, from its byte-encoded `id_commitment`.
+pub fn registration_leaf(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] {
+    let id_commitment_fr =
+        bytes_le_to_fr(id_commitment).expect("id_commitment is not a valid BN254 field element");
+    rate_commitment_from_fr(&id_commitment_fr, rate_limit)
+}
+
+/// The index of the membership's leaf, found by scanning the tree: no account
+/// records it. Slash and erase send it as a hint the merkle program checks by
+/// content.
+async fn locate_membership_leaf(
+    wallet_core: &WalletCore,
+    programs: &ProgramIds,
+    tree_id: &[u8; 32],
+    membership: &MembershipState,
+) -> u64 {
+    let leaf = registration_leaf(&membership.id_commitment, membership.rate_limit);
+    find_leaf_index(
+        &fetch_tree_shard(wallet_core, programs, tree_id).await,
+        &leaf,
+    )
+    .expect("the membership exists but no leaf in the tree holds it")
 }
 
 /// Outputs of `create_identity`: the RLN identity plus the on-chain leaf (rate commitment).
@@ -923,13 +947,15 @@ fn check_merkle_claim(config: &ConfigState, programs: &ProgramIds) {
     );
 }
 
-/// Register `id_commitment` at `rate_limit`, paid by `payer_id`, and return
-/// the leaf index it was claimed at.
+/// Register `id_commitment` at `rate_limit`, paid by `payer_id`, wait for the
+/// leaf to land, and return the index the tree gave it — `None` if it has not
+/// appeared after `wait_account_attempts()` polls (the transaction was sent
+/// and may still land: check the chain before re-registering).
 ///
-/// Every claim is read from the chain just before sending: the tree's
-/// `next_index`, `CLOCK_50`'s timestamp and the config's price, durations and
-/// merkle program. A claim that goes stale before inclusion — another
-/// registration taking the index, the clock ticking — fails the transaction.
+/// Every claim is read from the chain just before sending: `CLOCK_50`'s
+/// timestamp and the config's price, durations and merkle program. The index
+/// is not a claim: the tree assigns it, so concurrent registrations do not
+/// contend for one.
 pub async fn register_identity(
     wallet_core: &WalletCore,
     programs: &ProgramIds,
@@ -937,20 +963,16 @@ pub async fn register_identity(
     id_commitment: &[u8; 32],
     payer_id: &AccountId,
     rate_limit: u64,
-) -> u64 {
-    crate::fr_bytes::bytes_le_to_fr(id_commitment)
-        .expect("id_commitment is not a valid BN254 field element");
+) -> Option<u64> {
+    let leaf = registration_leaf(id_commitment, rate_limit);
 
     let config = read_config(wallet_core, programs, tree_id).await;
     check_merkle_claim(&config, programs);
-    let next_index =
-        ParsedTreeMain::from_bytes(&fetch_tree_shard(wallet_core, programs, tree_id).await)
-            .next_index;
-    assert!(
-        next_index < TREE_LEAVES,
-        "the tree is full: all {TREE_LEAVES} leaves have been registered"
-    );
     let now_ms = read_clock_ms(wallet_core).await;
+    let already_at = find_leaf_index(
+        &fetch_tree_shard(wallet_core, programs, tree_id).await,
+        &leaf,
+    );
 
     let shard_selectors = vec![
         config_selector(programs, tree_id),
@@ -974,7 +996,6 @@ pub async fn register_identity(
         id_commitment: *id_commitment,
         rate_limit,
         merkle_program_id: config.merkle_program_id,
-        next_index,
         now_ms,
         price_per_unit: config.price_per_unit,
         active_duration_sec: config.active_duration_for_new_memberships_sec,
@@ -993,7 +1014,16 @@ pub async fn register_identity(
     )
     .await;
 
-    next_index
+    wait_for_leaf(
+        wallet_core,
+        programs,
+        tree_id,
+        &leaf,
+        already_at,
+        wait_account_attempts(),
+        Duration::from_millis(500),
+    )
+    .await
 }
 
 /// Renew a membership that is currently inside its grace period.
@@ -1074,6 +1104,7 @@ pub async fn erase_membership(
     let membership = read_membership(wallet_core, programs, tree_id, id_commitment)
         .await
         .expect("erase: no membership for this id_commitment");
+    let leaf_index = locate_membership_leaf(wallet_core, programs, tree_id, &membership).await;
     let now_ms = read_clock_ms(wallet_core).await;
 
     let shard_selectors = vec![
@@ -1089,7 +1120,7 @@ pub async fn erase_membership(
         tree_id: *tree_id,
         id_commitment: *id_commitment,
         merkle_program_id: config.merkle_program_id,
-        leaf_index: membership.leaf_index,
+        leaf_index,
         rate_limit: membership.rate_limit,
         now_ms,
     };
@@ -1126,6 +1157,7 @@ pub async fn slash_membership(
     let membership = read_membership(wallet_core, programs, tree_id, id_commitment)
         .await
         .expect("slash: no membership for this id_commitment");
+    let leaf_index = locate_membership_leaf(wallet_core, programs, tree_id, &membership).await;
 
     let shard_selectors = vec![
         config_selector(programs, tree_id),
@@ -1139,7 +1171,7 @@ pub async fn slash_membership(
         id_commitment: *id_commitment,
         identity_secret: *identity_secret,
         merkle_program_id: config.merkle_program_id,
-        leaf_index: membership.leaf_index,
+        leaf_index,
         rate_limit: membership.rate_limit,
     };
     let instruction_data =

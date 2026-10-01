@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use logos_lez_rln::{
     fr_bytes::fr_to_bytes_le,
-    merkle_tree::{get_merkle_proof, node_hash, proof_to_circuit, wait_for_leaf},
+    merkle_tree::{
+        fetch_tree_shard, find_leaf_index, get_merkle_proof, node_hash, proof_to_circuit,
+    },
     rln::{
         ProgramIds,
         client::{
@@ -82,20 +84,8 @@ async fn register(
         payer,
         RATE_LIMIT,
     )
-    .await;
-    assert!(
-        wait_for_leaf(
-            wallet,
-            programs,
-            tree_id,
-            leaf_index,
-            &identity.leaf_bytes,
-            240,
-            Duration::from_millis(500),
-        )
-        .await,
-        "leaf {leaf_index} never appeared on-chain"
-    );
+    .await
+    .expect("the leaf never appeared on-chain");
     (identity, leaf_index)
 }
 
@@ -155,8 +145,14 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let membership_a = read_membership(&wallet, &programs, &tree_id, &member_a.id_commitment_bytes)
         .await
         .expect("member A is registered");
-    assert_eq!(membership_a.leaf_index, leaf_a);
     assert_eq!(membership_a.rate_limit, RATE_LIMIT);
+    assert_eq!(
+        find_leaf_index(
+            &fetch_tree_shard(&wallet, &programs, &tree_id).await,
+            &member_a.leaf_bytes
+        ),
+        Some(leaf_a)
+    );
 
     // ── an RLN proof against the on-chain root verifies ───────────────
     let proof = get_merkle_proof(&wallet, &programs, &tree_id, leaf_a).await;
@@ -186,36 +182,33 @@ async fn registry_lifecycle_on_a_live_sequencer() {
 
     // ── a duplicate registration is refused ───────────────────────────
     let next_index = leaf_c + 1;
-    let _ = register_identity(
-        &wallet,
-        &programs,
-        &tree_id,
-        &member_a.id_commitment_bytes,
-        &payer,
-        RATE_LIMIT,
-    )
-    .await;
-    assert!(
-        !wait_for_leaf(
+    assert_eq!(
+        register_identity(
             &wallet,
             &programs,
             &tree_id,
-            next_index,
-            &member_a.leaf_bytes,
-            20,
-            Duration::from_millis(500),
+            &member_a.id_commitment_bytes,
+            &payer,
+            RATE_LIMIT,
         )
         .await,
+        None,
         "re-registering an existing commitment must not insert a leaf"
     );
     let config = read_config(&wallet, &programs, &tree_id).await;
     assert_eq!(config.total_registrations, 3);
-    assert_eq!(
+    assert!(
         read_membership(&wallet, &programs, &tree_id, &member_a.id_commitment_bytes)
             .await
-            .expect("still registered")
-            .leaf_index,
-        leaf_a
+            .is_some(),
+        "still registered"
+    );
+    assert_eq!(
+        find_leaf_index(
+            &fetch_tree_shard(&wallet, &programs, &tree_id).await,
+            &member_a.leaf_bytes
+        ),
+        Some(leaf_a)
     );
 
     // ── slash C by revealing its secret; C may then register again ────
@@ -240,7 +233,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let config = read_config(&wallet, &programs, &tree_id).await;
     assert_eq!(config.total_registrations, 2);
     assert_eq!(config.current_total_rate_limit, 2 * RATE_LIMIT);
-    let shard = logos_lez_rln::merkle_tree::fetch_tree_shard(&wallet, &programs, &tree_id).await;
+    let shard = fetch_tree_shard(&wallet, &programs, &tree_id).await;
     assert_eq!(
         node_hash(&shard, rln_layouts::TREE_DEPTH, leaf_c),
         ZERO_LEAF,
@@ -254,22 +247,11 @@ async fn registry_lifecycle_on_a_live_sequencer() {
         &payer,
         RATE_LIMIT,
     )
-    .await;
+    .await
+    .expect("C's second leaf never appeared on-chain");
     assert_eq!(
         leaf_c_again, next_index,
         "a slashed commitment registers at a new leaf"
-    );
-    assert!(
-        wait_for_leaf(
-            &wallet,
-            &programs,
-            &tree_id,
-            leaf_c_again,
-            &member_c.leaf_bytes,
-            240,
-            Duration::from_millis(500),
-        )
-        .await
     );
 
     // ── extend A once its grace period opens ──────────────────────────
@@ -334,7 +316,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let config = read_config(&wallet, &programs, &tree_id).await;
     assert_eq!(config.total_registrations, 2);
     assert_eq!(config.current_total_rate_limit, 2 * RATE_LIMIT);
-    let shard = logos_lez_rln::merkle_tree::fetch_tree_shard(&wallet, &programs, &tree_id).await;
+    let shard = fetch_tree_shard(&wallet, &programs, &tree_id).await;
     assert_eq!(
         node_hash(&shard, rln_layouts::TREE_DEPTH, leaf_b),
         ZERO_LEAF

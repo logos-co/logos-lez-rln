@@ -29,20 +29,20 @@ pub const CONFIG_OFFSET_ACTIVE_DURATION: usize = 136;
 pub const CONFIG_OFFSET_GRACE_PERIOD_DURATION: usize = 140;
 pub const CONFIG_SIZE: usize = rln_layouts::state::CONFIG_STATE_SIZE;
 
-// Layout source of truth: `rln_layouts::MembershipState`.
-pub const MEMBERSHIP_OFFSET_LEAF_INDEX: usize = 0;
-pub const MEMBERSHIP_OFFSET_RATE_LIMIT: usize = 8;
-pub const MEMBERSHIP_OFFSET_ID_COMMITMENT: usize = 16;
-pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP: usize = 48;
-pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = 56;
-pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize = 60;
-pub const MEMBERSHIP_SIZE: usize = 64;
+// Layout source of truth: `rln_layouts::MembershipState`. Same caveat as the
+// config: assert MEMBERSHIP_SIZE before trusting an offset.
+pub const MEMBERSHIP_OFFSET_RATE_LIMIT: usize = 0;
+pub const MEMBERSHIP_OFFSET_ID_COMMITMENT: usize = 8;
+pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP: usize = 40;
+pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = 48;
+pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize = 52;
+pub const MEMBERSHIP_SIZE: usize = rln_layouts::state::MEMBERSHIP_STATE_SIZE;
 
 pub use rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
 
 #[cfg(test)]
 mod tests {
-    use rln_layouts::ConfigState;
+    use rln_layouts::{ConfigState, MembershipState};
 
     use super::*;
 
@@ -127,5 +127,36 @@ mod tests {
             ),
             0x1213,
         );
+    }
+
+    #[test]
+    fn membership_offsets_match_the_shared_layout() {
+        let membership = MembershipState {
+            rate_limit: 0x0102,
+            id_commitment: [0x44; 32],
+            grace_period_start_timestamp_ms: 0x0304,
+            active_duration_sec: 0x0506,
+            grace_period_duration_sec: 0x0708,
+        };
+        let b = borsh::to_vec(&membership).expect("MembershipState serializes");
+        let u64_at = |off: usize| u64::from_le_bytes(b[off..off + 8].try_into().unwrap());
+        let u32_at = |off: usize| u32::from_le_bytes(b[off..off + 4].try_into().unwrap());
+
+        assert_eq!(
+            b.len(),
+            MEMBERSHIP_SIZE,
+            "MEMBERSHIP_SIZE tracks the layout"
+        );
+        assert_eq!(u64_at(MEMBERSHIP_OFFSET_RATE_LIMIT), 0x0102);
+        assert_eq!(
+            &b[MEMBERSHIP_OFFSET_ID_COMMITMENT..MEMBERSHIP_OFFSET_ID_COMMITMENT + 32],
+            &[0x44; 32]
+        );
+        assert_eq!(
+            u64_at(MEMBERSHIP_OFFSET_GRACE_PERIOD_START_TIMESTAMP),
+            0x0304
+        );
+        assert_eq!(u32_at(MEMBERSHIP_OFFSET_ACTIVE_DURATION), 0x0506);
+        assert_eq!(u32_at(MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION), 0x0708);
     }
 }

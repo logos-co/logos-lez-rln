@@ -6,10 +6,12 @@
 //!
 //! The programs sit at fixed header accounts (`REG_ID`, `MERKLE_ID`), seeded
 //! with `V03State::with_named_programs` the way a deployer's `CreateHeader`
-//! would place them; every PDA hangs off `REG_ID`. Instruction claims (tree
-//! `next_index`, clock timestamp, config price and callee) are read from the
-//! state just before a transaction is built, as the host client does, and the
-//! wrong-claim tests below mutate one claim at a time.
+//! would place them; every PDA hangs off `REG_ID`. Instruction claims (clock
+//! timestamp, config price and callee, membership rate limit) are read from
+//! the state just before a transaction is built, as the host client does, and
+//! the wrong-claim tests below mutate one claim at a time. Leaf indices are
+//! not claims: the tree assigns them, and slash/erase find theirs by scanning
+//! the tree, as the host client does.
 //!
 //! Run (the suite is feature-gated; see `lez-rln/CLAUDE.md`):
 //! ```bash
@@ -38,10 +40,11 @@ pub(crate) mod fixtures {
     use rln_layouts::{ConfigState, Instruction, MembershipState};
 
     use crate::{
-        merkle_tree::ParsedTreeMain,
+        merkle_tree::{ParsedTreeMain, find_leaf_index},
         rln::{
-            CLOCK_50_ACCOUNT_ID_BYTES, client::clock_selector, derive_config_account,
-            derive_membership_account, derive_tree_main_account,
+            CLOCK_50_ACCOUNT_ID_BYTES,
+            client::{clock_selector, registration_leaf},
+            derive_config_account, derive_membership_account, derive_tree_main_account,
         },
     };
 
@@ -221,6 +224,16 @@ pub(crate) mod fixtures {
         ParsedTreeMain::from_bytes(&tree_shard(state))
     }
 
+    /// Where the live membership of `id_commitment` sits in the tree, found
+    /// by scanning for its leaf.
+    pub fn leaf_index_of(state: &V03State, id_commitment: &[u8; 32]) -> Option<u64> {
+        let rate_limit = membership(state, id_commitment)?.rate_limit;
+        find_leaf_index(
+            &tree_shard(state),
+            &registration_leaf(id_commitment, rate_limit),
+        )
+    }
+
     pub fn clock_ms(state: &V03State) -> u64 {
         clock_core::ClockAccountData::from_bytes(&shard(state, clock_selector())).timestamp
     }
@@ -371,7 +384,6 @@ pub(crate) mod fixtures {
             id_commitment,
             rate_limit,
             merkle_program_id: config.merkle_program_id,
-            next_index: tree_header(state).next_index,
             now_ms: clock_ms(state),
             price_per_unit: config.price_per_unit,
             active_duration_sec: config.active_duration_for_new_memberships_sec,
@@ -431,14 +443,13 @@ pub(crate) mod fixtures {
         identity_secret: [u8; 32],
         id_commitment: [u8; 32],
     ) -> Instruction {
-        let membership = membership(state, &id_commitment);
         Instruction::Slash {
             tree_id: TREE_ID,
             id_commitment,
             identity_secret,
             merkle_program_id: config(state).merkle_program_id,
-            leaf_index: membership.as_ref().map_or(0, |m| m.leaf_index),
-            rate_limit: membership.as_ref().map_or(0, |m| m.rate_limit),
+            leaf_index: leaf_index_of(state, &id_commitment).unwrap_or(0),
+            rate_limit: membership(state, &id_commitment).map_or(0, |m| m.rate_limit),
         }
     }
 
@@ -497,13 +508,12 @@ pub(crate) mod fixtures {
     }
 
     pub fn erase_ix(state: &V03State, id_commitment: [u8; 32]) -> Instruction {
-        let membership = membership(state, &id_commitment);
         Instruction::Erase {
             tree_id: TREE_ID,
             id_commitment,
             merkle_program_id: config(state).merkle_program_id,
-            leaf_index: membership.as_ref().map_or(0, |m| m.leaf_index),
-            rate_limit: membership.as_ref().map_or(0, |m| m.rate_limit),
+            leaf_index: leaf_index_of(state, &id_commitment).unwrap_or(0),
+            rate_limit: membership(state, &id_commitment).map_or(0, |m| m.rate_limit),
             now_ms: clock_ms(state),
         }
     }
@@ -530,7 +540,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use nssa::{AccountId, ProgramShardSelector, V03State};
+    use nssa::{AccountId, ProgramShardSelector, PublicTransaction, V03State};
     use rand_chacha::ChaCha20Rng;
     use rln::prelude::{
         Fr, Hasher, IdentityKeys, PoseidonHash, RLNMerkleProof, RLNWitnessInput, hash_to_field_le,
@@ -543,17 +553,34 @@ mod tests {
     use super::fixtures::*;
     use crate::{
         fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
-        merkle_tree::{MerkleProof, cached_defaults, merkle_proof},
+        merkle_tree::{MerkleProof, cached_defaults, find_leaf_index, merkle_proof, node_hash},
         rln::{
             CONFIG_OFFSET_ACTIVE_DURATION, CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
             CONFIG_OFFSET_GRACE_PERIOD_DURATION, CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT,
             CONFIG_OFFSET_MERKLE_PROGRAM_ID, CONFIG_OFFSET_PRICE_PER_UNIT,
             CONFIG_OFFSET_TOTAL_REGISTRATIONS, CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
             CONFIG_OFFSET_TREE_ID, CONFIG_SIZE, MEMBERSHIP_SIZE, TREE_DEPTH,
-            client::clock_selector, derive_config_account, derive_membership_account,
-            derive_tree_main_account,
+            client::{clock_selector, registration_leaf},
+            derive_config_account, derive_membership_account, derive_tree_main_account,
         },
     };
+
+    /// `fee_core::market::MAX_GAS_EXEC`: one gas per cycle, summed over every
+    /// plan and apply session of a transaction.
+    const MAX_GAS_EXEC: u64 = 10_000_000;
+
+    /// Cycles a whole transaction costs against `state`, all sessions summed.
+    fn whole_tx_cycles(state: &V03State, tx: &PublicTransaction) -> u64 {
+        let (_diff, charge) = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
+            tx,
+            state,
+            1,
+            0,
+            MAX_GAS_EXEC,
+        )
+        .expect("the transaction should execute within the ceiling");
+        charge.cycles
+    }
 
     /// A valid BN254 field element with `seed` in the lowest byte.
     fn valid_field_element(seed: u8) -> [u8; 32] {
@@ -664,7 +691,6 @@ mod tests {
             &setup.state,
             vec![tree_selector(&TREE_ID, MERKLE_ID)],
             MerkleInstruction::Insert {
-                expected_index: 0,
                 leaf: valid_field_element(0x42),
             },
             MERKLE_ID,
@@ -894,7 +920,7 @@ mod tests {
             MEMBERSHIP_SIZE
         );
         let m = membership(&setup.state, &id_commitment).expect("membership shard exists");
-        assert_eq!(m.leaf_index, 0);
+        assert_eq!(leaf_index_of(&setup.state, &id_commitment), Some(0));
         assert_eq!(m.rate_limit, 300);
         assert_eq!(m.id_commitment, id_commitment);
         assert_eq!(
@@ -930,8 +956,8 @@ mod tests {
     }
 
     /// `next_index` only advances, and an index past the last leaf aliases
-    /// live nodes and produces a wrong root without failing. The register plan
-    /// refuses it.
+    /// live nodes and produces a wrong root without failing. The merkle insert
+    /// refuses it, and the whole registration with it.
     #[test]
     fn register_is_refused_once_every_leaf_index_is_used() {
         let mut setup = setup_or_skip();
@@ -945,14 +971,14 @@ mod tests {
             .with_shard(MERKLE_ID, data.try_into().unwrap());
         setup.state.force_insert_account(tree.account_id, account);
 
-        let tx = register_tx(
-            &setup,
-            register_ix(&setup.state, valid_field_element(0xC2), 100),
-        );
+        let idc = valid_field_element(0xC2);
+        let tx = register_tx(&setup, register_ix(&setup.state, idc, 100));
         assert!(
             apply(&mut setup.state, &tx).is_err(),
             "the tree must refuse a registration past its last leaf"
         );
+        assert!(membership(&setup.state, &idc).is_none());
+        assert_eq!(config(&setup.state).total_registrations, 0);
     }
 
     /// The membership init guard is the ONLY duplicate check: neither the
@@ -1017,23 +1043,54 @@ mod tests {
         );
     }
 
+    /// Two registrations built from the SAME pre-state — as two clients
+    /// reading the chain at the same height would build them — both land when
+    /// a block applies them back to back. Nothing in either names an index, so
+    /// neither can go stale because of the other: the tree gives the first
+    /// index 0 and the second index 1.
     #[test]
-    fn register_rejects_a_wrong_next_index_claim() {
+    fn same_block_registrations_compose() {
         let mut setup = setup_or_skip();
-        register(&mut setup, valid_field_element(0x01), 100);
+        let (key_b, payer_b) = keypair(3);
+        fund_native(&mut setup.state, &payer_b, DEFAULT_PAYER_BALANCE);
+        let (idc_a, idc_b) = (valid_field_element(0x0A), valid_field_element(0x0B));
 
-        let idc = valid_field_element(0x42);
-        let ix = register_ix(&setup.state, idc, 100);
-        assert_register_refused(
-            &mut setup,
-            with_claim!(ix.clone(), Register { next_index: 0 }),
-            "a next_index already taken",
+        let snapshot = &setup.state;
+        let tx_a = register_tx(&setup, register_ix(snapshot, idc_a, 100));
+        let tx_b = register_tx_to(
+            snapshot,
+            &key_b,
+            &payer_b,
+            &setup.treasury_id,
+            register_ix(snapshot, idc_b, 200),
         );
-        assert_register_refused(
-            &mut setup,
-            with_claim!(ix, Register { next_index: 2 }),
-            "a next_index ahead of the tree",
+
+        apply(&mut setup.state, &tx_a).expect("first registration of the block");
+        apply(&mut setup.state, &tx_b).expect("second registration, built from the same state");
+
+        let shard = tree_shard(&setup.state);
+        assert_eq!(tree_header(&setup.state).next_index, 2);
+        assert_eq!(
+            node_hash(&shard, TREE_DEPTH, 0),
+            registration_leaf(&idc_a, 100)
         );
+        assert_eq!(
+            node_hash(&shard, TREE_DEPTH, 1),
+            registration_leaf(&idc_b, 200)
+        );
+        assert_eq!(
+            find_leaf_index(&shard, &registration_leaf(&idc_a, 100)),
+            Some(0)
+        );
+        assert_eq!(
+            find_leaf_index(&shard, &registration_leaf(&idc_b, 200)),
+            Some(1)
+        );
+        assert_eq!(membership(&setup.state, &idc_a).unwrap().rate_limit, 100);
+        assert_eq!(membership(&setup.state, &idc_b).unwrap().rate_limit, 200);
+        let config = config(&setup.state);
+        assert_eq!(config.total_registrations, 2);
+        assert_eq!(config.current_total_rate_limit, 300);
     }
 
     #[test]
@@ -1236,7 +1293,8 @@ mod tests {
     }
 
     /// The leaf a slash removes is the membership's, not the caller's pick:
-    /// naming another member's leaf index must not evict that member.
+    /// naming another member's leaf index must not evict that member. The
+    /// index is a hint the merkle apply checks by content.
     #[test]
     fn slash_rejects_wrong_leaf_index_and_rate_limit_claims() {
         let mut setup = setup_or_skip();
@@ -1290,10 +1348,138 @@ mod tests {
         slash(&mut setup, secret, idc).expect("slash");
 
         register(&mut setup, idc, 300);
-        let m = membership(&setup.state, &idc).expect("re-registered");
-        assert_eq!(m.leaf_index, 1, "the old leaf index is never reused");
+        assert!(membership(&setup.state, &idc).is_some(), "re-registered");
+        assert_eq!(
+            leaf_index_of(&setup.state, &idc),
+            Some(1),
+            "the old leaf index is never reused"
+        );
+        assert_eq!(
+            node_hash(&tree_shard(&setup.state), TREE_DEPTH, 0),
+            [0; 32],
+            "the old leaf stays zeroed"
+        );
         assert_eq!(tree_header(&setup.state).next_index, 2);
         assert_eq!(config(&setup.state).total_registrations, 1);
+    }
+
+    /// Slash and erase name a leaf index the caller found by scanning; the
+    /// merkle apply removes it only if it holds `H(id_commitment,
+    /// rate_limit)`, and the membership apply has already pinned
+    /// `rate_limit`. Any other index, or the right index with the wrong rate
+    /// limit, fails the whole transaction and changes nothing.
+    #[test]
+    fn remove_refuses_a_wrong_index_or_leaf() {
+        let mut setup = setup_or_skip();
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let (_, idc_a) = slashable_identity(0x41);
+        let (secret_b, idc_b) = slashable_identity(0x42);
+        register(&mut setup, idc_a, 100);
+        register(&mut setup, idc_b, 300);
+        assert_eq!(leaf_index_of(&setup.state, &idc_a), Some(0));
+        assert_eq!(leaf_index_of(&setup.state, &idc_b), Some(1));
+        let leaf_a = registration_leaf(&idc_a, 100);
+
+        // Erase becomes legal once both have expired; slash is always legal.
+        set_clock_50(
+            &mut setup.state,
+            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
+            100,
+        );
+
+        let tree_before = tree_shard(&setup.state);
+        let config_before = config_bytes(&setup.state);
+        let membership_a_before = shard(&setup.state, membership_selector(&TREE_ID, &idc_a));
+        let membership_b_before = shard(&setup.state, membership_selector(&TREE_ID, &idc_b));
+
+        let slash_b = slash_ix(&setup.state, secret_b, idc_b);
+        let erase_b = erase_ix(&setup.state, idc_b);
+        let bad: Vec<(&str, PublicTransaction)> = vec![
+            (
+                "slash at A's index",
+                slash_tx(
+                    &setup.state,
+                    with_claim!(slash_b.clone(), Slash { leaf_index: 0 }),
+                ),
+            ),
+            (
+                "slash past next_index",
+                slash_tx(
+                    &setup.state,
+                    with_claim!(slash_b.clone(), Slash { leaf_index: 2 }),
+                ),
+            ),
+            (
+                "slash at B's index with A's rate limit",
+                slash_tx(
+                    &setup.state,
+                    with_claim!(slash_b.clone(), Slash { rate_limit: 100 }),
+                ),
+            ),
+            (
+                "erase at A's index",
+                erase_tx(
+                    &setup.state,
+                    with_claim!(erase_b.clone(), Erase { leaf_index: 0 }),
+                ),
+            ),
+            (
+                "erase at B's index with A's rate limit",
+                erase_tx(
+                    &setup.state,
+                    with_claim!(erase_b, Erase { rate_limit: 100 }),
+                ),
+            ),
+        ];
+        for (what, tx) in bad {
+            assert!(apply(&mut setup.state, &tx).is_err(), "{what} must fail");
+            assert_eq!(
+                tree_shard(&setup.state),
+                tree_before,
+                "{what}: tree untouched"
+            );
+            assert_eq!(
+                config_bytes(&setup.state),
+                config_before,
+                "{what}: config untouched"
+            );
+            assert_eq!(
+                shard(&setup.state, membership_selector(&TREE_ID, &idc_a)),
+                membership_a_before,
+                "{what}: A untouched"
+            );
+            assert_eq!(
+                shard(&setup.state, membership_selector(&TREE_ID, &idc_b)),
+                membership_b_before,
+                "{what}: B untouched"
+            );
+        }
+
+        // The right index: exactly B's leaf is zeroed.
+        let tx = slash_tx(&setup.state, slash_b);
+        apply(&mut setup.state, &tx).expect("slash at B's index");
+        let shard_after = tree_shard(&setup.state);
+        assert_eq!(
+            node_hash(&shard_after, TREE_DEPTH, 0),
+            leaf_a,
+            "A's leaf kept"
+        );
+        assert_eq!(
+            node_hash(&shard_after, TREE_DEPTH, 1),
+            [0; 32],
+            "B's leaf zeroed"
+        );
+        assert_eq!(tree_header(&setup.state).next_index, 2);
+        assert!(membership(&setup.state, &idc_a).is_some());
+        assert!(membership(&setup.state, &idc_b).is_none());
+        let after = config(&setup.state);
+        assert_eq!(after.total_registrations, 1);
+        assert_eq!(after.current_total_rate_limit, 100);
+
+        // And A, the other way out.
+        erase(&mut setup, idc_a).expect("erase at A's index");
+        assert_eq!(node_hash(&tree_shard(&setup.state), TREE_DEPTH, 0), [0; 32]);
+        assert_eq!(config(&setup.state).total_registrations, 0);
     }
 
     // ====================================================================
@@ -1484,23 +1670,13 @@ mod tests {
     /// cycle). Printed: the margin is what says whether a deeper tree fits.
     #[test]
     fn register_transaction_fits_the_gas_ceiling() {
-        const MAX_GAS_EXEC: u64 = 10_000_000;
         let setup = setup_or_skip();
         let tx = register_tx(
             &setup,
             register_ix(&setup.state, valid_field_element(0x42), 100),
         );
 
-        let (_diff, charge) = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
-            &tx,
-            &setup.state,
-            1,
-            0,
-            MAX_GAS_EXEC,
-        )
-        .expect("register should execute within the ceiling");
-
-        let used = charge.cycles;
+        let used = whole_tx_cycles(&setup.state, &tx);
         println!(
             "register transaction: {used} cycles ({:.1}% of MAX_GAS_EXEC), tree depth {TREE_DEPTH}",
             used as f64 / MAX_GAS_EXEC as f64 * 100.0
@@ -1509,6 +1685,38 @@ mod tests {
             used <= MAX_GAS_EXEC,
             "register costs {used} cycles against {MAX_GAS_EXEC}"
         );
+    }
+
+    /// Slash and erase hash the member's leaf in their plan (the merkle
+    /// `Remove` checks it by content) on top of a nine-level root update, so
+    /// they cost about one Poseidon more than a register.
+    #[test]
+    fn slash_and_erase_transactions_fit_the_gas_ceiling() {
+        let mut setup = setup_or_skip();
+        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        let (secret, idc) = slashable_identity(0x42);
+        register(&mut setup, idc, 100);
+
+        let slash = whole_tx_cycles(
+            &setup.state,
+            &slash_tx(&setup.state, slash_ix(&setup.state, secret, idc)),
+        );
+        set_clock_50(
+            &mut setup.state,
+            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
+            100,
+        );
+        let erase = whole_tx_cycles(
+            &setup.state,
+            &erase_tx(&setup.state, erase_ix(&setup.state, idc)),
+        );
+        for (what, used) in [("slash", slash), ("erase", erase)] {
+            println!(
+                "{what} transaction: {used} cycles ({:.1}% of MAX_GAS_EXEC)",
+                used as f64 / MAX_GAS_EXEC as f64 * 100.0
+            );
+            assert!(used <= MAX_GAS_EXEC, "{what} costs {used} cycles");
+        }
     }
 
     // ====================================================================
@@ -1999,8 +2207,8 @@ mod tests {
         erase(&mut setup, idc).expect("erase");
 
         register(&mut setup, idc, EXP_RATE_LIMIT);
-        let m = membership(&setup.state, &idc).expect("re-registered");
-        assert_eq!(m.leaf_index, 1);
+        assert!(membership(&setup.state, &idc).is_some(), "re-registered");
+        assert_eq!(leaf_index_of(&setup.state, &idc), Some(1));
         assert_eq!(
             config(&setup.state).current_total_rate_limit,
             EXP_RATE_LIMIT

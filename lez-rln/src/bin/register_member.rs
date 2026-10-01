@@ -5,17 +5,12 @@
 //! source dev/env.sh && cargo run --bin register_member -- --count 5  # batch
 //! ```
 
-use std::time::Duration;
-
-use logos_lez_rln::{
-    merkle_tree::wait_for_leaf,
-    rln::{
-        client::{
-            RlnIdentity, create_identity, init_wallet, register_identity, resolve_payer,
-            tree_id_from_env,
-        },
-        derive_config_account, program_ids_or_exit,
+use logos_lez_rln::rln::{
+    client::{
+        RlnIdentity, create_identity, init_wallet, register_identity, resolve_payer,
+        tree_id_from_env,
     },
+    derive_config_account, program_ids_or_exit,
 };
 
 const USER_MESSAGE_LIMIT: u64 = 100;
@@ -47,21 +42,13 @@ async fn main() {
             &user_holding_id,
             USER_MESSAGE_LIMIT,
         )
-        .await;
-
-        let finalized = wait_for_leaf(
-            &wallet_core,
-            &programs,
-            &tree_id,
-            leaf_index,
-            &leaf_bytes,
-            30,
-            Duration::from_millis(500),
-        )
-        .await;
-        if !finalized {
-            panic!("Timeout waiting for leaf {} to appear on-chain", leaf_index);
-        }
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "Timeout waiting for leaf 0x{} to appear on-chain",
+                hex::encode(leaf_bytes)
+            )
+        });
 
         println!("CONFIG_ACCOUNT={}", config_account_id);
         println!("LEAF_INDEX={}", leaf_index);

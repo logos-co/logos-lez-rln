@@ -103,6 +103,24 @@ pub fn node_hash(shard: &[u8], level: usize, index: u64) -> [u8; 32] {
     )
 }
 
+/// The index holding `leaf`, newest first, or `None` if no leaf below
+/// `next_index` holds it.
+///
+/// The tree assigns indices and no account records them, so this scan is how
+/// a client learns where its registration landed. Newest first, because a
+/// commitment re-registered after slash or erase lands at a new index while
+/// its old one reads zero.
+pub fn find_leaf_index(shard: &[u8], leaf: &[u8; 32]) -> Option<u64> {
+    let next_index = ParsedTreeMain::from_bytes(shard)
+        .next_index
+        .min(TREE_LEAVES);
+    let default = cached_defaults(shard)[TREE_DEPTH];
+    let nodes = &shard[OFFSET_TREE_DATA..];
+    (0..next_index)
+        .rev()
+        .find(|&i| read_sparse_node(nodes, TREE_DEPTH, i as usize, &default) == *leaf)
+}
+
 /// The inclusion proof of leaf `leaf_index` against the shard's current root.
 pub fn merkle_proof(shard: &[u8], leaf_index: u64) -> MerkleProof {
     assert!(
@@ -217,27 +235,32 @@ pub async fn fetch_node_hash(
     )
 }
 
-/// Polls until leaf `leaf_index` holds `expected_leaf` or `max_attempts` run
-/// out.
+/// Polls until a leaf holds `expected_leaf` at an index past `newer_than`
+/// and returns that index, or `None` once `max_attempts` run out.
+///
+/// `newer_than` is where the leaf already sat before the caller's insert, if
+/// anywhere: a re-registration refused on chain must not be mistaken for one
+/// that landed.
 pub async fn wait_for_leaf(
     wallet_core: &WalletCore,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
-    leaf_index: u64,
     expected_leaf: &[u8; 32],
+    newer_than: Option<u64>,
     max_attempts: u32,
     poll_interval: Duration,
-) -> bool {
+) -> Option<u64> {
     for _ in 0..max_attempts {
         let shard = fetch_tree_shard(wallet_core, programs, tree_id).await;
         if shard.len() >= OFFSET_TREE_DATA
-            && &node_hash(&shard, TREE_DEPTH, leaf_index) == expected_leaf
+            && let Some(index) = find_leaf_index(&shard, expected_leaf)
+            && newer_than.is_none_or(|old| index > old)
         {
-            return true;
+            return Some(index);
         }
         sleep(poll_interval).await;
     }
-    false
+    None
 }
 
 // ============================================================================
@@ -372,6 +395,28 @@ mod tests {
         }
         assert_eq!(proof.path_indices[..2], [0, 1]);
         assert!(proof.path_indices[2..].iter().all(|bit| *bit == 0));
+    }
+
+    /// Only indices below `next_index` are scanned, newest first.
+    #[test]
+    fn find_leaf_index_scans_below_next_index_newest_first() {
+        let mut shard = empty_shard();
+        shard[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8].copy_from_slice(&3u64.to_le_bytes());
+        let shard = with_nodes(
+            shard,
+            &[
+                (TREE_DEPTH, 0, [0x11; 32]),
+                (TREE_DEPTH, 2, [0x11; 32]),
+                (TREE_DEPTH, 3, [0x33; 32]),
+            ],
+        );
+        assert_eq!(find_leaf_index(&shard, &[0x11; 32]), Some(2));
+        assert_eq!(
+            find_leaf_index(&shard, &[0x33; 32]),
+            None,
+            "index 3 is past next_index"
+        );
+        assert_eq!(find_leaf_index(&shard, &[0x44; 32]), None);
     }
 
     #[test]

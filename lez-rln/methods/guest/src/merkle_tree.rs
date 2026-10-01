@@ -48,8 +48,8 @@ use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_elemen
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Initialize,
-    Insert { expected_index: u64, leaf: [u8; 32] },
-    Remove { index: u64 },
+    Insert { leaf: [u8; 32] },
+    Remove { index: u64, leaf: [u8; 32] },
     Set { index: u64, leaf: [u8; 32] },
 }
 
@@ -57,14 +57,8 @@ impl From<MerkleInstruction> for Effect {
     fn from(ix: MerkleInstruction) -> Self {
         match ix {
             MerkleInstruction::Initialize => Self::Initialize,
-            MerkleInstruction::Insert {
-                expected_index,
-                leaf,
-            } => Self::Insert {
-                expected_index,
-                leaf,
-            },
-            MerkleInstruction::Remove { index } => Self::Remove { index },
+            MerkleInstruction::Insert { leaf } => Self::Insert { leaf },
+            MerkleInstruction::Remove { index, leaf } => Self::Remove { index, leaf },
             MerkleInstruction::Set { index, leaf } => Self::Set { index, leaf },
         }
     }
@@ -101,11 +95,8 @@ pub fn plan(input: &PlanInput, ix: MerkleInstruction) -> Plan {
 pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
     Some(match effect {
         Effect::Initialize => initialize_tree(pre_data),
-        Effect::Insert {
-            expected_index,
-            leaf,
-        } => insert_leaf(pre_data, expected_index, &leaf),
-        Effect::Remove { index } => remove_leaf(pre_data, index),
+        Effect::Insert { leaf } => insert_leaf(pre_data, &leaf),
+        Effect::Remove { index, leaf } => remove_leaf(pre_data, index, &leaf),
         Effect::Set { index, leaf } => set_leaf(pre_data, index, &leaf),
     })
 }
@@ -127,20 +118,17 @@ pub fn initialize_tree(pre_data: &[u8]) -> Vec<u8> {
 
 /// Write `leaf` at `next_index` and advance `next_index`.
 ///
+/// The tree assigns the index: the caller never names one, so two inserts
+/// planned against the same tree state land at consecutive indices instead of
+/// contending for one.
+///
 /// # Panics
-/// - `expected_index != next_index` (inserts are sequential)
 /// - the tree is full (`next_index >= TREE_LEAVES`)
 /// - `leaf` is not a BN254 field element
-pub fn insert_leaf(pre_data: &[u8], expected_index: u64, leaf: &[u8; 32]) -> Vec<u8> {
+pub fn insert_leaf(pre_data: &[u8], leaf: &[u8; 32]) -> Vec<u8> {
     check_header(pre_data);
     validate_field_element(leaf);
     let next_index = read_next_index(pre_data);
-    assert!(
-        expected_index == next_index,
-        "Insert must be sequential: expected index {} but tree next_index is {}",
-        expected_index,
-        next_index
-    );
     // Node offsets are computed with no per-level bound, so an index past the
     // last leaf lands on live nodes of the level below and yields a wrong root
     // without failing.
@@ -155,12 +143,18 @@ pub fn insert_leaf(pre_data: &[u8], expected_index: u64, leaf: &[u8; 32]) -> Vec
     data
 }
 
-/// Zero the leaf at `index`. `next_index` is unchanged: an erased index is
-/// never reused by `Insert`.
+/// Zero the leaf at `index`, which must hold `leaf`. `next_index` is
+/// unchanged: an erased index is never reused by `Insert`.
+///
+/// `index` is the caller's hint and `leaf` what makes it safe: the caller
+/// cannot read the tree, so the index is checked by content, and naming
+/// another member's index (or a rate limit that is not the member's) removes
+/// nothing.
 ///
 /// # Panics
-/// If `index >= next_index`.
-pub fn remove_leaf(pre_data: &[u8], index: u64) -> Vec<u8> {
+/// - `index >= next_index`
+/// - the leaf at `index` is not `leaf`
+pub fn remove_leaf(pre_data: &[u8], index: u64, leaf: &[u8; 32]) -> Vec<u8> {
     check_header(pre_data);
     let next_index = read_next_index(pre_data);
     assert!(
@@ -168,6 +162,18 @@ pub fn remove_leaf(pre_data: &[u8], index: u64) -> Vec<u8> {
         "Cannot remove leaf at index {} when next_index is {}",
         index,
         next_index
+    );
+    let cached_nodes = extract_cached_nodes(pre_data);
+    let current = read_sparse_node(
+        &pre_data[OFFSET_TREE_DATA..],
+        TREE_DEPTH,
+        index as usize,
+        &cached_nodes[TREE_DEPTH],
+    );
+    assert!(
+        current == *leaf,
+        "leaf at index {} is not this member's",
+        index
     );
     update_leaf(pre_data, index as usize, &ZERO)
 }
@@ -394,7 +400,7 @@ mod tests {
 
     /// A fresh tree with `count` sequential leaves.
     fn insert_n_leaves(count: u64) -> Vec<u8> {
-        (0..count).fold(initialized(), |data, i| insert_leaf(&data, i, &leaf_for(i)))
+        (0..count).fold(initialized(), |data, i| insert_leaf(&data, &leaf_for(i)))
     }
 
     // ========================================================================
@@ -421,23 +427,14 @@ mod tests {
     #[test]
     fn test_plan_emits_one_effect_on_tree_shard() {
         let input = plan_input(vec![tree_main(true)]);
-        let ix = MerkleInstruction::Insert {
-            expected_index: 3,
-            leaf: [5; 32],
-        };
+        let ix = MerkleInstruction::Insert { leaf: [5; 32] };
         let plan = plan(&input, ix);
         let effects = &plan.output().effects;
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].selector.account_id, AccountId::new([1; 32]));
         assert_eq!(effects[0].selector.program_account_id, merkle_program_id());
         let effect: Effect = borsh::from_slice(&effects[0].data).unwrap();
-        assert_eq!(
-            effect,
-            Effect::Insert {
-                expected_index: 3,
-                leaf: [5; 32]
-            }
-        );
+        assert_eq!(effect, Effect::Insert { leaf: [5; 32] });
     }
 
     #[test]
@@ -468,16 +465,16 @@ mod tests {
     #[test]
     fn test_apply_dispatches_every_effect() {
         let data = apply(Effect::Initialize, &[]).unwrap();
+        let data = apply(Effect::Insert { leaf: [1; 32] }, &data).unwrap();
+        assert_eq!(read_next_index(&data), 1);
         let data = apply(
-            Effect::Insert {
-                expected_index: 0,
+            Effect::Remove {
+                index: 0,
                 leaf: [1; 32],
             },
             &data,
         )
         .unwrap();
-        assert_eq!(read_next_index(&data), 1);
-        let data = apply(Effect::Remove { index: 0 }, &data).unwrap();
         assert_eq!(read_root(&data), compute_default_hashes(TREE_DEPTH)[0]);
         let data = apply(
             Effect::Set {
@@ -533,7 +530,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "tree not initialized")]
     fn test_insert_into_uninitialized_shard_panics() {
-        let _ = insert_leaf(&[], 0, &[1; 32]);
+        let _ = insert_leaf(&[], &[1; 32]);
     }
 
     // ========================================================================
@@ -543,7 +540,7 @@ mod tests {
     #[test]
     fn test_insert_first_leaf() {
         let pre = initialized();
-        let post = insert_leaf(&pre, 0, &[42; 32]);
+        let post = insert_leaf(&pre, &[42; 32]);
         assert_eq!(read_next_index(&post), 1);
         assert_ne!(read_root(&post), read_root(&pre));
         assert!(post.len() > OFFSET_TREE_DATA);
@@ -554,16 +551,22 @@ mod tests {
         );
     }
 
+    /// Two inserts planned from the same tree state: the second lands at the
+    /// next index, not on top of the first.
     #[test]
-    #[should_panic(expected = "Insert must be sequential")]
-    fn test_insert_wrong_index_panics() {
-        let _ = insert_leaf(&initialized(), 1, &[42; 32]);
+    fn test_insert_takes_the_index_from_the_tree() {
+        let one = insert_leaf(&initialized(), &[1; 32]);
+        let two = insert_leaf(&one, &[2; 32]);
+        let nodes = &two[OFFSET_TREE_DATA..];
+        let default = compute_default_hashes(TREE_DEPTH)[TREE_DEPTH];
+        assert_eq!(read_sparse_node(nodes, TREE_DEPTH, 0, &default), [1; 32]);
+        assert_eq!(read_sparse_node(nodes, TREE_DEPTH, 1, &default), [2; 32]);
     }
 
     #[test]
     #[should_panic(expected = "not a valid BN254 field element")]
     fn test_insert_rejects_non_field_leaf() {
-        let _ = insert_leaf(&initialized(), 0, &[0xFF; 32]);
+        let _ = insert_leaf(&initialized(), &[0xFF; 32]);
     }
 
     #[test]
@@ -571,13 +574,13 @@ mod tests {
     fn test_insert_rejects_foreign_depth() {
         let mut data = initialized();
         data[OFFSET_DEPTH] = (TREE_DEPTH + 1) as u8;
-        let _ = insert_leaf(&data, 0, &[1; 32]);
+        let _ = insert_leaf(&data, &[1; 32]);
     }
 
     #[test]
     fn test_insert_two_leaves_sequential() {
-        let one = insert_leaf(&initialized(), 0, &[1; 32]);
-        let two = insert_leaf(&one, 1, &[2; 32]);
+        let one = insert_leaf(&initialized(), &[1; 32]);
+        let two = insert_leaf(&one, &[2; 32]);
         assert_eq!(read_next_index(&two), 2);
         assert_ne!(read_root(&two), read_root(&one));
     }
@@ -617,35 +620,51 @@ mod tests {
     #[test]
     #[should_panic(expected = "Cannot remove leaf at index 0 when next_index is 0")]
     fn test_remove_nonexistent_leaf_panics() {
-        let _ = remove_leaf(&initialized(), 0);
+        let _ = remove_leaf(&initialized(), 0, &[42; 32]);
     }
 
     #[test]
     fn test_remove_leaf_updates_root() {
-        let inserted = insert_leaf(&initialized(), 0, &[42; 32]);
-        let removed = remove_leaf(&inserted, 0);
+        let inserted = insert_leaf(&initialized(), &[42; 32]);
+        let removed = remove_leaf(&inserted, 0, &[42; 32]);
         assert_ne!(read_root(&removed), read_root(&inserted));
     }
 
     #[test]
     fn test_remove_leaf_restores_original_root() {
         let empty = initialized();
-        let inserted = insert_leaf(&empty, 0, &[42; 32]);
-        let removed = remove_leaf(&inserted, 0);
+        let inserted = insert_leaf(&empty, &[42; 32]);
+        let removed = remove_leaf(&inserted, 0, &[42; 32]);
         assert_eq!(read_root(&removed), read_root(&empty));
     }
 
     #[test]
     fn test_remove_does_not_change_next_index() {
-        let inserted = insert_leaf(&initialized(), 0, &[42; 32]);
+        let inserted = insert_leaf(&initialized(), &[42; 32]);
         assert_eq!(read_next_index(&inserted), 1);
-        assert_eq!(read_next_index(&remove_leaf(&inserted, 0)), 1);
+        assert_eq!(read_next_index(&remove_leaf(&inserted, 0, &[42; 32])), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "leaf at index 0 is not this member's")]
+    fn test_remove_refuses_a_leaf_that_is_not_the_named_one() {
+        let two = insert_n_leaves(2);
+        let _ = remove_leaf(&two, 0, &leaf_for(1));
+    }
+
+    /// A removed leaf reads as zero, so naming it again fails the content
+    /// check instead of re-zeroing it.
+    #[test]
+    #[should_panic(expected = "is not this member's")]
+    fn test_remove_refuses_an_already_removed_leaf() {
+        let removed = remove_leaf(&insert_n_leaves(1), 0, &leaf_for(0));
+        let _ = remove_leaf(&removed, 0, &leaf_for(0));
     }
 
     #[test]
     fn test_remove_second_leaf_of_two() {
         let two = insert_n_leaves(2);
-        let removed = remove_leaf(&two, 1);
+        let removed = remove_leaf(&two, 1, &leaf_for(1));
         assert_ne!(read_root(&removed), read_root(&two));
         assert_eq!(read_root(&removed), read_root(&insert_n_leaves(1)));
     }
@@ -664,8 +683,8 @@ mod tests {
 
     #[test]
     fn test_set_after_remove_matches_insert() {
-        let inserted = insert_leaf(&initialized(), 0, &[3; 32]);
-        let reset = set_leaf(&remove_leaf(&inserted, 0), 0, &[3; 32]);
+        let inserted = insert_leaf(&initialized(), &[3; 32]);
+        let reset = set_leaf(&remove_leaf(&inserted, 0, &[3; 32]), 0, &[3; 32]);
         assert_eq!(read_root(&reset), read_root(&inserted));
         assert_eq!(read_next_index(&reset), 1);
     }
@@ -729,7 +748,7 @@ mod tests {
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
         let pre = create_main_account_data_with_state(last_index, cached_nodes[0], &cached_nodes);
 
-        let post = insert_leaf(&pre, last_index, &[1; 32]);
+        let post = insert_leaf(&pre, &[1; 32]);
         assert_eq!(read_next_index(&post), last_index + 1);
         assert_ne!(read_root(&post), cached_nodes[0]);
     }
@@ -740,8 +759,8 @@ mod tests {
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
         let pre = create_main_account_data_with_state(last_index, cached_nodes[0], &cached_nodes);
 
-        let inserted = insert_leaf(&pre, last_index, &[1; 32]);
-        let removed = remove_leaf(&inserted, last_index);
+        let inserted = insert_leaf(&pre, &[1; 32]);
+        let removed = remove_leaf(&inserted, last_index, &[1; 32]);
         assert_ne!(read_root(&removed), read_root(&inserted));
         assert_eq!(read_root(&removed), cached_nodes[0]);
     }
@@ -749,10 +768,9 @@ mod tests {
     #[test]
     fn test_first_and_last_leaf_give_different_roots() {
         let cached_nodes = compute_default_hashes(TREE_DEPTH);
-        let first = insert_leaf(&initialized(), 0, &[1; 32]);
+        let first = insert_leaf(&initialized(), &[1; 32]);
         let last = insert_leaf(
             &create_main_account_data_with_state(TREE_LEAVES - 1, cached_nodes[0], &cached_nodes),
-            TREE_LEAVES - 1,
             &[1; 32],
         );
         assert_ne!(read_root(&first), read_root(&last));
@@ -761,9 +779,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "tree is full")]
     fn test_insert_past_the_last_leaf_is_refused() {
-        let mut data = insert_leaf(&initialized(), 0, &[1; 32]);
+        let mut data = insert_leaf(&initialized(), &[1; 32]);
         data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8].copy_from_slice(&TREE_LEAVES.to_le_bytes());
-        let _ = insert_leaf(&data, TREE_LEAVES, &[2; 32]);
+        let _ = insert_leaf(&data, &[2; 32]);
     }
 
     #[test]
@@ -774,7 +792,7 @@ mod tests {
 
         let emptied = (0..TREE_LEAVES)
             .rev()
-            .fold(full, |data, i| remove_leaf(&data, i));
+            .fold(full, |data, i| remove_leaf(&data, i, &leaf_for(i)));
         assert_eq!(
             read_root(&emptied),
             empty_root,

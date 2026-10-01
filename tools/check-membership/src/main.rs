@@ -23,7 +23,7 @@
 use borsh::BorshDeserialize;
 use rln_layouts::{
     clock_program_account_id, combine_seeds, is_expired, is_in_grace_period, label_seed,
-    secs_to_millis, MembershipState, CLOCK_50_ACCOUNT_ID_BYTES,
+    secs_to_millis, state::MEMBERSHIP_STATE_SIZE, MembershipState, CLOCK_50_ACCOUNT_ID_BYTES,
 };
 use sha2::{Digest, Sha256};
 
@@ -35,7 +35,6 @@ const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co/";
 // construction are the deployed program's, mirrored from the module's
 // rln_core::derive_pda; pinned by `derives_known_membership_account`.
 const PDA_PREFIX: &[u8; 32] = b"/LEE/v0.2/AccountId/PDA/\x00\x00\x00\x00\x00\x00\x00\x00";
-const MEMBERSHIP_STATE_SIZE: usize = 64;
 
 struct Config {
     tree_id: [u8; 32],
@@ -229,7 +228,6 @@ fn report_registered(json: bool, state: &MembershipState, status: &str, now_ms: 
             serde_json::json!({
                 "registered": true,
                 "state": status,
-                "leaf_index": state.leaf_index,
                 "rate_limit": state.rate_limit,
                 "grace_period_start_timestamp": state.grace_period_start_timestamp_ms,
                 "grace_period_duration": state.grace_period_duration_sec,
@@ -238,8 +236,8 @@ fn report_registered(json: bool, state: &MembershipState, status: &str, now_ms: 
         );
     } else {
         println!(
-            "\u{2713} Registered \u{2014} state: {status}, leaf index: {}, rate limit: {}",
-            state.leaf_index, state.rate_limit
+            "\u{2713} Registered \u{2014} state: {status}, rate limit: {}",
+            state.rate_limit
         );
     }
 }

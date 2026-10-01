@@ -14,8 +14,8 @@ use nssa_core::{
     program::{AccountMeta, ChainedCall, PdaSeed, Plan, PlanInput},
 };
 use rln_layouts::{
-    ConfigState, Instruction, MembershipState, MerkleInstruction, TREE_LEAVES, combine_seeds,
-    is_expired, is_in_grace_period, label_seed, secs_to_millis,
+    ConfigState, Instruction, MembershipState, MerkleInstruction, combine_seeds, is_expired,
+    is_in_grace_period, label_seed, secs_to_millis,
 };
 
 use crate::{
@@ -63,7 +63,6 @@ pub enum Effect {
     /// Membership shard: assert the claims, then clear.
     SlashMembership {
         id_commitment: [u8; 32],
-        leaf_index: u64,
         rate_limit: u64,
     },
     /// Config shard: assert the renewal's price and payee; keep.
@@ -74,12 +73,8 @@ pub enum Effect {
     },
     /// Membership shard: assert the claim and the grace window, then renew.
     ExtendMembership { now_ms: u64, rate_limit: u64 },
-    /// Membership shard: assert the claims and expiry, then clear.
-    EraseMembership {
-        now_ms: u64,
-        leaf_index: u64,
-        rate_limit: u64,
-    },
+    /// Membership shard: assert the claim and expiry, then clear.
+    EraseMembership { now_ms: u64, rate_limit: u64 },
 }
 
 // ─── PDA seeds ─────────────────────────────────────────────────────────
@@ -257,7 +252,6 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             id_commitment,
             rate_limit,
             merkle_program_id,
-            next_index,
             now_ms,
             price_per_unit,
             active_duration_sec,
@@ -277,10 +271,6 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             );
             require_clock_account(clock);
             assert!(payer.is_authorized, "Payer must authorize payment");
-            assert!(
-                next_index < TREE_LEAVES,
-                "TreeFull: every leaf index has been used"
-            );
 
             plan.effect(
                 config,
@@ -298,7 +288,6 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(
                 membership,
                 &Effect::InitMembership(MembershipState {
-                    leaf_index: next_index,
                     rate_limit,
                     id_commitment,
                     grace_period_start_timestamp_ms: now_ms
@@ -312,15 +301,14 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 treasury,
                 calculate_payment_amount(rate_limit, price_per_unit),
             ));
-            // The merkle insert asserts `expected_index` against the tree's
-            // `next_index`, which is what validates the membership's claimed
-            // `leaf_index`.
+            // The tree picks the index (its `next_index`) and refuses a full
+            // tree; nothing here names one, so registrations planned against
+            // the same tree state do not contend.
             plan.call(merkle_call(
                 merkle_program_id,
                 tree_main,
                 &tree_id,
                 &MerkleInstruction::Insert {
-                    expected_index: next_index,
                     leaf: compute_registration_leaf(&id_commitment, rate_limit),
                 },
             ));
@@ -361,15 +349,20 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 membership,
                 &Effect::SlashMembership {
                     id_commitment,
-                    leaf_index,
                     rate_limit,
                 },
             );
+            // `leaf_index` is a hint; the merkle apply removes it only if it
+            // holds this membership's leaf, whose `rate_limit` the membership
+            // apply has just asserted.
             plan.call(merkle_call(
                 merkle_program_id,
                 tree_main,
                 &tree_id,
-                &MerkleInstruction::Remove { index: leaf_index },
+                &MerkleInstruction::Remove {
+                    index: leaf_index,
+                    leaf: compute_registration_leaf(&id_commitment, rate_limit),
+                },
             ));
         }
         // Renewal is priced, not permissioned: the membership records no
@@ -440,19 +433,16 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 },
             );
             plan.inspect(clock, clock.program_account_id, &Effect::ClockIs(now_ms));
-            plan.effect(
-                membership,
-                &Effect::EraseMembership {
-                    now_ms,
-                    leaf_index,
-                    rate_limit,
-                },
-            );
+            plan.effect(membership, &Effect::EraseMembership { now_ms, rate_limit });
+            // As for Slash: the index is checked by content.
             plan.call(merkle_call(
                 merkle_program_id,
                 tree_main,
                 &tree_id,
-                &MerkleInstruction::Remove { index: leaf_index },
+                &MerkleInstruction::Remove {
+                    index: leaf_index,
+                    leaf: compute_registration_leaf(&id_commitment, rate_limit),
+                },
             ));
         }
     }
@@ -568,7 +558,6 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         }
         Effect::SlashMembership {
             id_commitment,
-            leaf_index,
             rate_limit,
         } => {
             let membership = decode_membership(
@@ -578,10 +567,6 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             assert!(
                 membership.id_commitment == id_commitment,
                 "membership id_commitment mismatch"
-            );
-            assert!(
-                membership.leaf_index == leaf_index,
-                "leaf_index claim must match membership"
             );
             assert!(
                 membership.rate_limit == rate_limit,
@@ -626,17 +611,9 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 .saturating_add(secs_to_millis(membership.active_duration_sec));
             Some(encode(&membership))
         }
-        Effect::EraseMembership {
-            now_ms,
-            leaf_index,
-            rate_limit,
-        } => {
+        Effect::EraseMembership { now_ms, rate_limit } => {
             let membership =
                 decode_membership(pre_data, "Membership account is empty - nothing to erase");
-            assert!(
-                membership.leaf_index == leaf_index,
-                "leaf_index claim must match membership"
-            );
             assert!(
                 membership.rate_limit == rate_limit,
                 "rate_limit claim must match membership"
@@ -747,7 +724,6 @@ mod tests {
 
     fn membership_state(grace_start_ms: u64) -> MembershipState {
         MembershipState {
-            leaf_index: 5,
             rate_limit: RATE,
             id_commitment: commitment(),
             grace_period_start_timestamp_ms: grace_start_ms,
@@ -756,13 +732,12 @@ mod tests {
         }
     }
 
-    fn register_ix(next_index: u64) -> Instruction {
+    fn register_ix() -> Instruction {
         Instruction::Register {
             tree_id: TREE_ID,
             id_commitment: commitment(),
             rate_limit: RATE,
             merkle_program_id: MERKLE,
-            next_index,
             now_ms: NOW_MS,
             price_per_unit: PRICE,
             active_duration_sec: ACTIVE_SEC,
@@ -920,7 +895,7 @@ mod tests {
 
     #[test]
     fn plan_register_emits_effects_payment_then_insert() {
-        let plan = plan(&input(register_accounts()), register_ix(5));
+        let plan = plan(&input(register_accounts()), register_ix());
         let out = plan.output();
         assert_eq!(
             out.effects,
@@ -949,7 +924,6 @@ mod tests {
             vec![
                 expected_payment(u128::from(RATE) * PRICE),
                 expected_merkle(&MerkleInstruction::Insert {
-                    expected_index: 5,
                     leaf: compute_registration_leaf(&commitment(), RATE),
                 }),
             ]
@@ -961,7 +935,7 @@ mod tests {
     fn plan_register_rejects_unauthorized_payer() {
         let mut accounts = register_accounts();
         accounts[2] = payer_meta(false);
-        let _ = plan(&input(accounts), register_ix(5));
+        let _ = plan(&input(accounts), register_ix());
     }
 
     #[test]
@@ -973,7 +947,7 @@ mod tests {
             false,
             clock_core::clock_account_id(),
         );
-        let _ = plan(&input(accounts), register_ix(5));
+        let _ = plan(&input(accounts), register_ix());
     }
 
     #[test]
@@ -985,7 +959,7 @@ mod tests {
             false,
             self_id(),
         );
-        let _ = plan(&input(accounts), register_ix(5));
+        let _ = plan(&input(accounts), register_ix());
     }
 
     #[test]
@@ -993,13 +967,7 @@ mod tests {
     fn plan_register_rejects_foreign_membership_shard() {
         let mut accounts = register_accounts();
         accounts[5].program_account_id = AccountId::new(MERKLE);
-        let _ = plan(&input(accounts), register_ix(5));
-    }
-
-    #[test]
-    #[should_panic(expected = "TreeFull")]
-    fn plan_register_rejects_full_tree() {
-        let _ = plan(&input(register_accounts()), register_ix(TREE_LEAVES));
+        let _ = plan(&input(accounts), register_ix());
     }
 
     #[test]
@@ -1007,7 +975,7 @@ mod tests {
     fn plan_register_rejects_wrong_account_count() {
         let mut accounts = register_accounts();
         accounts.pop();
-        let _ = plan(&input(accounts), register_ix(5));
+        let _ = plan(&input(accounts), register_ix());
     }
 
     #[test]
@@ -1038,7 +1006,6 @@ mod tests {
                     &membership_meta(),
                     &Effect::SlashMembership {
                         id_commitment: commitment(),
-                        leaf_index: 5,
                         rate_limit: RATE
                     }
                 ),
@@ -1046,7 +1013,10 @@ mod tests {
         );
         assert_eq!(
             plan.output().chained_calls,
-            vec![expected_merkle(&MerkleInstruction::Remove { index: 5 })]
+            vec![expected_merkle(&MerkleInstruction::Remove {
+                index: 5,
+                leaf: compute_registration_leaf(&commitment(), RATE),
+            })]
         );
     }
 
@@ -1168,7 +1138,6 @@ mod tests {
                     &membership_meta(),
                     &Effect::EraseMembership {
                         now_ms: NOW_MS,
-                        leaf_index: 5,
                         rate_limit: RATE
                     }
                 ),
@@ -1176,7 +1145,10 @@ mod tests {
         );
         assert_eq!(
             plan.output().chained_calls,
-            vec![expected_merkle(&MerkleInstruction::Remove { index: 5 })]
+            vec![expected_merkle(&MerkleInstruction::Remove {
+                index: 5,
+                leaf: compute_registration_leaf(&commitment(), RATE),
+            })]
         );
     }
 
@@ -1380,7 +1352,6 @@ mod tests {
         let out = apply(
             Effect::SlashMembership {
                 id_commitment: commitment(),
-                leaf_index: 5,
                 rate_limit: RATE,
             },
             &encode(&membership_state(7)),
@@ -1389,25 +1360,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "leaf_index claim must match membership")]
-    fn apply_slash_membership_rejects_wrong_leaf_claim() {
-        let _ = apply(
-            Effect::SlashMembership {
-                id_commitment: commitment(),
-                leaf_index: 6,
-                rate_limit: RATE,
-            },
-            &encode(&membership_state(7)),
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "rate_limit claim must match membership")]
     fn apply_slash_membership_rejects_wrong_rate_claim() {
         let _ = apply(
             Effect::SlashMembership {
                 id_commitment: commitment(),
-                leaf_index: 5,
                 rate_limit: RATE - 1,
             },
             &encode(&membership_state(7)),
@@ -1420,7 +1377,6 @@ mod tests {
         let _ = apply(
             Effect::SlashMembership {
                 id_commitment: commitment(),
-                leaf_index: 5,
                 rate_limit: RATE,
             },
             &[],
@@ -1501,7 +1457,6 @@ mod tests {
         let out = apply(
             Effect::EraseMembership {
                 now_ms: NOW_MS,
-                leaf_index: 5,
                 rate_limit: RATE,
             },
             &encode(&membership_state(start)),
@@ -1515,7 +1470,6 @@ mod tests {
         let _ = apply(
             Effect::EraseMembership {
                 now_ms: NOW_MS,
-                leaf_index: 5,
                 rate_limit: RATE,
             },
             &encode(&membership_state(NOW_MS - 10)),
@@ -1529,7 +1483,6 @@ mod tests {
         let _ = apply(
             Effect::EraseMembership {
                 now_ms: NOW_MS,
-                leaf_index: 5,
                 rate_limit: RATE + 1,
             },
             &encode(&membership_state(start)),
