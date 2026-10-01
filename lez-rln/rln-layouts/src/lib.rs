@@ -30,6 +30,8 @@ pub use state::{ConfigState, MembershipState};
 pub mod instruction;
 pub use instruction::{Instruction, MerkleInstruction};
 
+pub mod exit;
+
 // ============================================================================
 // Rate Limit Constraints
 // ============================================================================

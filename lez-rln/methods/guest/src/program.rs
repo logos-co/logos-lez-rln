@@ -14,11 +14,16 @@ use nssa_core::{
     program::{AccountMeta, ChainedCall, PdaSeed, Plan, PlanInput},
 };
 use rln_layouts::{
-    ConfigState, Instruction, MembershipState, MerkleInstruction, combine_seeds, is_expired,
-    is_in_grace_period, label_seed, secs_to_millis,
+    ConfigState, Instruction, MembershipState, MerkleInstruction, combine_seeds,
+    exit::{
+        EXIT_MEMBERSHIP_EXISTS, EXIT_MEMBERSHIP_MISSING, EXIT_NOT_EXPIRED,
+        EXIT_NOT_IN_GRACE_PERIOD, EXIT_RATE_LIMIT_FULL, EXIT_STALE_CONFIG, EXIT_STALE_RATE_LIMIT,
+    },
+    is_expired, is_in_grace_period, label_seed, secs_to_millis,
 };
 
 use crate::{
+    ensure,
     hash::{hash_single, validate_field_element},
     registration::{
         assert_clock_is, calculate_payment_amount, compute_registration_leaf,
@@ -459,8 +464,10 @@ fn decode_config(pre_data: &[u8]) -> ConfigState {
     ConfigState::try_from_slice(pre_data).expect("decode ConfigState")
 }
 
+/// An empty shard means the membership was slashed or erased since the
+/// caller read it: a stale view, not a malformed transaction.
 fn decode_membership(pre_data: &[u8], empty_msg: &str) -> MembershipState {
-    assert!(!pre_data.is_empty(), "{empty_msg}");
+    ensure!(!pre_data.is_empty(), EXIT_MEMBERSHIP_MISSING, "{empty_msg}");
     MembershipState::try_from_slice(pre_data).expect("decode MembershipState")
 }
 
@@ -507,21 +514,29 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         } => {
             let mut config = decode_config(pre_data);
             assert_config_ids(&config, &tree_id, &merkle_program_id);
-            assert!(
+            ensure!(
                 config.price_per_unit == price_per_unit,
+                EXIT_STALE_CONFIG,
                 "price_per_unit claim must match config"
             );
-            assert!(config.treasury_account_id == treasury, "Wrong treasury");
-            assert!(
+            ensure!(
+                config.treasury_account_id == treasury,
+                EXIT_STALE_CONFIG,
+                "Wrong treasury"
+            );
+            ensure!(
                 config.active_duration_for_new_memberships_sec == active_duration_sec,
+                EXIT_STALE_CONFIG,
                 "active_duration_sec claim must match config"
             );
-            assert!(
+            ensure!(
                 config.grace_period_duration_for_new_memberships_sec == grace_period_duration_sec,
+                EXIT_STALE_CONFIG,
                 "grace_period_duration_sec claim must match config"
             );
-            assert!(
+            ensure!(
                 config.can_register(rate_limit),
+                EXIT_RATE_LIMIT_FULL,
                 "Would exceed max total rate limit"
             );
             config.total_registrations = config.total_registrations.saturating_add(1);
@@ -534,8 +549,9 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         // nor the merkle insert dedupes. Weaken this check and re-registering
         // a commitment silently overwrites its membership.
         Effect::InitMembership(state) => {
-            assert!(
+            ensure!(
                 pre_data.is_empty(),
+                EXIT_MEMBERSHIP_EXISTS,
                 "AccountAlreadyInitialized: membership already exists"
             );
             Some(encode(&state))
@@ -568,8 +584,9 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 membership.id_commitment == id_commitment,
                 "membership id_commitment mismatch"
             );
-            assert!(
+            ensure!(
                 membership.rate_limit == rate_limit,
+                EXIT_STALE_RATE_LIMIT,
                 "rate_limit claim must match membership"
             );
             Some(Vec::new())
@@ -581,11 +598,16 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         } => {
             let config = decode_config(pre_data);
             assert!(config.tree_id == tree_id, "tree_id arg must match config");
-            assert!(
+            ensure!(
                 config.price_per_unit == price_per_unit,
+                EXIT_STALE_CONFIG,
                 "price_per_unit claim must match config"
             );
-            assert!(config.treasury_account_id == treasury, "Wrong treasury");
+            ensure!(
+                config.treasury_account_id == treasury,
+                EXIT_STALE_CONFIG,
+                "Wrong treasury"
+            );
             None
         }
         Effect::ExtendMembership { now_ms, rate_limit } => {
@@ -593,16 +615,18 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 pre_data,
                 "Membership account is empty - cannot extend a non-existent membership",
             );
-            assert!(
+            ensure!(
                 membership.rate_limit == rate_limit,
+                EXIT_STALE_RATE_LIMIT,
                 "rate_limit claim must match membership"
             );
-            assert!(
+            ensure!(
                 is_in_grace_period(
                     membership.grace_period_start_timestamp_ms,
                     secs_to_millis(membership.grace_period_duration_sec),
                     now_ms,
                 ),
+                EXIT_NOT_IN_GRACE_PERIOD,
                 "CannotExtendNonGracePeriodMembership: membership is not in its grace period"
             );
             membership.grace_period_start_timestamp_ms = membership
@@ -614,16 +638,18 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         Effect::EraseMembership { now_ms, rate_limit } => {
             let membership =
                 decode_membership(pre_data, "Membership account is empty - nothing to erase");
-            assert!(
+            ensure!(
                 membership.rate_limit == rate_limit,
+                EXIT_STALE_RATE_LIMIT,
                 "rate_limit claim must match membership"
             );
-            assert!(
+            ensure!(
                 is_expired(
                     membership.grace_period_start_timestamp_ms,
                     secs_to_millis(membership.grace_period_duration_sec),
                     now_ms,
                 ),
+                EXIT_NOT_EXPIRED,
                 "CannotEraseUnexpiredMembership: membership has not expired yet"
             );
             Some(Vec::new())

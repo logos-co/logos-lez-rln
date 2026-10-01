@@ -1,11 +1,15 @@
 //! Helpers shared by the `rln_registration` program's plan and apply phases.
 
 use nssa_core::program::AccountMeta;
+use rln_layouts::exit::{EXIT_CLOCK_NOT_INITIALIZED, EXIT_STALE_CLOCK};
 
-use crate::hash::{hash_pair, validate_field_element};
 // Re-export rate limit and expiration constants / helpers from shared crate
 pub use crate::layouts::{
     CLOCK_50_ACCOUNT_ID_BYTES, MAX_RATE_LIMIT, MIN_RATE_LIMIT, is_expired, is_in_grace_period,
+};
+use crate::{
+    ensure,
+    hash::{hash_pair, validate_field_element},
 };
 
 // ============================================================================
@@ -81,13 +85,15 @@ pub fn require_clock_account(clock: &AccountMeta) {
 /// time-dependent instruction refuses to run until the clock exists.
 pub fn assert_clock_is(clock_pre_data: &[u8], now_ms: u64) {
     let timestamp = clock_core::ClockAccountData::from_bytes(clock_pre_data).timestamp;
-    assert!(
+    ensure!(
         timestamp > 0,
+        EXIT_CLOCK_NOT_INITIALIZED,
         "ClockNotInitialized: CLOCK_50 has not been written yet"
     );
-    assert_eq!(
-        timestamp, now_ms,
-        "Claimed now_ms does not match CLOCK_50's timestamp"
+    ensure!(
+        timestamp == now_ms,
+        EXIT_STALE_CLOCK,
+        "Claimed now_ms {now_ms} does not match CLOCK_50's timestamp {timestamp}"
     );
 }
 

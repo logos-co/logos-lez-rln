@@ -34,13 +34,17 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use nssa_core::program::{Plan, PlanInput};
+use rln_layouts::exit::{EXIT_LEAF_MISMATCH, EXIT_TREE_FULL};
 pub use rln_layouts::{
     MerkleInstruction, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
     OFFSET_ROOT_HISTORY, OFFSET_TREE_DATA, ROOT_HISTORY_SIZE, SPARSE_ENTRY_LEN, TREE_DEPTH,
     TREE_LEAVES, node_offset, read_sparse_node,
 };
 
-use crate::hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element};
+use crate::{
+    ensure,
+    hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element},
+};
 
 /// What the plan asks the apply session to do to the tree's shard. Mirrors
 /// [`MerkleInstruction`] one to one; it is a separate type because it is the
@@ -132,10 +136,10 @@ pub fn insert_leaf(pre_data: &[u8], leaf: &[u8; 32]) -> Vec<u8> {
     // Node offsets are computed with no per-level bound, so an index past the
     // last leaf lands on live nodes of the level below and yields a wrong root
     // without failing.
-    assert!(
+    ensure!(
         next_index < TREE_LEAVES,
-        "tree is full: next_index {} is past the last leaf",
-        next_index
+        EXIT_TREE_FULL,
+        "tree is full: next_index {next_index} is past the last leaf"
     );
 
     let mut data = update_leaf(pre_data, next_index as usize, leaf);
@@ -157,11 +161,10 @@ pub fn insert_leaf(pre_data: &[u8], leaf: &[u8; 32]) -> Vec<u8> {
 pub fn remove_leaf(pre_data: &[u8], index: u64, leaf: &[u8; 32]) -> Vec<u8> {
     check_header(pre_data);
     let next_index = read_next_index(pre_data);
-    assert!(
+    ensure!(
         index < next_index,
-        "Cannot remove leaf at index {} when next_index is {}",
-        index,
-        next_index
+        EXIT_LEAF_MISMATCH,
+        "Cannot remove leaf at index {index} when next_index is {next_index}"
     );
     let cached_nodes = extract_cached_nodes(pre_data);
     let current = read_sparse_node(
@@ -170,10 +173,10 @@ pub fn remove_leaf(pre_data: &[u8], index: u64, leaf: &[u8; 32]) -> Vec<u8> {
         index as usize,
         &cached_nodes[TREE_DEPTH],
     );
-    assert!(
+    ensure!(
         current == *leaf,
-        "leaf at index {} is not this member's",
-        index
+        EXIT_LEAF_MISMATCH,
+        "leaf at index {index} is not this member's"
     );
     update_leaf(pre_data, index as usize, &ZERO)
 }

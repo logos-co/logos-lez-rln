@@ -5,6 +5,7 @@
 //! [`merkle_tree`] the merkle program's; the binaries in `src/bin/` wire each
 //! into `run_program`.
 
+pub mod fail;
 pub mod hash;
 pub mod layouts;
 pub mod merkle_tree;

@@ -540,7 +540,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use nssa::{AccountId, ProgramShardSelector, PublicTransaction, V03State};
+    use nssa::{AccountId, ProgramShardSelector, PublicTransaction, V03State, error::LeeError};
     use rand_chacha::ChaCha20Rng;
     use rln::prelude::{
         Fr, Hasher, IdentityKeys, PoseidonHash, RLNMerkleProof, RLNWitnessInput, hash_to_field_le,
@@ -548,6 +548,10 @@ mod tests {
     use rln_layouts::{
         Instruction, MerkleInstruction, OFFSET_NEXT_INDEX, OFFSET_TREE_DATA, SPARSE_ENTRY_LEN,
         TREE_LEAVES, TREE_SHARD_MAX_BYTES,
+        exit::{
+            EXIT_LEAF_MISMATCH, EXIT_STALE_CLOCK, EXIT_STALE_RATE_LIMIT, EXIT_TREE_FULL,
+            exit_code_name,
+        },
     };
 
     use super::fixtures::*;
@@ -611,6 +615,20 @@ mod tests {
         tx: &nssa::PublicTransaction,
     ) -> Result<(), nssa::error::LeeError> {
         state.transition_from_public_transaction(tx, 1, 0).map(drop)
+    }
+
+    /// `result` is a guest halting with exit `code`.
+    fn assert_exit(result: Result<(), LeeError>, code: u8, what: &str) {
+        match result {
+            Err(LeeError::ProgramExitedWithCode { code: got, .. }) => assert_eq!(
+                got,
+                u32::from(code),
+                "{what}: exit {got} ({:?}), expected {:?}",
+                exit_code_name(got),
+                exit_code_name(u32::from(code))
+            ),
+            other => panic!("{what}: expected exit {code}, got {other:?}"),
+        }
     }
 
     /// Replace one field of an instruction, keeping every other claim.
@@ -973,9 +991,10 @@ mod tests {
 
         let idc = valid_field_element(0xC2);
         let tx = register_tx(&setup, register_ix(&setup.state, idc, 100));
-        assert!(
-            apply(&mut setup.state, &tx).is_err(),
-            "the tree must refuse a registration past its last leaf"
+        assert_exit(
+            apply(&mut setup.state, &tx),
+            EXIT_TREE_FULL,
+            "a registration past the last leaf",
         );
         assert!(membership(&setup.state, &idc).is_none());
         assert_eq!(config(&setup.state).total_registrations, 0);
@@ -1394,13 +1413,14 @@ mod tests {
 
         let slash_b = slash_ix(&setup.state, secret_b, idc_b);
         let erase_b = erase_ix(&setup.state, idc_b);
-        let bad: Vec<(&str, PublicTransaction)> = vec![
+        let bad: Vec<(&str, PublicTransaction, u8)> = vec![
             (
                 "slash at A's index",
                 slash_tx(
                     &setup.state,
                     with_claim!(slash_b.clone(), Slash { leaf_index: 0 }),
                 ),
+                EXIT_LEAF_MISMATCH,
             ),
             (
                 "slash past next_index",
@@ -1408,6 +1428,7 @@ mod tests {
                     &setup.state,
                     with_claim!(slash_b.clone(), Slash { leaf_index: 2 }),
                 ),
+                EXIT_LEAF_MISMATCH,
             ),
             (
                 "slash at B's index with A's rate limit",
@@ -1415,6 +1436,7 @@ mod tests {
                     &setup.state,
                     with_claim!(slash_b.clone(), Slash { rate_limit: 100 }),
                 ),
+                EXIT_STALE_RATE_LIMIT,
             ),
             (
                 "erase at A's index",
@@ -1422,6 +1444,7 @@ mod tests {
                     &setup.state,
                     with_claim!(erase_b.clone(), Erase { leaf_index: 0 }),
                 ),
+                EXIT_LEAF_MISMATCH,
             ),
             (
                 "erase at B's index with A's rate limit",
@@ -1429,10 +1452,11 @@ mod tests {
                     &setup.state,
                     with_claim!(erase_b, Erase { rate_limit: 100 }),
                 ),
+                EXIT_STALE_RATE_LIMIT,
             ),
         ];
-        for (what, tx) in bad {
-            assert!(apply(&mut setup.state, &tx).is_err(), "{what} must fail");
+        for (what, tx, code) in bad {
+            assert_exit(apply(&mut setup.state, &tx), code, what);
             assert_eq!(
                 tree_shard(&setup.state),
                 tree_before,
@@ -1663,6 +1687,80 @@ mod tests {
     // ====================================================================
     // Gas
     // ====================================================================
+
+    /// The error a transaction fails with, and what the sequencer charges for
+    /// it under a `MAX_GAS_EXEC` declaration.
+    fn failure_and_charge(state: &V03State, tx: &PublicTransaction) -> (LeeError, u64) {
+        let err = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
+            tx,
+            state,
+            1,
+            0,
+            MAX_GAS_EXEC,
+        )
+        .err()
+        .expect("the transaction should fail");
+        let (charge, settled) = nssa::ValidatedStateDiff::from_public_transaction_metered(
+            tx,
+            state,
+            1,
+            0,
+            MAX_GAS_EXEC,
+        );
+        assert!(
+            settled.is_ok(),
+            "a chargeable failure settles as nonce bumps, got {:?}",
+            settled.err()
+        );
+        (err, charge.cycles)
+    }
+
+    /// A claim that went stale because the chain moved (here: the clock) halts
+    /// the guest with an exit code, and is charged the cycles that ran — the
+    /// registration plan's leaf Poseidon plus two small applies — not the
+    /// declared gas. A malformed claim still panics and pays the full budget.
+    #[test]
+    fn a_stale_clock_claim_is_charged_measured_cycles() {
+        let setup = setup_or_skip();
+        let ix = register_ix(&setup.state, valid_field_element(0x42), 100);
+
+        let stale = with_claim!(
+            ix.clone(),
+            Register {
+                now_ms: clock_ms(&setup.state) + 1
+            }
+        );
+        let (err, charged) = failure_and_charge(&setup.state, &register_tx(&setup, stale));
+        println!(
+            "stale clock claim: {err:?} ({}), charged {charged} cycles ({:.1}% of MAX_GAS_EXEC)",
+            exit_code_name(u32::from(EXIT_STALE_CLOCK)).unwrap(),
+            charged as f64 / MAX_GAS_EXEC as f64 * 100.0
+        );
+        assert!(
+            matches!(err, LeeError::ProgramExitedWithCode { code, .. } if code == u32::from(EXIT_STALE_CLOCK)),
+            "got {err:?}"
+        );
+        assert!(
+            charged < 1_200_000,
+            "a stale claim must not pay the ceiling: {charged}"
+        );
+
+        let malformed = with_claim!(
+            ix,
+            Register {
+                merkle_program_id: *ROGUE_MERKLE_ID.value()
+            }
+        );
+        let (err, charged) = failure_and_charge(&setup.state, &register_tx(&setup, malformed));
+        assert!(
+            matches!(err, LeeError::ProgramExecutionFailed(_)),
+            "got {err:?}"
+        );
+        assert_eq!(
+            charged, MAX_GAS_EXEC,
+            "a malformed claim still pays the full budget"
+        );
+    }
 
     /// A whole register transaction — every plan and apply session of the
     /// registration program plus the chained merkle insert — against the

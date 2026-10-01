@@ -74,6 +74,16 @@
   check) before the nine-Poseidon root update — 9,736,047 cycles, 97.4% of the
   ceiling (erase 9,135,211; `slash_and_erase_transactions_fit_the_gas_ceiling`).
   Any guest change that adds a hash to slash does not fit.
+- A guest PANIC is charged the transaction's full declared gas; a guest that
+  halts with `env::exit(code != 0)` is charged the cycles it ran
+  (`ProgramExitedWithCode`, `validated_state_diff::from_public_transaction_metered`).
+  Checks an honest client fails only because the chain moved after it read it
+  use `ensure!(cond, EXIT_*, ..)` (`methods/guest/src/fail.rs`, codes in
+  `rln_layouts::exit`); malformed-input checks stay `assert!`s and keep the
+  full charge. Measured: a register with a stale clock claim costs 953,532
+  cycles (exit) vs 10,000,000 (panic) — almost all of it the plan's leaf
+  Poseidon, which runs before any apply, so effect order barely matters
+  (ClockIs first: 941,292). `a_stale_clock_claim_is_charged_measured_cycles`.
 
 ## Init guards are apply-side empty checks
 Public transactions need no signature for PDA rows, so any instruction that
