@@ -22,7 +22,7 @@ use wallet::{
 
 use crate::{
     fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
-    merkle_tree::{fetch_tree_shard, find_leaf_index, tree_shard_selector, wait_for_leaf},
+    merkle_tree::{fetch_tree_shard, find_leaf_index, tree_shard_selector},
     rln::{
         CONFIG_SIZE, Instruction, MEMBERSHIP_SIZE, ProgramIds, derive_config_account,
         derive_membership_account,
@@ -948,9 +948,11 @@ fn check_merkle_claim(config: &ConfigState, programs: &ProgramIds) {
 }
 
 /// Register `id_commitment` at `rate_limit`, paid by `payer_id`, wait for the
-/// leaf to land, and return the index the tree gave it — `None` if it has not
-/// appeared after `wait_account_attempts()` polls (the transaction was sent
-/// and may still land: check the chain before re-registering).
+/// transaction's fate, and return the index the tree gave the leaf — `None`
+/// when the transaction was included without inserting it (a refused
+/// duplicate, a stale claim) or has not landed after `wait_account_attempts()`
+/// polls (it was sent and may still land: check the chain before
+/// re-registering).
 ///
 /// Every claim is read from the chain just before sending: `CLOCK_50`'s
 /// timestamp and the config's price, durations and merkle program. The index
@@ -1003,7 +1005,7 @@ pub async fn register_identity(
     };
     let instruction_data =
         Program::serialize_instruction(instruction).expect("instruction serializes");
-    send_metered_tx(
+    let hash = send_metered_tx(
         wallet_core,
         programs.registration,
         shard_selectors,
@@ -1014,16 +1016,22 @@ pub async fn register_identity(
     )
     .await;
 
-    wait_for_leaf(
-        wallet_core,
-        programs,
-        tree_id,
-        &leaf,
-        already_at,
-        wait_account_attempts(),
-        Duration::from_millis(500),
-    )
-    .await
+    // A failed registration is still included (a charged revert with no
+    // effect), so the block is the signal: once the transaction is in one,
+    // the leaf is either there or never will be.
+    let landed = |shard: &[u8]| {
+        find_leaf_index(shard, &leaf).filter(|&index| already_at.is_none_or(|old| index > old))
+    };
+    for _ in 0..wait_account_attempts() {
+        if let Some(index) = landed(&fetch_tree_shard(wallet_core, programs, tree_id).await) {
+            return Some(index);
+        }
+        if let Ok(Some(_)) = wallet_core.get_transaction(hash).await {
+            return landed(&fetch_tree_shard(wallet_core, programs, tree_id).await);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    None
 }
 
 /// Renew a membership that is currently inside its grace period.
