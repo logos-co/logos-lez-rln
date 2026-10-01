@@ -8,9 +8,9 @@ members = ["."]
 # Gate every profile change on the measurements in src/cycle_harness.rs and the
 # `*_fits_the_gas_ceiling` tests in src/state_tests.rs.
 #
-# The deploy artifact is the llvm-stripped R0BF .bin the build.rs post-step
-# produces, not the unstripped ELF. The binding size limit is the operator's
-# max_block_size — measured on the public testnet between ~266 KB and ~459 KB.
+# The deploy artifact is the R0BF .bin with its user ELF llvm-stripped by the
+# build.rs post-step. Deploys upload only the user ELF, in 96 KiB segments, so
+# size is no longer a per-transaction concern.
 
 [package]
 name = "logos_lez_rln_guest"
@@ -35,19 +35,15 @@ codegen-units = 1
 workspace = true
 
 [dependencies]
-# rc6 lssa fetched as git deps (nssa_core->lee_core; package alias keeps guest
-# source unchanged). Pinned by tag so a fresh clone builds with no sibling checkout.
-nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc3", default-features = false }
-clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc3" }
+# lee_core is aliased as nssa_core so guest source keeps its historical import
+# name. Pinned by tag so a fresh clone builds with no sibling checkout.
+nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0", default-features = false }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0" }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
 rln-layouts = { path = "../../rln-layouts", default-features = false }
 rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseidon-bn254-pure", rev = "49e1042" }
-# spel-framework must target the same lee_core release as nssa_core above: it
-# builds the ProgramOutput this guest commits, so a mismatch is an ABI break
-# that only shows up as a rejected transaction.
-spel-framework = { git = "https://github.com/adklempner/spel.git", rev = "04b9eda1ecb9571407c08cea2687ae9446aa8924" }
 
 # NOTE: the risc0 guest toolchain is rustc 1.88; some transitive deps have newer
 # MSRVs and must be held back in Cargo.lock (cargo update --precise), or

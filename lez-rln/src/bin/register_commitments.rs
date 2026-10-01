@@ -14,10 +14,10 @@ use logos_lez_rln::{
     merkle_tree::wait_for_leaf,
     rln::{
         client::{
-            init_wallet, load_programs, rate_commitment_from_fr, register_identity, resolve_payer,
+            init_wallet, rate_commitment_from_fr, register_identity, resolve_payer,
             tree_id_from_env,
         },
-        derive_config_account,
+        derive_config_account, program_ids_or_exit,
     },
 };
 
@@ -68,13 +68,10 @@ async fn main() {
         entries.len()
     );
 
-    let wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
-    let (registration_program, _merkle_program) = load_programs();
-    let config_account_id = derive_config_account(
-        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
-        &tree_id,
-    );
+    let programs = program_ids_or_exit(&tree_id);
+    let wallet_core = init_wallet().await;
+    let config_account_id = derive_config_account(&programs.registration, &tree_id);
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
         let user_holding_id = resolve_payer();
@@ -83,7 +80,7 @@ async fn main() {
 
         let leaf_index = register_identity(
             &wallet_core,
-            &registration_program,
+            &programs,
             &tree_id,
             id_commitment,
             &user_holding_id,
@@ -100,7 +97,7 @@ async fn main() {
 
         let finalized = wait_for_leaf(
             &wallet_core,
-            &registration_program,
+            &programs,
             &tree_id,
             leaf_index,
             &leaf_bytes,
@@ -117,7 +114,7 @@ async fn main() {
             i + 1,
             entries.len(),
             leaf_index,
-            &hex::encode(&id_commitment[..8])
+            hex::encode(&id_commitment[..8])
         );
     }
 

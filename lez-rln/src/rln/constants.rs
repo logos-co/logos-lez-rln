@@ -7,14 +7,9 @@
 //! guest's `#[account_type]` definitions (kept in sync via a size_of assert
 //! against `rln_layouts::{ConfigState, MembershipState}`).
 
-pub use crate::merkle_tree::{SUBTREE_LEAVES, TREE_DEPTH};
-
-/// Computes the subtree ID for a given leaf index.
-pub fn subtree_id_for_index(leaf_index: u64) -> u32 {
-    (leaf_index / SUBTREE_LEAVES as u64) as u32
-}
-
 pub use rln_layouts::{MAX_RATE_LIMIT, MIN_RATE_LIMIT};
+
+pub use crate::merkle_tree::{TREE_DEPTH, TREE_LEAVES};
 
 // Layout source of truth: `rln_layouts::ConfigState`.
 //

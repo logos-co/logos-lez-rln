@@ -1,12 +1,13 @@
-//! Sparse node storage used by the top tree and bottom subtrees.
+//! Sparse node storage for the whole merkle tree.
 //!
 //! Format: `[count(u16le), (offset(u16le), hash(32))...]` sorted by offset so
 //! reads are a binary search. Shared by the guest program, the host client,
 //! and the C FFI so all three agree on the on-chain encoding.
 
-/// BFS index of a node at `(level, index_within_level)` within its (sub)tree.
+/// BFS index of the node at `(level, index_within_level)`; the root is
+/// `(0, 0)` and the leaves sit at level `TREE_DEPTH`.
 #[inline]
-pub fn subtree_node_offset(level: usize, index: usize) -> usize {
+pub fn node_offset(level: usize, index: usize) -> usize {
     ((1 << level) - 1) + index
 }
 
@@ -25,7 +26,7 @@ pub fn read_sparse_node(
     if count == 0 {
         return *cached_default;
     }
-    let target = subtree_node_offset(level, index) as u16;
+    let target = node_offset(level, index) as u16;
 
     let mut lo = 0usize;
     let mut hi = count;

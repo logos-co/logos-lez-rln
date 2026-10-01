@@ -31,3 +31,5 @@ result-*
 .mcp.json
 .mcp_data/
 .gc-roots/
+# tools/e2e-local.sh keeps its throwaway wallet and sequencer log here.
+dev/e2e/

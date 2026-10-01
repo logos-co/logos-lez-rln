@@ -1,8 +1,9 @@
 //! Shared layouts for RLN registration.
 //!
 //! This crate provides `#[repr(C, packed)]` structs for direct memory mapping
-//! with `bytemuck`, and a serde-based `Instruction` enum for typed instruction
-//! passing between host and guest.
+//! with `bytemuck`, the Borsh `Instruction` enums of both guest programs, and
+//! the merkle shard layout — everything the host and the guests must agree on
+//! byte for byte.
 //!
 //! # no_std Support
 //!
@@ -18,7 +19,7 @@
 use bytemuck::{Pod, Zeroable};
 
 pub mod sparse;
-pub use sparse::{read_sparse_node, subtree_node_offset};
+pub use sparse::{node_offset, read_sparse_node};
 
 pub mod spel_pda;
 pub use spel_pda::{combine_seeds, label_seed, u32_seed};
@@ -27,7 +28,7 @@ pub mod state;
 pub use state::{ConfigState, MembershipState};
 
 pub mod instruction;
-pub use instruction::Instruction;
+pub use instruction::{Instruction, MerkleInstruction};
 
 // ============================================================================
 // Rate Limit Constraints
@@ -47,6 +48,27 @@ pub const MAX_RATE_LIMIT: u64 = 600;
 /// 50 blocks. This crate mirrors the constant instead of depending on
 /// `clock_core` to stay `no_std`-friendly for the host side.
 pub const CLOCK_50_ACCOUNT_ID_BYTES: [u8; 32] = *b"/LEZ/ClockProgramAccount/0000050";
+
+/// Prefix `lee_core::AccountId::from_builtin_program_name` hashes ahead of a
+/// builtin program's name. Mirrored here so the host tooling and the guests
+/// can name a builtin's shard without depending on `lee_core`.
+pub const BUILTIN_PROGRAM_NAME_PREFIX: [u8; 32] = *b"/LEE-BuiltinProgram/v1/AccountId";
+
+/// Account id of a builtin program addressed by name:
+/// `SHA-256(BUILTIN_PROGRAM_NAME_PREFIX || name)`.
+pub fn builtin_program_account_id(name: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(BUILTIN_PROGRAM_NAME_PREFIX);
+    h.update(name);
+    h.finalize().into()
+}
+
+/// The clock program's account id — the shard on `CLOCK_50` that holds
+/// `ClockAccountData`.
+pub fn clock_program_account_id() -> [u8; 32] {
+    builtin_program_account_id(b"clock")
+}
 
 pub const MILLIS_PER_SECOND: u64 = 1_000;
 
@@ -96,61 +118,21 @@ le_int!(U64Le, u64, 8);
 le_int!(U128Le, u128, 16);
 
 // ============================================================================
-// Merkle Tree Opcodes
-// ============================================================================
-
-/// Opcodes for the incremental merkle tree program.
-///
-/// The opcode is the first byte of `instruction_data` passed to the merkle
-/// program. Numeric values are part of the cross-program wire format and MUST
-/// NOT be changed without coordinated guest+host updates.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MerkleOpcode {
-    Initialize = 0,
-    Insert = 1,
-    Remove = 2,
-    Set = 3,
-}
-
-impl MerkleOpcode {
-    /// Decode an opcode byte. Returns `None` for unknown values.
-    #[inline]
-    pub fn from_u8(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::Initialize),
-            1 => Some(Self::Insert),
-            2 => Some(Self::Remove),
-            3 => Some(Self::Set),
-            _ => None,
-        }
-    }
-}
-
-// ============================================================================
 // Merkle Tree Constants
 // ============================================================================
 
 /// Tree depth (number of levels from root to leaves), so the registry holds up
 /// to `2^TREE_DEPTH` members.
 ///
-/// Depth is a *cost* decision, not a capacity one. LEZ v0.2.5 meters a charged
+/// Depth is a *cost* decision, not a capacity one. LEZ meters a charged
 /// transaction by its declared gas limit at one gas per cycle and caps that at
-/// ten million, and an insert costs one Poseidon compression — about 902,000
-/// cycles — per level. A register transaction spends 980,000 of its budget on
-/// the registration guest and the chained token transfer before the insert
-/// starts, so the tree can afford nine or ten levels and no more. Depth 20,
-/// which this was, costs 18.1M and cannot be included in any block.
+/// ten million, summed over every plan and apply session the transaction
+/// runs, and an insert costs one Poseidon compression — about 902,000
+/// cycles — per level. A register transaction spends roughly a million of its
+/// budget on the registration guest's own sessions before the insert starts,
+/// so the tree can afford nine or ten levels and no more. Depth 20, which this
+/// was, costs 18.1M and cannot be included in any block.
 pub const TREE_DEPTH: usize = 9;
-
-/// Depth of the top tree.
-pub const TOP_DEPTH: usize = 4;
-
-/// Depth of each bottom subtree, mapped to levels 0..BOTTOM_DEPTH within it.
-pub const BOTTOM_DEPTH: usize = 5;
-
-/// Number of leaves per bottom subtree (`2^BOTTOM_DEPTH`).
-pub const SUBTREE_LEAVES: usize = 32;
 
 /// Leaves the tree holds (`2^TREE_DEPTH`).
 ///
@@ -159,23 +141,31 @@ pub const SUBTREE_LEAVES: usize = 32;
 /// members.
 pub const TREE_LEAVES: u64 = 1 << TREE_DEPTH;
 
-// These four are independent literals, and nothing used to check they agreed.
-// Setting one and forgetting another compiled cleanly and produced a tree whose
-// nodes alias each other, so state it once here where it fails at build time.
-const _: () = assert!(
-    TOP_DEPTH + BOTTOM_DEPTH == TREE_DEPTH,
-    "the two halves must sum to the whole depth"
-);
-const _: () = assert!(
-    SUBTREE_LEAVES == 1 << BOTTOM_DEPTH,
-    "a bottom subtree holds exactly 2^BOTTOM_DEPTH leaves"
-);
-// Sparse node offsets are cast to u16. The largest offset in a half of depth D
+// Sparse node offsets are cast to u16. The largest offset in a tree of depth D
 // is 2^(D+1) - 2, so above 15 distinct nodes collapse onto the same slot and
 // the tree silently returns a wrong root.
 const _: () = assert!(
-    TOP_DEPTH <= 15 && BOTTOM_DEPTH <= 15,
-    "sparse node offsets are u16, so neither half may exceed depth 15"
+    TREE_DEPTH <= 15,
+    "sparse node offsets are u16, so the tree may not exceed depth 15"
+);
+
+/// Number of nodes in the whole tree (`2^(TREE_DEPTH+1) - 1`).
+pub const TREE_NODES: usize = (1 << (TREE_DEPTH + 1)) - 1;
+
+/// Bytes one sparse entry occupies: `offset(u16le) || hash(32)`.
+pub const SPARSE_ENTRY_LEN: usize = 34;
+
+/// Largest the merkle shard can grow: the header plus every node populated.
+pub const TREE_SHARD_MAX_BYTES: usize = OFFSET_TREE_DATA + 2 + TREE_NODES * SPARSE_ENTRY_LEN;
+
+/// `lee_core`'s per-shard data cap (`DATA_MAX_LENGTH`).
+pub const SHARD_MAX_BYTES: usize = 100 * 1024;
+
+// The whole tree lives in one shard, so a full tree must fit under the
+// protocol's cap or the last inserts fail with a data-length error.
+const _: () = assert!(
+    TREE_SHARD_MAX_BYTES <= SHARD_MAX_BYTES,
+    "a full tree must fit in one shard"
 );
 
 /// Offset of depth field in main account data (1 byte).
@@ -196,8 +186,8 @@ pub const OFFSET_ROOT_HISTORY: usize = 41;
 /// Offset of cached default hashes in main account data (32 bytes * (depth + 1)).
 pub const OFFSET_CACHED_NODES: usize = OFFSET_ROOT_HISTORY + ROOT_HISTORY_SIZE * 32;
 
-/// Offset of top tree sparse data in main account data.
-pub const OFFSET_TOP_TREE_DATA: usize = OFFSET_CACHED_NODES + (TREE_DEPTH + 1) * 32;
+/// Offset of the whole-tree sparse node map in the merkle shard.
+pub const OFFSET_TREE_DATA: usize = OFFSET_CACHED_NODES + (TREE_DEPTH + 1) * 32;
 
 // ============================================================================
 // Account Layouts (Tree)

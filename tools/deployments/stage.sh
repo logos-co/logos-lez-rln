@@ -4,16 +4,20 @@
 #
 #   bash stage.sh <deployment_dir> <out_dir>
 #
-# A deployment is fully captured by tree_id + wallet (storage.json). config is a
-# derived cache of tree_id; payer_account is a pointer into the wallet — the
-# account that signs a registration, pays its price in native, and pays its fee.
+# A deployment is captured by tree_id + the two program ids + wallet
+# (storage.json). The program ids (registration_program_id, merkle_program_id)
+# are the header accounts run_setup deployed — recorded state, not derivable
+# from the guest binaries. config is a derived cache of (registration program
+# id, tree_id); payer_account is a pointer into the wallet — the account that
+# signs a registration, pays its price in native, and pays its fee.
 # Emits storage.json.seed, wallet_config.json, {config,payer}_account.txt,
-# treasury_account.txt, env.sh, enforcing the wallet<->deployment binding so a
-# mismatched wallet fails here, not at runtime. Bash+jq (no Python) so every sim
-# + the image build share it.
-# The guest-drift guard (re-deriving config from the guest binaries) is verify.sh.
+# treasury_account.txt, env.sh (tree id, payer and both program ids), enforcing
+# the wallet<->deployment binding so a mismatched wallet fails here, not at
+# runtime. Bash+jq (no Python) so every sim + the image build share it.
+# The consistency check (re-deriving config from the ids) is verify.sh.
 set -euo pipefail
 
+case "${1:-}" in -h|--help) echo "usage: stage.sh <deployment_dir> <out_dir>" >&2; exit 0;; esac
 DEP_DIR="${1:?usage: stage.sh <deployment_dir> <out_dir>}"
 OUT="${2:?usage: stage.sh <deployment_dir> <out_dir>}"
 DESC="$DEP_DIR/deployment.json"
@@ -27,16 +31,18 @@ field(){ jq -re ".$1 // empty" "$DESC" 2>/dev/null || fail "descriptor missing r
 
 NAME=$(field name); TREE=$(field tree_id); SEQ=$(field sequencer)
 CFG=$(field config_account); PAY=$(field payer_account); TREASURY=$(field treasury_account)
-field registration_program_id >/dev/null
+REG=$(field registration_program_id); MRK=$(field merkle_program_id)
 # A pre-native descriptor names payment_account/supply_holding/funding and no
 # payer_account, so `field payer_account` above already failed it — which is
 # what we want: its config account belongs to a program that no longer exists,
 # and every offset in it decodes to something plausible and wrong.
 [[ "$TREE" =~ ^[0-9a-f]{64}$ ]] || fail "tree_id must be 64 lowercase hex chars, got '$TREE'"
+[[ "$REG" =~ ^[0-9a-f]{64}$ ]] || fail "registration_program_id must be 64 lowercase hex chars, got '$REG'"
+[[ "$MRK" =~ ^[0-9a-f]{64}$ ]] || fail "merkle_program_id must be 64 lowercase hex chars, got '$MRK'"
 
-# rc6 wallet schema — refuse a wallet whose schema doesn't match the guest version.
+# Wallet schema — refuse a storage.json without the top-level 'key_chain.accounts'.
 jq -e '.key_chain.accounts' "$WALLET" >/dev/null 2>&1 \
-  || fail "wallet schema is not rc6 (expected top-level 'key_chain.accounts')"
+  || fail "wallet schema unrecognised (expected top-level 'key_chain.accounts')"
 # wallet<->deployment binding: the wallet must actually hold the payer, since
 # nothing else can sign a registration against this deployment. The treasury is
 # only ever credited, so no wallet need hold it.
@@ -48,10 +54,10 @@ printf '%s' "$CFG" > "$OUT/config_account.txt"
 printf '%s' "$PAY" > "$OUT/payer_account.txt"
 printf '%s' "$TREASURY" > "$OUT/treasury_account.txt"
 jq '.last_synced_block = 0' "$WALLET" > "$OUT/storage.json.seed"
-# Dual-shape sequencer field: lez >= v0.2.1 reads `sequencers` (multi-client),
-# the rc6-era wallet module still reads flat `sequencer_addr`. Neither struct
-# denies unknown fields, so one file serves both during the transition.
-# multi_sequencer_client_config: v0.2.2's open calibrates each sequencer with
+# Dual-shape sequencer field: the upstream wallet reads `sequencers`
+# (multi-client), the module's wallet reads flat `sequencer_addr`. Neither
+# struct denies unknown fields, so one file serves both.
+# multi_sequencer_client_config: the wallet's open calibrates each sequencer with
 # calibration_limit sequential getLastBlockId probes (default 100) when no
 # statistics file exists — minutes against a slow chain, wedging every caller
 # behind the open. One sequencer needs no leader election; 3 probes suffice.
@@ -66,9 +72,10 @@ cat > "$OUT/env.sh" <<EOF
 #!/usr/bin/env bash
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 export LEE_WALLET_HOME_DIR="\$SCRIPT_DIR"
-export NSSA_WALLET_HOME_DIR="\$SCRIPT_DIR"
 export LEZ_RLN_TREE_ID_HEX=$TREE
 export LEZ_RLN_PAYER=$PAY
+export LEZ_RLN_REGISTRATION_PROGRAM_ID=$REG
+export LEZ_RLN_MERKLE_PROGRAM_ID=$MRK
 EOF
 
-echo "stage: OK  $NAME  tree=${TREE:0:8}…  config=$CFG  payer=$PAY  treasury=$TREASURY  -> $OUT"
+echo "stage: OK  $NAME  tree=${TREE:0:8}…  reg=${REG:0:8}…  merkle=${MRK:0:8}…  config=$CFG  payer=$PAY  treasury=$TREASURY  -> $OUT"

@@ -1,11 +1,10 @@
-//! Shared Borsh-encoded state structs for the SPEL `rln_registration` program.
+//! Shared Borsh-encoded state structs for the `rln_registration` program.
 //!
-//! These mirror the `#[account_type]` definitions in
-//! `methods/guest/src/bin/rln_registration.rs`. The guest binary re-uses
-//! these by wrapping them in the `#[account_type]` macro; the host can either
+//! The guest reads and writes these in its apply phase; the host can either
 //! deserialize via `borsh::from_slice` or read individual fields by the
 //! offset constants in `src/rln/constants.rs` (kept consistent with this
-//! struct's field declaration order).
+//! struct's field declaration order). Each lives in the registration
+//! program's shard of its PDA.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -38,7 +37,14 @@ pub struct ConfigState {
     pub grace_period_duration_for_new_memberships_sec: u32,
 }
 
-/// Borsh layout for a per-member account in the SPEL registration program.
+impl ConfigState {
+    /// Whether `rate_limit` more units fit under `max_total_rate_limit`.
+    pub fn can_register(&self, rate_limit: u64) -> bool {
+        self.current_total_rate_limit.saturating_add(rate_limit) <= self.max_total_rate_limit
+    }
+}
+
+/// Borsh layout for a per-member account in the registration program.
 ///
 /// Fixed size: 64 bytes.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]

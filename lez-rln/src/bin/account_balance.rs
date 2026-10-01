@@ -7,7 +7,7 @@
 //! observation, and this is what turns "three registrations succeeded" into
 //! "the treasury holds three times the price".
 //!
-//! Reads only: `get_account_public` asks the sequencer for an account's state,
+//! Reads only: `get_account_balance` asks the sequencer for an account's native shard,
 //! so the id need not be one this wallet has a key for. It does need a wallet,
 //! because that is what holds the sequencer endpoint and the synced view.
 //!
@@ -52,8 +52,8 @@ async fn main() {
     });
 
     let wallet_core = init_wallet().await;
-    let account = wallet_core
-        .get_account_public(of)
+    let balance = wallet_core
+        .get_account_balance(of)
         .await
         .unwrap_or_else(|e| {
             // An account that has never been touched still reads: native credit
@@ -64,8 +64,5 @@ async fn main() {
         });
 
     let hex: String = of.value().iter().map(|b| format!("{b:02x}")).collect();
-    println!(
-        "{{\"account\":\"{hex}\",\"balance\":\"{}\"}}",
-        account.balance
-    );
+    println!("{{\"account\":\"{hex}\",\"balance\":\"{balance}\"}}");
 }
