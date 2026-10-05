@@ -1,26 +1,24 @@
 //! Incremental Merkle Tree with On-Chain Storage
 //!
-//! This module provides client-side utilities for reading state from the on-chain
-//! incremental Merkle tree and generating Merkle proofs.
+//! Client-side reads of the on-chain incremental Merkle tree and Merkle proof
+//! generation.
 //!
 //! # Note on Tree Operations
 //!
 //! The merkle tree program is only called via chained calls from the RLN
 //! registration program. Clients do not directly build merkle tree transactions.
-//! Instead, use the RLN client (`rln::register`, etc.) which handles merkle tree
-//! operations internally.
+//! Instead, use the RLN client (`rln::client::register_identity`, etc.).
 //!
 //! # Provided Functionality
 //!
-//! - **PDA derivation**: `derive_main_account`, `derive_subtree_account`
-//! - **State reading**: `fetch_root`, `fetch_next_index`, `fetch_node_hash`
-//! - **Merkle proofs**: `get_merkle_proof`, `proof_to_fr`
+//! - **PDA derivation**: `derive_main_account`
+//! - **State reading**: `fetch_tree_shard`, `fetch_root`, `fetch_next_index`, `fetch_node_hash`
+//! - **Merkle proofs**: `get_merkle_proof`, `merkle_proof`, `proof_to_fr`
 //!
 //! # Storage Model
 //!
-//! - **Main Account**: Stores tree metadata (depth, next_index, root, cached defaults) and top tree
-//!   nodes (levels 0-TOP_DEPTH) in sparse format
-//! - **Subtree Accounts**: Each stores one bottom subtree in sparse format
+//! The whole tree — header, per-level defaults and a sparse node map — is the
+//! merkle program's shard of the registration program's `tree_main` PDA.
 //!
 //! # Compatibility
 //!

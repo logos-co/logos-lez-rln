@@ -1,13 +1,14 @@
 //! End-to-end RLN proof demo. Requires `run_setup` to have been run first.
 
-use std::time::Duration;
-
 use logos_lez_rln::{
     fr_bytes::fr_to_bytes_le,
-    merkle_tree::{get_merkle_proof, proof_to_fr, wait_for_leaf},
-    rln::client::{
-        RlnIdentity, create_identity, init_wallet, load_programs, register_identity, resolve_payer,
-        tree_id_from_env,
+    merkle_tree::{get_merkle_proof, proof_to_circuit},
+    rln::{
+        client::{
+            RlnIdentity, create_identity, init_wallet, register_identity, resolve_payer,
+            tree_id_from_env,
+        },
+        program_ids_or_exit,
     },
 };
 use rln::prelude::{Fr, Hasher, PoseidonHash, RLNWitnessInput, hash_to_field_le};
@@ -21,9 +22,9 @@ const RLN_IDENTIFIER: &str = "rln/logos-rln-relay/v2.0.0";
 
 #[tokio::main]
 async fn main() {
-    let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
-    let (registration_program, _merkle_program) = load_programs();
+    let programs = program_ids_or_exit(&tree_id);
+    let mut wallet_core = init_wallet().await;
 
     println!("=== RLN Proof Demo ===\n");
 
@@ -46,34 +47,20 @@ async fn main() {
     println!("\nStep 2: Registering...");
     let leaf_index = register_identity(
         &wallet_core,
-        &registration_program,
+        &programs,
         &tree_id,
         &id_commitment_bytes,
         &user_holding_id,
         USER_MESSAGE_LIMIT,
     )
-    .await;
+    .await
+    .expect("Timeout waiting for leaf to appear on-chain");
     println!("  Registered at index: {}", leaf_index);
-
-    // Wait for transaction to be finalized
-    let finalized = wait_for_leaf(
-        &wallet_core,
-        &registration_program,
-        &tree_id,
-        leaf_index,
-        &leaf_bytes,
-        90,
-        Duration::from_millis(500),
-    )
-    .await;
-    if !finalized {
-        panic!("Timeout waiting for leaf to appear on-chain");
-    }
 
     // Step 3: Get the merkle proof from chain
     println!("\nStep 3: Fetching merkle proof...");
-    let proof = get_merkle_proof(&wallet_core, &registration_program, &tree_id, leaf_index).await;
-    let (merkle_proof, root) = proof_to_fr(&proof);
+    let proof = get_merkle_proof(&wallet_core, &programs, &tree_id, leaf_index).await;
+    let (merkle_proof, root) = proof_to_circuit(&proof);
 
     assert_eq!(
         leaf_bytes, proof.leaf,

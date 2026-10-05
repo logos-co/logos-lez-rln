@@ -7,17 +7,16 @@
 //! source dev/env.sh && cargo run --bin register_commitments -- commitments.csv
 //! ```
 
-use std::{fs, time::Duration};
+use std::fs;
 
 use logos_lez_rln::{
     fr_bytes::bytes_le_to_fr,
-    merkle_tree::wait_for_leaf,
     rln::{
         client::{
-            init_wallet, load_programs, rate_commitment_from_fr, register_identity, resolve_payer,
+            init_wallet, rate_commitment_from_fr, register_identity, resolve_payer,
             tree_id_from_env,
         },
-        derive_config_account,
+        derive_config_account, program_ids_or_exit,
     },
 };
 
@@ -68,13 +67,10 @@ async fn main() {
         entries.len()
     );
 
-    let wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
-    let (registration_program, _merkle_program) = load_programs();
-    let config_account_id = derive_config_account(
-        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
-        &tree_id,
-    );
+    let programs = program_ids_or_exit(&tree_id);
+    let wallet_core = init_wallet().await;
+    let config_account_id = derive_config_account(&programs.registration, &tree_id);
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
         let user_holding_id = resolve_payer();
@@ -83,41 +79,28 @@ async fn main() {
 
         let leaf_index = register_identity(
             &wallet_core,
-            &registration_program,
+            &programs,
             &tree_id,
             id_commitment,
             &user_holding_id,
             *rate_limit,
         )
         .await;
+        let Some(leaf_index) = leaf_index else {
+            eprintln!(
+                "WARNING: leaf 0x{} not confirmed, continuing...",
+                hex::encode(&leaf_bytes[..8])
+            );
+            continue;
+        };
 
         eprintln!(
-            "    leaf_index={} id_commitment=0x{} rate_commitment=0x{}",
-            leaf_index,
-            hex::encode(&id_commitment[..8]),
-            hex::encode(&leaf_bytes[..8])
-        );
-
-        let finalized = wait_for_leaf(
-            &wallet_core,
-            &registration_program,
-            &tree_id,
-            leaf_index,
-            &leaf_bytes,
-            60,
-            Duration::from_millis(500),
-        )
-        .await;
-        if !finalized {
-            eprintln!("WARNING: Leaf {} not confirmed, continuing...", leaf_index);
-        }
-
-        eprintln!(
-            "  Registered {}/{}: leaf_index={} commitment={}...",
+            "  Registered {}/{}: leaf_index={} commitment=0x{}... rate_commitment=0x{}...",
             i + 1,
             entries.len(),
             leaf_index,
-            &hex::encode(&id_commitment[..8])
+            hex::encode(&id_commitment[..8]),
+            hex::encode(&leaf_bytes[..8])
         );
     }
 
