@@ -5,17 +5,12 @@
 //! source dev/env.sh && cargo run --bin register_member -- --count 5  # batch
 //! ```
 
-use std::time::Duration;
-
-use logos_lez_rln::{
-    merkle_tree::wait_for_leaf,
-    rln::{
-        client::{
-            RlnIdentity, create_identity, init_wallet, load_programs, register_identity,
-            resolve_payer, tree_id_from_env,
-        },
-        derive_config_account,
+use logos_lez_rln::rln::{
+    client::{
+        RlnIdentity, create_identity, init_wallet, register_identity, resolve_payer,
+        tree_id_from_env,
     },
+    derive_config_account, program_ids_or_exit,
 };
 
 const USER_MESSAGE_LIMIT: u64 = 100;
@@ -24,13 +19,10 @@ const USER_MESSAGE_LIMIT: u64 = 100;
 async fn main() {
     let count = parse_count();
 
-    let mut wallet_core = init_wallet().await;
     let tree_id = tree_id_from_env();
-    let (registration_program, _merkle_program) = load_programs();
-    let config_account_id = derive_config_account(
-        &logos_lez_rln::spel_seeds::program_account(&registration_program.id()),
-        &tree_id,
-    );
+    let programs = program_ids_or_exit(&tree_id);
+    let mut wallet_core = init_wallet().await;
+    let config_account_id = derive_config_account(&programs.registration, &tree_id);
 
     for i in 0..count {
         let user_holding_id = resolve_payer();
@@ -44,27 +36,19 @@ async fn main() {
 
         let leaf_index = register_identity(
             &wallet_core,
-            &registration_program,
+            &programs,
             &tree_id,
             &id_commitment_bytes,
             &user_holding_id,
             USER_MESSAGE_LIMIT,
         )
-        .await;
-
-        let finalized = wait_for_leaf(
-            &wallet_core,
-            &registration_program,
-            &tree_id,
-            leaf_index,
-            &leaf_bytes,
-            30,
-            Duration::from_millis(500),
-        )
-        .await;
-        if !finalized {
-            panic!("Timeout waiting for leaf {} to appear on-chain", leaf_index);
-        }
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "Timeout waiting for leaf 0x{} to appear on-chain",
+                hex::encode(leaf_bytes)
+            )
+        });
 
         println!("CONFIG_ACCOUNT={}", config_account_id);
         println!("LEAF_INDEX={}", leaf_index);

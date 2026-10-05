@@ -1,317 +1,318 @@
 //! Guest cycle-count measurement harness.
 //!
-//! Measures the RV32IM user-cycle cost of the merkle program's Initialize and
-//! Insert paths — the two operations that press against the per-execution
-//! session limit the sequencer enforces on every public transaction
-//! (`MAX_NUM_CYCLES_PUBLIC_EXECUTION = 1 << 25`, lee `state_machine`
-//! `program/mod.rs`). Provisioning drives one Initialize; every register and
-//! renewal drives one merkle Insert. Both were previously unmeasured — the
-//! "any opt-level/lto/strip change blows the cycle cap" note in
-//! `methods/guest/Cargo.toml` was folklore with no number behind it. Freezing
-//! these under an explicit budget turns that into an enforced invariant, so a
-//! codegen change (profile flag, precompile swap, dependency bump) that
-//! inflates cycles fails here instead of silently dropping deploys on testnet.
+//! A public transaction runs one zkVM session per plan and one per apply, and
+//! its gas (`fee_core::market::MAX_GAS_EXEC = 10M`, one gas per cycle) is the
+//! SUM over every session of every program in the call chain. This harness
+//! replays the three calls that matter — merkle Initialize (through
+//! `InitializeMerkleTree`), and a full `Register` (whose chained merkle Insert
+//! is the Poseidon-heavy session) — one session at a time, framing each call
+//! with `Program::write_plan_inputs` / `write_apply_inputs` exactly as lee
+//! does, and prints every session's cycles next to the whole-transaction
+//! count lee's own metering reports for the same call.
 //!
 //! Run:
 //! ```bash
-//! RISC0_DEV_MODE=1 cargo test -p logos-lez-rln --features rc5-state-tests \
+//! RISC0_DEV_MODE=1 cargo test --release --features rc5-state-tests \
 //!   cycle_harness -- --nocapture
 //! ```
-//! `execute()` never proves, so dev mode is optional; it only speeds the run.
-//! The `.bin`s must exist first (`cargo risczero build --manifest-path
-//! methods/guest/Cargo.toml`); if they are absent the tests skip.
+//! `execute()` never proves, so dev mode is optional. The `.bin`s must be
+//! staged (see `lez-rln/CLAUDE.md`); if they are absent the tests fail.
 
 #[cfg(all(test, feature = "rc5-state-tests"))]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::collections::HashMap;
 
-    use nssa::program::Program;
-    use nssa_core::{
-        account::{Account, AccountWithMetadata},
-        program::ProgramOutput,
+    use nssa::{
+        AccountId, PublicTransaction, V03State, ValidatedStateDiff,
+        program::{DEFAULT_PUBLIC_CYCLE_BUDGET, Program},
     };
-    use risc0_zkvm::{ExecutorEnv, default_executor};
+    use nssa_core::{
+        account::ShardData,
+        native_token::NATIVE_TOKEN_PROGRAM_ID,
+        program::{AccountMeta, ApplyInput, ApplyOutput, GuestOutput, PlanInput, PlanOutput},
+    };
+    use risc0_zkvm::{ExecutorEnv, ExecutorEnvBuilder, default_executor};
 
-    use crate::rln::{derive_config_account, derive_subtree_account};
+    use crate::state_tests::fixtures::{
+        DEFAULT_ACTIVE_DURATION_SEC, DEFAULT_GRACE_PERIOD_DURATION_SEC,
+        DEFAULT_MAX_TOTAL_RATE_LIMIT, MERKLE_ID, REG_ID, TREE_ID, TestSetup, init_tree_tx,
+        load_merkle, load_registration, register_ix, register_tx, setup, setup_config_only,
+    };
 
-    /// risc0's per-execution session limit. Still the ceiling a single guest
-    /// may not cross, but no longer the binding one — see `MAX_GAS_EXEC`.
-    const SESSION_LIMIT: u64 = 1 << 25; // 33,554,432
+    /// risc0's per-session limit; no single plan or apply may cross it.
+    const SESSION_LIMIT: u64 = 1 << 25;
 
-    /// What actually rejects a transaction (`fee_core::market::MAX_GAS_EXEC`).
-    ///
-    /// v0.2.5 meters a charged transaction by its declared `gas_limit` at one
-    /// gas per cycle and refuses to include one that declares more than this,
-    /// in any block. It is a *transaction* budget, so it covers every guest in
-    /// a chained call together — which is why the number that decides the tree
-    /// depth is measured in `state_tests`, over a whole register transaction,
-    /// not here over one guest.
+    /// What rejects a transaction: the summed cycles of all its sessions.
     const MAX_GAS_EXEC: u64 = 10_000_000;
 
-    /// Early-warning budget, deliberately below `MAX_GAS_EXEC` so a regression
-    /// that inflates cycles is caught with margin to react, rather than when
-    /// transactions start being refused.
-    const CYCLE_BUDGET: u64 = 9_000_000;
+    /// Early-warning budget for the single heaviest session (the merkle
+    /// insert's apply), below `MAX_GAS_EXEC` so a codegen or dependency change
+    /// that inflates cycles is caught with margin to react.
+    const SESSION_EARLY_WARNING: u64 = 9_000_000;
 
-    /// Arbitrary tree id — the merkle guest reads its pre-states positionally
-    /// and never checks account ids, so this only needs to be stable.
-    const TREE_ID: [u8; 32] = [7u8; 32];
-
-    fn merkle_binary_path() -> PathBuf {
-        let dir = match std::env::var_os("LEZ_RLN_GUEST_DIR") {
-            Some(d) => PathBuf::from(d),
-            None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker"),
-        };
-        dir.join("incremental_merkle_tree.bin")
-    }
-
-    fn load_merkle() -> Option<Program> {
-        let bytes = fs::read(merkle_binary_path()).ok()?;
-        Program::new(bytes.into()).ok()
-    }
-
-    /// Mirror lee `Program::execute` exactly: write the two length-prefixed
-    /// borsh frames `read_lee_call` expects, run the executor under the
-    /// production session limit, and return `(user_cycles, decoded_output)`. An
-    /// execution that exceeds `SESSION_LIMIT` fails here just as it would
-    /// on-chain.
-    fn run(
-        program: &Program,
-        pre_states: Vec<AccountWithMetadata>,
-        instruction: Vec<u8>,
-    ) -> (u64, ProgramOutput) {
-        let instruction_data =
-            Program::serialize_instruction(instruction).expect("serialize instruction");
-        let envelope: nssa_core::program::ProgramInput<nssa_core::program::InstructionData> =
-            nssa_core::program::ProgramInput {
-                self_account_id: crate::spel_seeds::program_account(&program.id()),
-                caller_account_id: None,
-                pre_states,
-                instruction: instruction_data,
-            };
-
-        let mut env_builder = ExecutorEnv::builder();
-        env_builder.session_limit(Some(SESSION_LIMIT));
-        env_builder.write_slice(&nssa_core::to_borsh_frame(
-            &nssa_core::program::CallKind::Execute,
-        ));
-        env_builder.write_slice(&nssa_core::to_borsh_frame(&envelope));
-        let env = env_builder.build().expect("build executor env");
-
-        let session = default_executor()
-            .execute(env, program.elf())
-            .expect("guest execution trapped or exceeded the 2^25-cycle session limit");
-        // The guest commits a framed borsh payload, not risc0-serde.
-        let payload = nssa_core::from_frame(session.journal.as_ref())
-            .expect("journal must be a length-prefixed frame");
-        let output: ProgramOutput = borsh::from_slice(payload).expect("decode ProgramOutput");
-        (session.cycles(), output)
-    }
-
-    /// An authorized, uninitialized `tree_main` — the sole Initialize pre-state
-    /// (`merkle_tree::initialize_tree` requires `is_authorized` and a
-    /// default-valued account).
-    fn tree_main_default(program: &Program) -> AccountWithMetadata {
-        AccountWithMetadata {
-            account: Account::default(),
-            is_authorized: true,
-            account_id: derive_config_account(
-                &crate::spel_seeds::program_account(&program.id()),
-                &TREE_ID,
+    fn programs() -> HashMap<AccountId, Program> {
+        HashMap::from([
+            (
+                REG_ID,
+                load_registration().expect("registration .bin staged"),
             ),
+            (MERKLE_ID, load_merkle().expect("merkle .bin staged")),
+        ])
+    }
+
+    /// One zkVM session, framed by `write`, under the session limit.
+    fn session(
+        program: &Program,
+        write: impl FnOnce(&mut ExecutorEnvBuilder<'_>),
+    ) -> (u64, GuestOutput) {
+        let mut builder = ExecutorEnv::builder();
+        builder.session_limit(Some(DEFAULT_PUBLIC_CYCLE_BUDGET.min(SESSION_LIMIT)));
+        write(&mut builder);
+        let env = builder.build().expect("build executor env");
+        let info = default_executor()
+            .execute(env, program.elf())
+            .expect("guest trapped or exceeded the session limit");
+        let payload = nssa_core::from_frame(&info.journal.bytes).expect("framed journal");
+        (
+            info.cycles(),
+            borsh::from_slice(payload).expect("journal decodes as GuestOutput"),
+        )
+    }
+
+    fn plan(program: &Program, input: &PlanInput) -> (u64, PlanOutput) {
+        match session(program, |env| {
+            Program::write_plan_inputs(input, env).expect("frame plan input");
+        }) {
+            (cycles, GuestOutput::Plan(out)) => (cycles, out),
+            (_, GuestOutput::Apply(_)) => panic!("a plan returned an apply journal"),
         }
+    }
+
+    fn apply(program: &Program, input: &ApplyInput) -> (u64, ApplyOutput) {
+        match session(program, |env| {
+            Program::write_apply_inputs(input, env).expect("frame apply input");
+        }) {
+            (cycles, GuestOutput::Apply(out)) => (cycles, out),
+            (_, GuestOutput::Plan(_)) => panic!("an apply returned a plan journal"),
+        }
+    }
+
+    /// Shards keyed by `(account, owning program)`, seeded from a state.
+    type Shards = HashMap<(AccountId, AccountId), ShardData>;
+
+    /// Replay one call and its chained calls in lee's order (a call's effects
+    /// apply right after its plan, then its chained calls run), recording
+    /// every session. Native transfers run as Rust in lee — no session — and
+    /// are skipped.
+    fn replay(
+        programs: &HashMap<AccountId, Program>,
+        shards: &mut Shards,
+        program_id: AccountId,
+        caller: Option<AccountId>,
+        accounts: Vec<AccountMeta>,
+        instruction_data: Vec<u8>,
+        log: &mut Vec<(String, u64)>,
+    ) {
+        let program = &programs[&program_id];
+        let name = if program_id == REG_ID {
+            "registration"
+        } else {
+            "merkle"
+        };
+        let input = PlanInput {
+            self_account_id: program_id,
+            caller_account_id: caller,
+            accounts,
+            instruction_data,
+        };
+        let (cycles, out) = plan(program, &input);
+        log.push((format!("{name} plan"), cycles));
+
+        for effect in &out.effects {
+            let key = (
+                effect.selector.account_id,
+                effect.selector.program_account_id,
+            );
+            let pre_data = shards.get(&key).cloned().unwrap_or_default();
+            let (cycles, applied) = apply(
+                program,
+                &ApplyInput {
+                    self_account_id: program_id,
+                    selector: effect.selector,
+                    pre_data,
+                    effect_data: effect.data.clone(),
+                },
+            );
+            log.push((format!("{name} apply {:?}", short(&key.0)), cycles));
+            if let Some(post) = applied.post_data {
+                shards.insert(key, post);
+            }
+        }
+
+        for call in out.chained_calls {
+            if call.program_account_id == NATIVE_TOKEN_PROGRAM_ID {
+                continue;
+            }
+            let metas = call
+                .shard_selectors
+                .iter()
+                .map(|s| AccountMeta::new(s.account_id, true, s.program_account_id))
+                .collect();
+            replay(
+                programs,
+                shards,
+                call.program_account_id,
+                Some(program_id),
+                metas,
+                call.instruction_data,
+                log,
+            );
+        }
+    }
+
+    fn short(id: &AccountId) -> String {
+        hex::encode(&id.value()[..4])
+    }
+
+    /// Every shard of every account the transaction names, from `state`.
+    fn shards_of(state: &V03State, tx: &PublicTransaction) -> Shards {
+        tx.message()
+            .shard_selectors
+            .iter()
+            .map(|s| {
+                (
+                    (s.account_id, s.program_account_id),
+                    state
+                        .get_account_by_id(s.account_id)
+                        .data
+                        .shard(s.program_account_id)
+                        .clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn whole_tx_cycles(state: &V03State, tx: &PublicTransaction) -> u64 {
+        ValidatedStateDiff::from_public_transaction_with_cycle_budget(tx, state, 1, 0, MAX_GAS_EXEC)
+            .expect("transaction executes within MAX_GAS_EXEC")
+            .1
+            .cycles
+    }
+
+    /// Replay `tx` session by session, print the table, and check it against
+    /// lee's whole-transaction count.
+    fn measure(
+        label: &str,
+        state: &V03State,
+        tx: &PublicTransaction,
+        payer: Option<AccountId>,
+    ) -> Vec<(String, u64)> {
+        let programs = programs();
+        let mut shards = shards_of(state, tx);
+        let message = tx.message();
+        let accounts = message
+            .shard_selectors
+            .iter()
+            .map(|s| {
+                AccountMeta::new(
+                    s.account_id,
+                    Some(s.account_id) == payer,
+                    s.program_account_id,
+                )
+            })
+            .collect();
+        let mut log = Vec::new();
+        replay(
+            &programs,
+            &mut shards,
+            message.program_account_id,
+            None,
+            accounts,
+            message.instruction_data.clone(),
+            &mut log,
+        );
+
+        let sum: u64 = log.iter().map(|(_, c)| c).sum();
+        let whole = whole_tx_cycles(state, tx);
+        println!("── {label} ──");
+        for (what, cycles) in &log {
+            println!("  {what:<32} {cycles:>10}");
+        }
+        println!(
+            "  {:<32} {sum:>10}\n  {:<32} {whole:>10} ({:.1}% of MAX_GAS_EXEC)",
+            "sum of sessions",
+            "whole tx (lee metering)",
+            whole as f64 / MAX_GAS_EXEC as f64 * 100.0
+        );
+        assert_eq!(
+            sum, whole,
+            "{label}: the session replay must account for every metered cycle"
+        );
+        for (what, cycles) in &log {
+            assert!(
+                *cycles < SESSION_LIMIT,
+                "{label}: {what} crosses the session limit"
+            );
+        }
+        assert!(
+            whole <= MAX_GAS_EXEC,
+            "{label}: {whole} cycles over MAX_GAS_EXEC"
+        );
+        log
     }
 
     #[test]
     fn merkle_initialize_cycles_under_budget() {
-        let Some(program) = load_merkle() else {
-            eprintln!(
-                "skipping cycle harness: merkle .bin not built \
-                 (cargo risczero build --manifest-path methods/guest/Cargo.toml)"
+        let setup = setup_config_only(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
+        )
+        .expect("guest .bins staged");
+        let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
+        let log = measure("InitializeMerkleTree", &setup.state, &tx, None);
+        assert!(log.iter().any(|(w, _)| w.starts_with("merkle apply")));
+    }
+
+    #[test]
+    fn register_and_merkle_insert_cycles_under_budget() {
+        let setup: TestSetup = setup().expect("guest .bins staged");
+        let mut id_commitment = [0u8; 32];
+        id_commitment[0] = 0x42;
+        let tx = register_tx(&setup, register_ix(&setup.state, id_commitment, 100));
+        let log = measure(
+            "Register (incl. merkle Insert)",
+            &setup.state,
+            &tx,
+            Some(setup.payer_id),
+        );
+
+        let (_, insert) = log
+            .iter()
+            .rev()
+            .find(|(w, _)| w.starts_with("merkle apply"))
+            .expect("the register chain ends in a merkle insert");
+        assert!(
+            *insert < SESSION_EARLY_WARNING,
+            "merkle Insert apply {insert} cycles exceeds the early-warning budget \
+             {SESSION_EARLY_WARNING}"
+        );
+    }
+
+    /// The deploy path uploads only the user ELF and re-attaches the
+    /// protocol's kernel; the loader refuses a `.bin` whose kernel is anything
+    /// but `V1COMPAT_ELF`. A staged `.bin` must pass that check as-is.
+    #[test]
+    fn staged_bins_carry_the_canonical_kernel() {
+        for name in ["rln_registration", "incremental_merkle_tree"] {
+            let path = crate::state_tests::fixtures::guest_binary_dir().join(format!("{name}.bin"));
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+            let segments = crate::rln::client::deploy_segment_count(&bytes)
+                .unwrap_or_else(|e| panic!("{name}.bin is not deployable: {e}"));
+            println!(
+                "{name}.bin: {} B, {segments} deploy segment(s)",
+                bytes.len()
             );
-            return;
-        };
-
-        let (cycles, _out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
-        println!(
-            "merkle Initialize: {cycles} user cycles ({:.1}% of MAX_GAS_EXEC)",
-            cycles as f64 / MAX_GAS_EXEC as f64 * 100.0
-        );
-        assert!(
-            cycles < CYCLE_BUDGET,
-            "merkle Initialize {cycles} cycles exceeds budget {CYCLE_BUDGET} \
-             (transactions are refused above MAX_GAS_EXEC = {MAX_GAS_EXEC})"
-        );
-    }
-
-    /// Locate the risc0-toolchain `llvm-strip` at test runtime. Unlike the
-    /// build script we have no `HOST` env var here, so glob the host-triple dir.
-    fn locate_llvm_strip() -> Option<PathBuf> {
-        if let Some(p) = std::env::var_os("RISC0_LLVM_STRIP") {
-            let p = PathBuf::from(p);
-            if p.exists() {
-                return Some(p);
-            }
         }
-        let home = std::env::var_os("HOME")?;
-        let toolchains = PathBuf::from(home).join(".risc0").join("toolchains");
-        for tc in fs::read_dir(&toolchains).ok()?.flatten() {
-            let name = tc.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with('v') || !name.contains("-rust-") {
-                continue;
-            }
-            let rustlib = tc.path().join("lib").join("rustlib");
-            let Ok(triples) = fs::read_dir(&rustlib) else {
-                continue;
-            };
-            for triple in triples.flatten() {
-                let cand = triple.path().join("bin").join("llvm-strip");
-                if cand.exists() {
-                    return Some(cand);
-                }
-            }
-        }
-        None
-    }
-
-    /// Mirror of `build.rs`'s R0BF strip, in-memory: strip both the user and
-    /// kernel ELFs and repack. Kept byte-for-byte equivalent to the build
-    /// script so this test proves what the build script produces.
-    fn strip_both_elfs(blob: &[u8], strip: &std::path::Path) -> Vec<u8> {
-        let rd = |off: usize| u32::from_le_bytes(blob[off..off + 4].try_into().unwrap());
-        assert_eq!(&blob[0..4], b"R0BF");
-        assert_eq!(rd(4), 1, "R0BF v1 expected");
-        let header_len = rd(8) as usize;
-        let header = &blob[12..12 + header_len];
-        let ul_off = 12 + header_len;
-        let user_len = rd(ul_off) as usize;
-        let user_off = ul_off + 4;
-        let user_elf = &blob[user_off..user_off + user_len];
-        let kernel_elf = &blob[user_off + user_len..];
-
-        let strip_one = |elf: &[u8], tag: &str| -> Vec<u8> {
-            let tmp = std::env::temp_dir().join(format!("lezrln_strip_{tag}.elf"));
-            fs::write(&tmp, elf).unwrap();
-            let ok = std::process::Command::new(strip)
-                .args(["--strip-all", tmp.to_str().unwrap()])
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok, "llvm-strip failed");
-            let out = fs::read(&tmp).unwrap();
-            fs::remove_file(&tmp).ok();
-            out
-        };
-        let su = strip_one(user_elf, "user");
-        let sk = strip_one(kernel_elf, "kernel");
-
-        let mut out = Vec::with_capacity(blob.len());
-        out.extend_from_slice(b"R0BF");
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&(header_len as u32).to_le_bytes());
-        out.extend_from_slice(header);
-        out.extend_from_slice(&(su.len() as u32).to_le_bytes());
-        out.extend_from_slice(&su);
-        out.extend_from_slice(&sk);
-        out
-    }
-
-    /// Verifies the load-bearing assumption behind the build.rs kernel-strip:
-    /// a `.bin` whose kernel ELF has been stripped still decodes via
-    /// `ProgramBinary::decode` (inside `Program::new`) AND still executes.
-    #[test]
-    fn stripped_kernel_binary_still_loads_and_runs() {
-        let path = merkle_binary_path();
-        let Ok(blob) = fs::read(&path) else {
-            eprintln!("skipping: merkle .bin not built");
-            return;
-        };
-        let Some(strip) = locate_llvm_strip() else {
-            eprintln!("skipping: llvm-strip not found under ~/.risc0/toolchains");
-            return;
-        };
-
-        let stripped = strip_both_elfs(&blob, &strip);
-        println!(
-            "kernel-strip: {} -> {} B (saved {} B)",
-            blob.len(),
-            stripped.len(),
-            blob.len() as i64 - stripped.len() as i64
-        );
-        // `<=`, not `<`: stripping is idempotent, and build.rs strips the
-        // docker `.bin` in place on every `cargo build` of the methods crate.
-        // So this test's input is already stripped except in the window between
-        // a `cargo risczero build` and the next `cargo build` — a strict `<`
-        // turns that normal state into a red test. Size is incidental here
-        // anyway; what the test is for is that a stripped-kernel container
-        // still decodes and still executes.
-        assert!(
-            stripped.len() <= blob.len(),
-            "stripping must never grow the binary"
-        );
-
-        // Load-bearing: risc0 must still decode the stripped-kernel container.
-        let program = Program::new(stripped.into())
-            .expect("stripped-kernel .bin must decode via Program::new");
-
-        // And it must still execute (the stripped kernel is what the sequencer runs).
-        let (cycles, out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
-        assert_eq!(out.state_diffs.len(), 1, "Initialize yields one diff");
-        println!("stripped-kernel Initialize executed: {cycles} cycles");
-    }
-
-    #[test]
-    fn merkle_insert_cycles_under_budget() {
-        let Some(program) = load_merkle() else {
-            eprintln!("skipping cycle harness: merkle .bin not built");
-            return;
-        };
-
-        // Initialize first to obtain a live tree_main state to insert into.
-        let (_init_cycles, init_out) = run(&program, vec![tree_main_default(&program)], vec![0u8]);
-        let diff = init_out.state_diffs[0].clone();
-        let mut main_initialized = diff.pre_state.account;
-        if let Some(data) = diff.post_data {
-            main_initialized.data = data;
-        }
-
-        let main_pre = AccountWithMetadata {
-            account: main_initialized,
-            is_authorized: true,
-            account_id: derive_config_account(
-                &crate::spel_seeds::program_account(&program.id()),
-                &TREE_ID,
-            ),
-        };
-        // Bottom subtree for leaf 0 — starts default; a distinct id from main.
-        let subtree_pre = AccountWithMetadata {
-            account: Account::default(),
-            is_authorized: true,
-            account_id: derive_subtree_account(
-                &crate::spel_seeds::program_account(&program.id()),
-                &TREE_ID,
-                0,
-            ),
-        };
-
-        // opcode 1 (insert) || expected_index=0 (u64 LE) || leaf (valid BN254 fe).
-        let mut instruction = vec![1u8];
-        instruction.extend_from_slice(&0u64.to_le_bytes());
-        let mut leaf = [0u8; 32];
-        leaf[0] = 1; // 1 < the BN254 scalar modulus, so a valid field element
-        instruction.extend_from_slice(&leaf);
-
-        let (cycles, _out) = run(&program, vec![main_pre, subtree_pre], instruction);
-        println!(
-            "merkle Insert: {cycles} user cycles ({:.1}% of MAX_GAS_EXEC)",
-            cycles as f64 / MAX_GAS_EXEC as f64 * 100.0
-        );
-        assert!(
-            cycles < CYCLE_BUDGET,
-            "merkle Insert {cycles} cycles exceeds budget {CYCLE_BUDGET} \
-             (transactions are refused above MAX_GAS_EXEC = {MAX_GAS_EXEC})"
-        );
     }
 }

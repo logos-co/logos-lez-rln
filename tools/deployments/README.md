@@ -8,15 +8,37 @@ A **deployment** = one on-chain RLN instance, fully captured by two files:
 
 ```
 deployments/<name>/
-  deployment.json   # tree_id + sequencer + program_ids + derived config + payer/treasury
+  deployment.json   # tree_id + sequencer + both program ids + derived config + payer/treasury
   storage.json      # the wallet (holds the payer's keypair)
 ```
 
-`tree_id` is the single source of truth: `config` and `tree_main` are **derived** PDAs of
-`(registration_program_id, tree_id)`; `payer_account` is a **pointer into the wallet**.
-`treasury_account` is neither — it is a plain account created at provisioning time, so the
-descriptor is the only record of where a registry's revenue accrues. Nothing to keep in
-sync by hand, and a stale `config` can't silently disagree with the tree. All scripts are
+`deployment.json`:
+
+```json
+{
+  "name": "<name>",
+  "tree_id": "<64 hex>",
+  "sequencer": "<url>",
+  "registration_program_id": "<64 hex>",
+  "merkle_program_id": "<64 hex>",
+  "config_account": "<base58>",
+  "payer_account": "<base58>",
+  "treasury_account": "<base58>"
+}
+```
+
+**Program ids are recorded, not derived.** A program's account id is the header account its
+deployer created and signed in `run_setup`; it is not a function of the guest `.bin`.
+`run_setup` writes both ids to `~/.logos-lez-rln/programs_<tree_hex>.json`, `provision.sh`
+copies them into `registration_program_id` / `merkle_program_id`, and `stage.sh`'s `env.sh`
+exports them as `LEZ_RLN_REGISTRATION_PROGRAM_ID` / `LEZ_RLN_MERKLE_PROGRAM_ID`, which every
+tool reads in preference to the record.
+
+`tree_id` and the registration program id together determine `config` and `tree_main`, which
+are **derived** PDAs of `(registration_program_id, tree_id)`; `payer_account` is a **pointer
+into the wallet**. `treasury_account` is neither — it is a plain account created at
+provisioning time, so the descriptor is the only record of where a registry's revenue
+accrues. A stale `config` can't silently disagree with the ids (`verify.sh`). All scripts are
 bash+jq (no Python) so they run in-sim and in image builds.
 
 ## Paying for a membership
@@ -48,8 +70,10 @@ bash tools/deployments/stage.sh <deployment_dir> <out_dir>
 
 Emits the flat files `run_setup`/`register_member`/node daemons already expect
 (`storage.json.seed`, `wallet_config.json`, `config_account.txt`,
-`payer_account.txt`, `treasury_account.txt`, `env.sh`). Asserts the wallet is rc6
-(`key_chain.accounts`) and that it actually contains the descriptor's payer account —
+`payer_account.txt`, `treasury_account.txt`, `env.sh`). `env.sh` exports
+`LEE_WALLET_HOME_DIR`, `LEZ_RLN_TREE_ID_HEX`, `LEZ_RLN_PAYER` and both program ids.
+Requires both program ids as 64-hex fields, asserts the wallet has
+`key_chain.accounts`, and that it actually contains the descriptor's payer account —
 a mismatched wallet fails at stage time, not at runtime. The treasury is only ever
 credited, so no wallet need hold it.
 
@@ -62,26 +86,32 @@ credited, so no wallet need hold it.
 (cd lez-rln && PYO3_PYTHON=$(command -v python3) cargo build --release --bin run_setup --bin derive_accounts)
 
 # fresh tree + fresh wallet. --payer is required: it pays the deploy fees and
-# becomes the deployment's payer_account.
+# becomes the deployment's payer_account. Deploy and init transactions declare
+# the wallet's gas_limit (10,000,000 in the generated wallet_config.json), so the
+# payer's balance must cover gas_limit x base fee per transaction.
 bash tools/deployments/provision.sh --name my-run --payer <account-id>
+
+# reuse programs already on the chain: export their header ids first.
+LEZ_RLN_REGISTRATION_PROGRAM_ID=<64hex> LEZ_RLN_MERKLE_PROGRAM_ID=<64hex> \
+  bash tools/deployments/provision.sh --name my-run --payer <account-id>
 
 # reuse another sim's wallet (shared accounts), specific tree, write into a consumer repo:
 bash tools/deployments/provision.sh --name shared --payer <account-id> --tree <64hex> \
      --adopt-wallet /path/to/other/storage.json --outdir /path/to/consumer/deployments
 ```
 
-## verify.sh — guest-drift guard
+## verify.sh — descriptor consistency guard
 
 ```bash
 bash tools/deployments/verify.sh deployments/<name>
 ```
 
-Re-derives `program_id`/`config` from the **current** guest binaries (via `derive_accounts`,
-reusing the real PDA math) and diffs the descriptor. If the guest changed
-(different `program_id`), the same `tree_id` derives a different `config` and this fails
-with "guest changed; re-run provision" — surfacing drift instead of a mystery tree bug.
-Staging itself trusts the descriptor's cached `config` (so it needs no toolchain);
-`verify.sh` is the dev/CI gate that keeps that cache honest.
-
-Note: `lssa` is fetched by the flake (`fetchFromGitHub`, rev `v0.2.0-rc6`); a host
-`cargo build` of the bins needs a plain sibling clone at `lssa/` (same rev).
+Re-derives `config_account` from the descriptor's `registration_program_id` and `tree_id`
+(via `derive_accounts`, reusing the real PDA math) and diffs the descriptor's cache. If
+`~/.logos-lez-rln/programs_<tree_hex>.json` exists it must name the descriptor's two
+program ids; otherwise that cross-check is skipped and says so. Then it runs `stage.sh`'s
+wallet binding. Program ids cannot be re-derived from the guest binaries, so this does not
+detect a rebuilt guest: `run_setup` checks that each program header carries the local
+binary's image id when it deploys or reuses a program.
+Staging itself trusts the descriptor (so it needs no toolchain); `verify.sh` is the
+dev/CI gate that keeps the cached `config` honest.

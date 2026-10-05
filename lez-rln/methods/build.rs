@@ -1,6 +1,8 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use risc0_build::GuestOptionsBuilder;
 
@@ -8,29 +10,31 @@ fn main() {
     // Local (non-docker) build: docker mode's context (lez-rln/) excludes the
     // sibling lssa/spel path deps, and needs a running daemon. Local mode builds
     // the guest directly with the host risc0 toolchain, resolving path deps.
-    let opts = GuestOptionsBuilder::default()
-        .build()
-        .unwrap();
+    let opts = GuestOptionsBuilder::default().build().unwrap();
     let mut map = HashMap::new();
     map.insert("logos_lez_rln_guest", opts);
     risc0_build::embed_methods_with_options(map);
 
     // Post-build: strip non-loadable sections (symtab/strtab/eh_frame/etc.)
-    // from the user ELF inside each R0BF .bin so the deploy tx fits under the
-    // testnet's 511,800-byte per-tx cap. The on-chain image_id changes (the
-    // ELF header bytes are part of the first PT_LOAD segment), but the lez-rln
-    // host reads the .bin file fresh at runtime via `Program::new`, so the
-    // expected program ID matches the deployed bytecode automatically.
+    // from the user ELF inside each R0BF .bin. Deploys upload only the user
+    // ELF, in 96 KiB segments, so this trims segment count rather than a
+    // per-tx cap. The on-chain image_id changes (the ELF header bytes are part
+    // of the first PT_LOAD segment), but the lez-rln host reads the .bin file
+    // fresh at runtime via `Program::new`, so the expected program ID matches
+    // the deployed bytecode automatically.
+    //
+    // The kernel ELF is left untouched: the program loader refuses any binary
+    // whose kernel is not byte-identical to `risc0_zkos_v1compat::V1COMPAT_ELF`,
+    // and it is never uploaded anyway.
     let strip = locate_llvm_strip()
         .expect("llvm-strip not found under ~/.risc0/toolchains/*/lib/rustlib/*/bin/");
 
     // Strip both guest build trees when present (idempotent — a stripped R0BF
     // re-strips to the same bytes):
     //   - the methods-crate local build (`cargo build`), and
-    //   - the reproducible docker build (`cargo risczero build`), which is the
-    //     DEPLOY artifact the host reads via `REGISTRATION_BINARY`. This one is
-    //     produced by a separate invocation, so a `cargo build` after
-    //     `cargo risczero build` is what strips it under the per-tx cap.
+    //   - the reproducible docker build (`cargo risczero build`), which is the DEPLOY artifact the
+    //     host reads via `REGISTRATION_BINARY`. This one is produced by a separate invocation, so a
+    //     `cargo build` after `cargo risczero build` is what strips it under the per-tx cap.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let bin_dirs = [
         manifest
@@ -83,21 +87,18 @@ fn locate_llvm_strip() -> Option<PathBuf> {
     None
 }
 
-/// Strip both ELFs inside a risc0 `R0BF` binary in place. Format is:
+/// Strip the user ELF inside a risc0 `R0BF` binary in place. Format is:
 /// `b"R0BF" | u32 version | u32 header_len | header | u32 user_len | user_elf | kernel_elf`.
-/// We unpack the user and kernel ELFs, run `llvm-strip --strip-all` on each,
-/// and re-pack. Both carry non-loadable sections (symtab/strtab/comment) the
-/// zkVM never maps into its image, so stripping them removes deploy-tx bytes
-/// without changing one executed instruction — the kernel ELF alone sheds
-/// ~11 KB (its ~15 KB of section/string tables). risc0's `ProgramBinary::decode`
-/// re-parses both ELFs on deploy, so the stripped kernel must still decode;
-/// `cycle_harness::tests::stripped_kernel_binary_still_loads` verifies that.
+/// We unpack the user ELF, run `llvm-strip --strip-all` on it, and re-pack
+/// with the kernel ELF byte-for-byte unchanged. The user ELF carries
+/// non-loadable sections (symtab/strtab/comment) the zkVM never maps into its
+/// image, so stripping them removes deploy bytes without changing one executed
+/// instruction.
 fn strip_program_binary(path: &Path, strip: &Path) {
     let blob = std::fs::read(path).expect("read program binary");
     let (header, user_elf, kernel_elf) = split_r0bf(&blob, path);
 
     let stripped_user = strip_elf(user_elf, strip, &path.with_extension("user.elf.tmp"));
-    let stripped_kernel = strip_elf(kernel_elf, strip, &path.with_extension("kernel.elf.tmp"));
 
     let ver: u32 = 1;
     let mut out: Vec<u8> = Vec::with_capacity(blob.len());
@@ -107,27 +108,28 @@ fn strip_program_binary(path: &Path, strip: &Path) {
     out.extend_from_slice(header);
     out.extend_from_slice(&(stripped_user.len() as u32).to_le_bytes());
     out.extend_from_slice(&stripped_user);
-    out.extend_from_slice(&stripped_kernel);
+    out.extend_from_slice(kernel_elf);
     std::fs::write(path, &out).expect("write stripped binary");
     println!(
-        "cargo:warning=stripped {} : {} -> {} B (user {}->{}, kernel {}->{})",
+        "cargo:warning=stripped {} : {} -> {} B (user {}->{})",
         path.file_name().unwrap().to_string_lossy(),
         blob.len(),
         out.len(),
         user_elf.len(),
         stripped_user.len(),
-        kernel_elf.len(),
-        stripped_kernel.len(),
     );
 }
 
 /// Split an `R0BF` v1 blob into `(header, user_elf, kernel_elf)` slices.
 fn split_r0bf<'a>(blob: &'a [u8], path: &Path) -> (&'a [u8], &'a [u8], &'a [u8]) {
-    let read_u32 = |b: &[u8], off: usize| -> u32 {
-        u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-    };
+    let read_u32 =
+        |b: &[u8], off: usize| -> u32 { u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) };
     let mut cur = 0usize;
-    assert_eq!(&blob[cur..cur + 4], b"R0BF", "expected R0BF magic in {path:?}");
+    assert_eq!(
+        &blob[cur..cur + 4],
+        b"R0BF",
+        "expected R0BF magic in {path:?}"
+    );
     cur += 4;
     // The parse assumes the v1 container layout; refuse anything else rather
     // than silently repacking (and version-clobbering) a future format.

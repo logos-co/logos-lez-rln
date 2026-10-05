@@ -1,11 +1,10 @@
-//! Shared Borsh-encoded state structs for the SPEL `rln_registration` program.
+//! Shared Borsh-encoded state structs for the `rln_registration` program.
 //!
-//! These mirror the `#[account_type]` definitions in
-//! `methods/guest/src/bin/rln_registration.rs`. The guest binary re-uses
-//! these by wrapping them in the `#[account_type]` macro; the host can either
+//! The guest reads and writes these in its apply phase; the host can either
 //! deserialize via `borsh::from_slice` or read individual fields by the
 //! offset constants in `src/rln/constants.rs` (kept consistent with this
-//! struct's field declaration order).
+//! struct's field declaration order). Each lives in the registration
+//! program's shard of its PDA.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -38,12 +37,20 @@ pub struct ConfigState {
     pub grace_period_duration_for_new_memberships_sec: u32,
 }
 
-/// Borsh layout for a per-member account in the SPEL registration program.
+impl ConfigState {
+    /// Whether `rate_limit` more units fit under `max_total_rate_limit`.
+    pub fn can_register(&self, rate_limit: u64) -> bool {
+        self.current_total_rate_limit.saturating_add(rate_limit) <= self.max_total_rate_limit
+    }
+}
+
+/// Borsh layout for a per-member account in the registration program.
 ///
-/// Fixed size: 64 bytes.
+/// Fixed size: 56 bytes. It records no leaf index: the tree assigns the index
+/// at insert time, and a reader finds a member's leaf by scanning the tree
+/// for `H(id_commitment, rate_limit)`.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct MembershipState {
-    pub leaf_index: u64,
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],
     /// Snapshotted from the config at registration.
@@ -61,7 +68,7 @@ pub struct MembershipState {
 pub const CONFIG_STATE_SIZE: usize = 144;
 
 /// Serialized size of [`MembershipState`], in bytes.
-pub const MEMBERSHIP_STATE_SIZE: usize = 64;
+pub const MEMBERSHIP_STATE_SIZE: usize = 56;
 
 #[cfg(test)]
 mod tests {
@@ -142,7 +149,6 @@ mod tests {
     #[test]
     fn membership_state_is_the_size_its_readers_assume() {
         let membership = MembershipState {
-            leaf_index: 1,
             rate_limit: 2,
             id_commitment: [3; 32],
             grace_period_start_timestamp_ms: 4,

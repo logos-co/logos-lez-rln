@@ -1,15 +1,16 @@
-//! Helpers shared by the SPEL `rln_registration` guest binary.
+//! Helpers shared by the `rln_registration` program's plan and apply phases.
 
-use nssa_core::{Timestamp, account::AccountWithMetadata};
-// ============================================================================
-// Merkle Tree Account Layout
-// ============================================================================
-pub use rln_layouts::OFFSET_NEXT_INDEX as TREE_OFFSET_NEXT_INDEX;
+use nssa_core::program::AccountMeta;
+use rln_layouts::exit::{EXIT_CLOCK_NOT_INITIALIZED, EXIT_STALE_CLOCK};
 
-use crate::hash::{hash_pair, validate_field_element};
 // Re-export rate limit and expiration constants / helpers from shared crate
 pub use crate::layouts::{
-    CLOCK_50_ACCOUNT_ID_BYTES, MAX_RATE_LIMIT, MIN_RATE_LIMIT, is_expired, is_in_grace_period,
+    CLOCK_50_ACCOUNT_ID_BYTES, CLOCK_CLAIM_TOLERANCE_MS, MAX_RATE_LIMIT, MIN_RATE_LIMIT,
+    is_expired, is_in_grace_period,
+};
+use crate::{
+    ensure,
+    hash::{hash_pair, validate_field_element},
 };
 
 // ============================================================================
@@ -37,12 +38,9 @@ pub fn validate_rate_limit(rate_limit: u64) {
 
 /// Price of a membership at `rate_limit`, in native atomic units.
 ///
-/// Saturating rather than wrapping: the product of a u128 price and a
-/// rate limit capped at `MAX_RATE_LIMIT` cannot realistically overflow, but
-/// this now prices a debit against a REAL balance rather than a test token,
-/// and a wrapped product would compute a price nobody asked for. Saturation
-/// turns that into an unaffordable one, which the caller's balance assert
-/// then refuses.
+/// Saturating rather than wrapping: a wrapped product would price a debit
+/// against a real balance at an amount nobody asked for, while a saturated
+/// one is unaffordable and the native transfer refuses it.
 pub fn calculate_payment_amount(rate_limit: u64, price_per_unit: u128) -> u128 {
     price_per_unit.saturating_mul(rate_limit as u128)
 }
@@ -62,43 +60,45 @@ pub fn compute_registration_leaf(id_commitment: &[u8; 32], rate_limit: u64) -> [
 }
 
 // ============================================================================
-// Merkle Tree Helpers
-// ============================================================================
-
-/// Read next_index from tree main account data.
-pub fn read_tree_next_index(tree_main_data: &[u8]) -> u64 {
-    u64::from_le_bytes(
-        tree_main_data[TREE_OFFSET_NEXT_INDEX..TREE_OFFSET_NEXT_INDEX + 8]
-            .try_into()
-            .unwrap(),
-    )
-}
-
-// ============================================================================
 // Clock Helpers
 // ============================================================================
 
-/// Validate that `clock_account` is the expected CLOCK_50 system account and
-/// return its current unix timestamp.
-///
-/// A zero timestamp is refused rather than returned: CLOCK_50 carries the
-/// genesis zero until the sequencer's first refresh of it (every 50 blocks),
-/// and a membership stamped from that dates its whole lifetime to 1970 and
-/// expires the instant the clock is first written. There is no timestamp a
-/// live chain could legitimately report as zero, so every time-dependent
-/// instruction refuses to run until the clock exists.
-pub fn require_clock_ms(clock_account: &AccountWithMetadata) -> Timestamp {
+/// Plan side of the clock guard: `clock` must name `CLOCK_50`'s clock-program
+/// shard, the only shard of that account holding `ClockAccountData`.
+pub fn require_clock_account(clock: &AccountMeta) {
     assert!(
-        *clock_account.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
+        *clock.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
         "Wrong clock account provided"
     );
-    let now_ms =
-        clock_core::ClockAccountData::from_bytes(clock_account.account.data.as_ref()).timestamp;
     assert!(
-        now_ms > 0,
+        clock.program_account_id == clock_core::clock_account_id(),
+        "Clock account must select the clock program's shard"
+    );
+}
+
+/// Apply side of the clock guard: the claimed `now_ms` must be at most
+/// `CLOCK_CLAIM_TOLERANCE_MS` behind the clock shard's timestamp, and never
+/// ahead of it. An equality claim would revert any transaction that straddles
+/// a `CLOCK_50` step; see the constant for why an older claim is safe.
+///
+/// A zero timestamp is refused: CLOCK_50 carries the genesis zero until the
+/// sequencer's first refresh of it (every 50 blocks), and a membership stamped
+/// from that dates its whole lifetime to 1970 and expires the instant the
+/// clock is first written. No live chain reports zero, so every
+/// time-dependent instruction refuses to run until the clock exists.
+pub fn assert_clock_is(clock_pre_data: &[u8], now_ms: u64) {
+    let timestamp = clock_core::ClockAccountData::from_bytes(clock_pre_data).timestamp;
+    ensure!(
+        timestamp > 0,
+        EXIT_CLOCK_NOT_INITIALIZED,
         "ClockNotInitialized: CLOCK_50 has not been written yet"
     );
-    now_ms
+    ensure!(
+        now_ms <= timestamp && timestamp - now_ms <= CLOCK_CLAIM_TOLERANCE_MS,
+        EXIT_STALE_CLOCK,
+        "Claimed now_ms {now_ms} is not within {CLOCK_CLAIM_TOLERANCE_MS} ms before \
+         CLOCK_50's timestamp {timestamp}"
+    );
 }
 
 // ============================================================================
@@ -186,5 +186,88 @@ mod tests {
         let start_ms = 1_000u64;
         assert!(!is_in_grace_period(start_ms, 0, 1_000));
         assert!(is_expired(start_ms, 0, 1_000));
+    }
+
+    fn clock_bytes(timestamp: u64) -> Vec<u8> {
+        clock_core::ClockAccountData {
+            block_id: 7,
+            timestamp,
+        }
+        .to_bytes()
+    }
+
+    fn clock_meta(
+        account_id: [u8; 32],
+        program_account_id: nssa_core::account::AccountId,
+    ) -> AccountMeta {
+        AccountMeta::new(
+            nssa_core::account::AccountId::new(account_id),
+            false,
+            program_account_id,
+        )
+    }
+
+    #[test]
+    fn require_clock_account_accepts_clock50_clock_shard() {
+        require_clock_account(&clock_meta(
+            CLOCK_50_ACCOUNT_ID_BYTES,
+            clock_core::clock_account_id(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "Wrong clock account")]
+    fn require_clock_account_rejects_other_account() {
+        require_clock_account(&clock_meta([9u8; 32], clock_core::clock_account_id()));
+    }
+
+    #[test]
+    #[should_panic(expected = "clock program's shard")]
+    fn require_clock_account_rejects_foreign_shard() {
+        require_clock_account(&clock_meta(
+            CLOCK_50_ACCOUNT_ID_BYTES,
+            nssa_core::account::AccountId::new([3u8; 32]),
+        ));
+    }
+
+    /// The host names the clock shard by `rln_layouts`' mirror of the id.
+    #[test]
+    fn clock_program_id_mirror_matches_clock_core() {
+        assert_eq!(
+            rln_layouts::clock_program_account_id(),
+            *clock_core::clock_account_id().value()
+        );
+    }
+
+    const T: u64 = 10_000_000;
+
+    #[test]
+    fn assert_clock_is_accepts_matching_timestamp() {
+        assert_clock_is(&clock_bytes(T), T);
+    }
+
+    /// The clock stepped after the claim was read: still accepted.
+    #[test]
+    fn assert_clock_is_accepts_a_claim_up_to_the_tolerance_behind() {
+        assert_clock_is(&clock_bytes(T), T - 1);
+        assert_clock_is(&clock_bytes(T), T - CLOCK_CLAIM_TOLERANCE_MS);
+    }
+
+    #[test]
+    #[should_panic(expected = "exit 10: Claimed now_ms")]
+    fn assert_clock_is_rejects_a_claim_ahead_of_the_clock() {
+        assert_clock_is(&clock_bytes(T), T + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "exit 10: Claimed now_ms")]
+    fn assert_clock_is_rejects_a_claim_older_than_the_tolerance() {
+        assert_clock_is(&clock_bytes(T), T - CLOCK_CLAIM_TOLERANCE_MS - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ClockNotInitialized")]
+    fn assert_clock_is_rejects_genesis_zero() {
+        assert_clock_is(&clock_bytes(0), 0);
     }
 }

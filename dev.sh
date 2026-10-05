@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 
 # Keep this in sync with the logos-execution-zone git dep pin in
 # lez-rln/Cargo.toml and lez-rln/methods/guest/Cargo.toml.
-LEZ_REF="v0.2.5-rc3"
+LEZ_REF="v0.3.0"
 LEZ_REPO="https://github.com/logos-blockchain/logos-execution-zone.git"
 SEQ_SRC="${LEZ_RLN_SEQUENCER_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/logos-lez-rln/sequencer-src}"
 
@@ -28,7 +28,7 @@ if [ ! -d "$SEQ_SRC/.git" ]; then
   git clone --depth 1 --branch "$LEZ_REF" "$LEZ_REPO" "$SEQ_SRC"
 fi
 
-# Locate the debug sequencer config within the tree (layout-agnostic: rc6 nests
+# Locate the debug sequencer config within the tree (layout-agnostic: v0.2+ nests
 # it under lez/, older tags keep it top-level).
 CONFIG="$(cd "$SEQ_SRC" && find . -path '*sequencer/service/configs/debug/sequencer_config.json' | head -1)"
 if [ -z "$CONFIG" ]; then

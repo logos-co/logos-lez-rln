@@ -6,15 +6,12 @@
 
 use nssa::AccountId;
 
-// The tree main and subtree PDAs sit under the registration program's id (the
-// merkle program never owns its own data accounts), but their canonical
+// `tree_main` is a PDA of the registration program's id, but its canonical
 // derivation lives next to the merkle program's other client code.
-pub use crate::merkle_tree::{
-    derive_main_account as derive_tree_main_account, derive_subtree_account,
-};
+pub use crate::merkle_tree::derive_main_account as derive_tree_main_account;
 // `spel_seeds` is a leaf module so both this and `merkle_tree::pda` can depend
 // on it without a cross-module cycle.
-pub use crate::spel_seeds::{combine_seeds, derive_pda, label_seed, u32_seed};
+pub use crate::spel_seeds::{combine_seeds, derive_pda, label_seed};
 
 /// Config account: `seeds = [literal("config"), arg("tree_id")]`.
 pub fn derive_config_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
@@ -82,9 +79,8 @@ mod tests {
         let t = tree_id_a();
         let config = derive_config_account(&p, &t);
         let main = derive_tree_main_account(&p, &t);
-        let subtree = derive_subtree_account(&p, &t, 0);
         let mem = derive_membership_account(&p, &t, &[3u8; 32]);
-        let all = [&config, &main, &subtree, &mem];
+        let all = [&config, &main, &mem];
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
                 assert_ne!(a, b, "PDA types must be distinct");
