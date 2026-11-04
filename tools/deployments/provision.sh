@@ -20,6 +20,11 @@
 # LEZ_RLN_REGISTRATION_PROGRAM_ID / LEZ_RLN_MERKLE_PROGRAM_ID (64 hex each)
 # before running; run_setup then deploys only what those do not name.
 #
+# The rate-limit range a registry accepts is its own (config state, not a
+# program constant): LEZ_RLN_MIN_RATE_LIMIT / LEZ_RLN_MAX_RATE_LIMIT (default
+# 100 / 600) set it at Initialize, and deployment.json records it as
+# min_rate_limit / max_rate_limit.
+#
 # There is no funding policy left to choose. A membership is paid for in the
 # NATIVE asset by the account that signs the Register transaction, which is
 # also its fee payer — one account, one balance. No program can mint native, so
@@ -106,6 +111,9 @@ PAY=$(tr -d '\n\r' < "$WS/.logos-lez-rln/payment_account_${TREE}.txt")
 # registry's revenue accrues.
 TREASURY=$(grep -E "^  Treasury:" "$LOG" | awk '{print $NF}')
 [ -n "$TREASURY" ] || { echo "provision: FAIL: run_setup printed no treasury account" >&2; exit 1; }
+BOUNDS=$(grep -E "^  Rate limit bounds:" "$LOG" | awk '{print $NF}')
+[[ "$BOUNDS" =~ ^([0-9]+)\.\.=([0-9]+)$ ]] || { echo "provision: FAIL: run_setup printed no rate limit bounds" >&2; exit 1; }
+MIN_RATE="${BASH_REMATCH[1]}"; MAX_RATE="${BASH_REMATCH[2]}"
 
 DERIVED=$(cd "$LEZ" && "$DERIVE")
 dget(){ echo "$DERIVED" | jq -r ".$1"; }
@@ -118,7 +126,8 @@ jq -n \
   --arg name "$NAME" --arg tree "$TREE" --arg seq "$SEQUENCER" \
   --arg reg "$REG" --arg mrk "$MRK" \
   --arg cfg "$CFG" --arg pay "$PAY" --arg treasury "$TREASURY" \
-  '{name:$name, tree_id:$tree, sequencer:$seq, registration_program_id:$reg, merkle_program_id:$mrk, config_account:$cfg, payer_account:$pay, treasury_account:$treasury}' \
+  --argjson min_rate "$MIN_RATE" --argjson max_rate "$MAX_RATE" \
+  '{name:$name, tree_id:$tree, sequencer:$seq, registration_program_id:$reg, merkle_program_id:$mrk, config_account:$cfg, payer_account:$pay, treasury_account:$treasury, min_rate_limit:$min_rate, max_rate_limit:$max_rate}' \
   > "$DEP_DIR/deployment.json"
 
 echo "provision: wrote $DEP_DIR/{deployment.json,storage.json}"

@@ -27,7 +27,7 @@ use crate::{
     hash::{hash_single, validate_field_element},
     registration::{
         assert_clock_is, calculate_payment_amount, compute_registration_leaf,
-        require_clock_account, validate_rate_limit,
+        require_clock_account,
     },
 };
 
@@ -204,6 +204,8 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             max_total_rate_limit,
             active_duration_for_new_memberships_sec,
             grace_period_duration_for_new_memberships_sec,
+            min_rate_limit,
+            max_rate_limit,
         } => {
             let [config] = accounts(input, "Initialize");
             require_own_pda(input, config, config_seed(&tree_id), "config");
@@ -214,6 +216,15 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             assert!(
                 active_duration_for_new_memberships_sec > 0,
                 "Active duration must be positive"
+            );
+            // A zero minimum would admit a free membership (price 0) whose
+            // leaf is H(id_commitment, 0).
+            assert!(min_rate_limit > 0, "Min rate limit must be positive");
+            assert!(
+                min_rate_limit <= max_rate_limit,
+                "Min rate limit {} exceeds max rate limit {}",
+                min_rate_limit,
+                max_rate_limit
             );
             plan.effect(
                 config,
@@ -227,6 +238,8 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                     current_total_rate_limit: 0,
                     active_duration_for_new_memberships_sec,
                     grace_period_duration_for_new_memberships_sec,
+                    min_rate_limit,
+                    max_rate_limit,
                 }),
             );
         }
@@ -268,7 +281,8 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             validate_field_element(&id_commitment);
             // Zero is the empty-leaf value and no identity secret hashes to it.
             assert!(id_commitment != [0u8; 32], "id_commitment must not be zero");
-            validate_rate_limit(rate_limit);
+            // The rate-limit bounds are the registry's (config), asserted by
+            // the config apply, which is the only phase that reads them.
             require_own_pda(input, config, config_seed(&tree_id), "config");
             require_tree_main(input, tree_main, &tree_id, &merkle_program_id);
             require_own_pda(
@@ -537,6 +551,15 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 EXIT_STALE_CONFIG,
                 "grace_period_duration_sec claim must match config"
             );
+            // Fixed at Initialize, so an out-of-range rate is a malformed
+            // transaction, not a stale view: assert, full charge.
+            assert!(
+                config.accepts_rate(rate_limit),
+                "rate_limit {} outside the registry's {}..={}",
+                rate_limit,
+                config.min_rate_limit,
+                config.max_rate_limit
+            );
             ensure!(
                 config.can_register(rate_limit),
                 EXIT_RATE_LIMIT_FULL,
@@ -677,6 +700,8 @@ mod tests {
     const GRACE_SEC: u32 = 50;
     const NOW_MS: u64 = 1_000_000;
     const RATE: u64 = 200;
+    const MIN_RATE: u64 = 100;
+    const MAX_RATE: u64 = 600;
 
     fn self_id() -> AccountId {
         AccountId::new(SELF_ID)
@@ -748,6 +773,8 @@ mod tests {
             current_total_rate_limit: 600,
             active_duration_for_new_memberships_sec: ACTIVE_SEC,
             grace_period_duration_for_new_memberships_sec: GRACE_SEC,
+            min_rate_limit: MIN_RATE,
+            max_rate_limit: MAX_RATE,
         }
     }
 
@@ -850,6 +877,8 @@ mod tests {
                 max_total_rate_limit: 1_000,
                 active_duration_for_new_memberships_sec: ACTIVE_SEC,
                 grace_period_duration_for_new_memberships_sec: GRACE_SEC,
+                min_rate_limit: MIN_RATE,
+                max_rate_limit: MAX_RATE,
             },
         );
         let mut state = config_state();
@@ -860,6 +889,46 @@ mod tests {
             vec![ShardEffect::new(&config_meta(), &Effect::InitConfig(state))]
         );
         assert!(plan.output().chained_calls.is_empty());
+    }
+
+    fn initialize_with_bounds(min_rate_limit: u64, max_rate_limit: u64) -> Instruction {
+        Instruction::Initialize {
+            merkle_program_id: MERKLE,
+            tree_id: TREE_ID,
+            price_per_unit: PRICE,
+            treasury_account_id: TREASURY,
+            max_total_rate_limit: 1_000,
+            active_duration_for_new_memberships_sec: ACTIVE_SEC,
+            grace_period_duration_for_new_memberships_sec: GRACE_SEC,
+            min_rate_limit,
+            max_rate_limit,
+        }
+    }
+
+    #[test]
+    fn plan_initialize_records_the_registry_bounds() {
+        let plan = plan(&input(vec![config_meta()]), initialize_with_bounds(20, 100));
+        let mut state = config_state();
+        state.total_registrations = 0;
+        state.current_total_rate_limit = 0;
+        state.min_rate_limit = 20;
+        state.max_rate_limit = 100;
+        assert_eq!(
+            plan.output().effects,
+            vec![ShardEffect::new(&config_meta(), &Effect::InitConfig(state))]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Min rate limit must be positive")]
+    fn plan_initialize_rejects_zero_min_rate() {
+        let _ = plan(&input(vec![config_meta()]), initialize_with_bounds(0, 100));
+    }
+
+    #[test]
+    #[should_panic(expected = "Min rate limit 101 exceeds max rate limit 100")]
+    fn plan_initialize_rejects_min_above_max() {
+        let _ = plan(&input(vec![config_meta()]), initialize_with_bounds(101, 100));
     }
 
     #[test]
@@ -876,6 +945,8 @@ mod tests {
                 max_total_rate_limit: 1_000,
                 active_duration_for_new_memberships_sec: ACTIVE_SEC,
                 grace_period_duration_for_new_memberships_sec: GRACE_SEC,
+                min_rate_limit: MIN_RATE,
+                max_rate_limit: MAX_RATE,
             },
         );
     }
@@ -1346,6 +1417,43 @@ mod tests {
     #[should_panic(expected = "grace_period_duration_sec claim")]
     fn apply_register_config_rejects_wrong_grace_duration() {
         let _ = apply(register_config(|_, _, _, _, g| *g += 1), &config_bytes());
+    }
+
+    fn register_config_at(rate_limit: u64) -> Effect {
+        Effect::RegisterConfig {
+            tree_id: TREE_ID,
+            merkle_program_id: MERKLE,
+            price_per_unit: PRICE,
+            treasury: TREASURY,
+            rate_limit,
+            active_duration_sec: ACTIVE_SEC,
+            grace_period_duration_sec: GRACE_SEC,
+        }
+    }
+
+    #[test]
+    fn apply_register_config_accepts_rates_at_both_bounds() {
+        let mut roomy = config_state();
+        roomy.current_total_rate_limit = 0;
+        for rate in [MIN_RATE, MAX_RATE] {
+            let out = apply(register_config_at(rate), &encode(&roomy)).unwrap();
+            let mut expected = roomy.clone();
+            expected.total_registrations += 1;
+            expected.current_total_rate_limit += rate;
+            assert_eq!(out, encode(&expected));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "rate_limit 99 outside the registry's 100..=600")]
+    fn apply_register_config_rejects_rate_below_min() {
+        let _ = apply(register_config_at(MIN_RATE - 1), &config_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "rate_limit 601 outside the registry's 100..=600")]
+    fn apply_register_config_rejects_rate_above_max() {
+        let _ = apply(register_config_at(MAX_RATE + 1), &config_bytes());
     }
 
     #[test]

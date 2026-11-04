@@ -95,6 +95,12 @@ bash tools/deployments/provision.sh --name my-run --payer <account-id>
 LEZ_RLN_REGISTRATION_PROGRAM_ID=<64hex> LEZ_RLN_MERKLE_PROGRAM_ID=<64hex> \
   bash tools/deployments/provision.sh --name my-run --payer <account-id>
 
+# a registry with its own rate-limit range (config state, per registry; the
+# defaults are 100..=600). deployment.json records it as min_rate_limit /
+# max_rate_limit.
+LEZ_RLN_MIN_RATE_LIMIT=20 LEZ_RLN_MAX_RATE_LIMIT=100 \
+  bash tools/deployments/provision.sh --name mix --payer <account-id>
+
 # reuse another sim's wallet (shared accounts), specific tree, write into a consumer repo:
 bash tools/deployments/provision.sh --name shared --payer <account-id> --tree <64hex> \
      --adopt-wallet /path/to/other/storage.json --outdir /path/to/consumer/deployments

@@ -68,6 +68,8 @@ pub(crate) mod fixtures {
 
     pub const PRICE_PER_UNIT: u128 = 10_000;
     pub const DEFAULT_MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
+    pub const DEFAULT_MIN_RATE_LIMIT: u64 = 100;
+    pub const DEFAULT_MAX_RATE_LIMIT: u64 = 600;
 
     /// Non-zero so time-travel tests can reason about past and future.
     pub const GENESIS_TIMESTAMP_MS: u64 = 1_700_000_000_000;
@@ -276,6 +278,7 @@ pub(crate) mod fixtures {
         max_total_rate_limit: u64,
         active_duration_sec: u32,
         grace_period_duration_sec: u32,
+        (min_rate_limit, max_rate_limit): (u64, u64),
     ) -> PublicTransaction {
         registration_tx(
             state,
@@ -288,6 +291,8 @@ pub(crate) mod fixtures {
                 max_total_rate_limit,
                 active_duration_for_new_memberships_sec: active_duration_sec,
                 grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
+                min_rate_limit,
+                max_rate_limit,
             },
             &[],
         )
@@ -327,6 +332,20 @@ pub(crate) mod fixtures {
         active_duration_sec: u32,
         grace_period_duration_sec: u32,
     ) -> Option<TestSetup> {
+        setup_config_only_with_bounds(
+            max_total_rate_limit,
+            active_duration_sec,
+            grace_period_duration_sec,
+            (DEFAULT_MIN_RATE_LIMIT, DEFAULT_MAX_RATE_LIMIT),
+        )
+    }
+
+    pub fn setup_config_only_with_bounds(
+        max_total_rate_limit: u64,
+        active_duration_sec: u32,
+        grace_period_duration_sec: u32,
+        bounds: (u64, u64),
+    ) -> Option<TestSetup> {
         let mut state = state_with_programs()?;
         let (_, treasury_id) = keypair(1);
         let (payer_key, payer_id) = keypair(2);
@@ -337,6 +356,7 @@ pub(crate) mod fixtures {
             max_total_rate_limit,
             active_duration_sec,
             grace_period_duration_sec,
+            bounds,
         );
         state
             .transition_from_public_transaction(&tx, 1, 0)
@@ -374,6 +394,22 @@ pub(crate) mod fixtures {
             DEFAULT_ACTIVE_DURATION_SEC,
             DEFAULT_GRACE_PERIOD_DURATION_SEC,
         )
+    }
+
+    /// A registry accepting `min..=max` with every other knob at its default.
+    pub fn setup_with_bounds(min_rate_limit: u64, max_rate_limit: u64) -> Option<TestSetup> {
+        let mut setup = setup_config_only_with_bounds(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
+            (min_rate_limit, max_rate_limit),
+        )?;
+        let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
+        setup
+            .state
+            .transition_from_public_transaction(&tx, 1, 0)
+            .expect("InitializeMerkleTree should succeed");
+        Some(setup)
     }
 
     /// `Register` with every claim read from `state`, as the host client does.
@@ -560,7 +596,8 @@ mod tests {
         merkle_tree::{MerkleProof, cached_defaults, find_leaf_index, merkle_proof, node_hash},
         rln::{
             CONFIG_OFFSET_ACTIVE_DURATION, CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
-            CONFIG_OFFSET_GRACE_PERIOD_DURATION, CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT,
+            CONFIG_OFFSET_GRACE_PERIOD_DURATION, CONFIG_OFFSET_MAX_RATE_LIMIT,
+            CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT, CONFIG_OFFSET_MIN_RATE_LIMIT,
             CONFIG_OFFSET_MERKLE_PROGRAM_ID, CONFIG_OFFSET_PRICE_PER_UNIT,
             CONFIG_OFFSET_TOTAL_REGISTRATIONS, CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
             CONFIG_OFFSET_TREE_ID, CONFIG_SIZE, MEMBERSHIP_SIZE, TREE_DEPTH,
@@ -783,6 +820,8 @@ mod tests {
             u32_at(CONFIG_OFFSET_GRACE_PERIOD_DURATION),
             DEFAULT_GRACE_PERIOD_DURATION_SEC
         );
+        assert_eq!(u64_at(CONFIG_OFFSET_MIN_RATE_LIMIT), DEFAULT_MIN_RATE_LIMIT);
+        assert_eq!(u64_at(CONFIG_OFFSET_MAX_RATE_LIMIT), DEFAULT_MAX_RATE_LIMIT);
     }
 
     #[test]
@@ -817,6 +856,7 @@ mod tests {
             DEFAULT_MAX_TOTAL_RATE_LIMIT,
             DEFAULT_ACTIVE_DURATION_SEC,
             DEFAULT_GRACE_PERIOD_DURATION_SEC,
+            (DEFAULT_MIN_RATE_LIMIT, DEFAULT_MAX_RATE_LIMIT),
         );
         assert!(
             apply(&mut setup.state, &reinit).is_err(),
@@ -1588,6 +1628,31 @@ mod tests {
             "a registration past max_total_rate_limit must fail"
         );
         assert_eq!(config(&setup.state).current_total_rate_limit, 300);
+    }
+
+    /// The bounds are the registry's own: a 20..=100 registry on the same
+    /// programs as a 100..=600 one admits 20 and refuses 101.
+    #[test]
+    fn test_rate_limit_bounds_are_per_registry_config() {
+        let Some(mut setup) = setup_with_bounds(20, 100) else {
+            setup_or_skip();
+            unreachable!()
+        };
+        assert_eq!(config(&setup.state).min_rate_limit, 20);
+        assert_eq!(config(&setup.state).max_rate_limit, 100);
+        register(&mut setup, valid_field_element(0x01), 20);
+        register(&mut setup, valid_field_element(0x02), 100);
+        assert_eq!(config(&setup.state).current_total_rate_limit, 120);
+
+        for (seed, rate) in [(0x03, 19), (0x04, 101)] {
+            let tx = register_tx(&setup, register_ix(&setup.state, valid_field_element(seed), rate));
+            assert!(
+                apply(&mut setup.state, &tx).is_err(),
+                "a registration at {rate} outside 20..=100 must fail"
+            );
+        }
+        assert_eq!(config(&setup.state).current_total_rate_limit, 120);
+        assert_eq!(config(&setup.state).total_registrations, 2);
     }
 
     #[test]

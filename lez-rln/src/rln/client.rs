@@ -36,6 +36,11 @@ use crate::{
 pub const PRICE_PER_UNIT: u128 = 10_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
 
+/// Inclusive rate-limit bounds a new registry accepts registrations at,
+/// unless `LEZ_RLN_MIN_RATE_LIMIT` / `LEZ_RLN_MAX_RATE_LIMIT` say otherwise.
+pub const DEFAULT_MIN_RATE_LIMIT: u64 = 100;
+pub const DEFAULT_MAX_RATE_LIMIT: u64 = 600;
+
 /// 30 days, in seconds.
 pub const DEFAULT_ACTIVE_DURATION_SECS: u32 = 30 * 24 * 60 * 60;
 
@@ -61,6 +66,27 @@ pub fn membership_durations() -> (u32, u32) {
             DEFAULT_GRACE_PERIOD_DURATION_SECS,
         ),
     )
+}
+
+/// The `(min, max)` rate-limit bounds a new registry stamps into its config:
+/// the defaults above, or `LEZ_RLN_MIN_RATE_LIMIT` / `LEZ_RLN_MAX_RATE_LIMIT`.
+/// Checked here as the guest checks them, so a typo fails before a paid
+/// deploy rather than in the Initialize transaction.
+pub fn rate_limit_bounds() -> (u64, u64) {
+    let read = |name: &str, default: u64| {
+        std::env::var(name).ok().map_or(default, |raw| {
+            raw.parse()
+                .unwrap_or_else(|_| panic!("{name} must be a u64 rate limit, got {raw:?}"))
+        })
+    };
+    let min = read("LEZ_RLN_MIN_RATE_LIMIT", DEFAULT_MIN_RATE_LIMIT);
+    let max = read("LEZ_RLN_MAX_RATE_LIMIT", DEFAULT_MAX_RATE_LIMIT);
+    assert!(min > 0, "LEZ_RLN_MIN_RATE_LIMIT must be positive");
+    assert!(
+        min <= max,
+        "LEZ_RLN_MIN_RATE_LIMIT {min} exceeds LEZ_RLN_MAX_RATE_LIMIT {max}"
+    );
+    (min, max)
 }
 
 /// CLOCK_50 system account id.
@@ -682,6 +708,8 @@ pub async fn run_setup(
 
     println!("Setup Step 3: Initializing registration program...");
     let (active_duration_sec, grace_period_duration_sec) = membership_durations();
+    let (min_rate_limit, max_rate_limit) = rate_limit_bounds();
+    println!("  Rate limit bounds: {min_rate_limit}..={max_rate_limit}");
     let config = config_selector(&programs, tree_id);
     let tree_main = tree_shard_selector(&programs, tree_id);
     // Two transactions rather than one: a fused Initialize+merkle exceeds the
@@ -698,6 +726,8 @@ pub async fn run_setup(
             max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
             active_duration_for_new_memberships_sec: active_duration_sec,
             grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
+            min_rate_limit,
+            max_rate_limit,
         },
         "InitializeConfig",
         config,

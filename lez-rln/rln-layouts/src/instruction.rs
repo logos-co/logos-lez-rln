@@ -51,6 +51,10 @@ pub enum Instruction {
         max_total_rate_limit: u64,
         active_duration_for_new_memberships_sec: u32,
         grace_period_duration_for_new_memberships_sec: u32,
+        /// Inclusive bounds every registration's `rate_limit` must satisfy;
+        /// `0 < min <= max`.
+        min_rate_limit: u64,
+        max_rate_limit: u64,
     },
     InitializeMerkleTree {
         tree_id: [u8; 32],

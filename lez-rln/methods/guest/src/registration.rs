@@ -3,38 +3,14 @@
 use nssa_core::program::AccountMeta;
 use rln_layouts::exit::{EXIT_CLOCK_NOT_INITIALIZED, EXIT_STALE_CLOCK};
 
-// Re-export rate limit and expiration constants / helpers from shared crate
+// Re-export expiration constants / helpers from shared crate
 pub use crate::layouts::{
-    CLOCK_50_ACCOUNT_ID_BYTES, CLOCK_CLAIM_TOLERANCE_MS, MAX_RATE_LIMIT, MIN_RATE_LIMIT,
-    is_expired, is_in_grace_period,
+    CLOCK_50_ACCOUNT_ID_BYTES, CLOCK_CLAIM_TOLERANCE_MS, is_expired, is_in_grace_period,
 };
 use crate::{
     ensure,
     hash::{hash_pair, validate_field_element},
 };
-
-// ============================================================================
-// Validation
-// ============================================================================
-
-/// Validate rate limit is within allowed range.
-///
-/// # Panics
-/// If rate_limit is below MIN_RATE_LIMIT or above MAX_RATE_LIMIT.
-pub fn validate_rate_limit(rate_limit: u64) {
-    assert!(
-        rate_limit >= MIN_RATE_LIMIT,
-        "Rate limit {} below minimum {}",
-        rate_limit,
-        MIN_RATE_LIMIT
-    );
-    assert!(
-        rate_limit <= MAX_RATE_LIMIT,
-        "Rate limit {} above maximum {}",
-        rate_limit,
-        MAX_RATE_LIMIT
-    );
-}
 
 /// Price of a membership at `rate_limit`, in native atomic units.
 ///
@@ -108,25 +84,6 @@ pub fn assert_clock_is(clock_pre_data: &[u8], now_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_validate_rate_limit_valid() {
-        validate_rate_limit(MIN_RATE_LIMIT);
-        validate_rate_limit(MAX_RATE_LIMIT);
-        validate_rate_limit(300);
-    }
-
-    #[test]
-    #[should_panic(expected = "below minimum")]
-    fn test_validate_rate_limit_too_low() {
-        validate_rate_limit(MIN_RATE_LIMIT - 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "above maximum")]
-    fn test_validate_rate_limit_too_high() {
-        validate_rate_limit(MAX_RATE_LIMIT + 1);
-    }
 
     #[test]
     fn test_calculate_payment_amount() {

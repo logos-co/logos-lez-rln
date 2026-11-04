@@ -33,16 +33,6 @@ pub use instruction::{Instruction, MerkleInstruction};
 pub mod exit;
 
 // ============================================================================
-// Rate Limit Constraints
-// ============================================================================
-
-/// Minimum allowed rate limit for registration.
-pub const MIN_RATE_LIMIT: u64 = 100;
-
-/// Maximum allowed rate limit for registration.
-pub const MAX_RATE_LIMIT: u64 = 600;
-
-// ============================================================================
 // Clock Account
 // ============================================================================
 
