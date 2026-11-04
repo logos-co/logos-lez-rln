@@ -190,11 +190,28 @@ fn chain_time_ms(sequencer: &str) -> u64 {
     block_timestamp_ms(&block)
 }
 
-/// The timestamp of a `getBlock` result.
+/// Where the timestamp sits in a borsh `Block`: the header is `block_id u64`,
+/// `prev_block_hash [u8; 32]`, `hash [u8; 32]`, then `timestamp u64`.
+const BLOCK_TIMESTAMP_OFFSET: usize = 8 + 32 + 32;
+
+/// The timestamp of a `getBlock` result: the block is a base64 string of its
+/// borsh encoding, and the header is a fixed-width prefix of that.
 fn block_timestamp_ms(block: &serde_json::Value) -> u64 {
-    block["header"]["timestamp"]
-        .as_u64()
-        .unwrap_or_else(|| fail("getBlock reply carries no header.timestamp"))
+    use base64::Engine as _;
+    let encoded = block
+        .as_str()
+        .unwrap_or_else(|| fail("getBlock reply is not a base64 block"));
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap_or_else(|e| fail(&format!("getBlock reply is not base64: {e}")));
+    let field = bytes
+        .get(BLOCK_TIMESTAMP_OFFSET..BLOCK_TIMESTAMP_OFFSET + 8)
+        .unwrap_or_else(|| fail("getBlock reply is shorter than a block header"));
+    let timestamp = u64::from_le_bytes(field.try_into().expect("8-byte field"));
+    if timestamp == 0 {
+        fail("the head block carries no timestamp");
+    }
+    timestamp
 }
 
 fn rpc(sequencer: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -377,10 +394,17 @@ mod tests {
 
     #[test]
     fn chain_time_is_the_blocks_header_timestamp() {
-        let block = serde_json::json!({
-            "header": { "block_id": 7, "prev_block_hash": "00", "hash": "11", "timestamp": 1_700_000_000_123u64 },
-            "body": { "transactions": [], "reverted": [] },
-        });
+        use base64::Engine as _;
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&7u64.to_le_bytes());
+        raw.extend_from_slice(&[0x11; 32]);
+        raw.extend_from_slice(&[0x22; 32]);
+        raw.extend_from_slice(&1_700_000_000_123u64.to_le_bytes());
+        // An empty body and a bedrock status, as a real block carries.
+        raw.extend_from_slice(&[0; 9]);
+        let block = serde_json::Value::String(
+            base64::engine::general_purpose::STANDARD.encode(&raw),
+        );
         assert_eq!(block_timestamp_ms(&block), 1_700_000_000_123);
     }
 
