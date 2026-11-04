@@ -758,6 +758,14 @@ pub fn public_key_of(wallet_core: &Wallet, account: AccountId, label: &str) -> n
 /// that does — this one, at setup — moves one unit into it. From then on
 /// every registration can declare it by existence.
 async fn seed_treasury(wallet_core: &Wallet, payer: AccountId, treasury: AccountId) {
+    // An account that exists is admitted as it is. Seeding it again would send
+    // a transfer whose inclusion nothing waits for (the wait below is "the
+    // treasury exists", true at once), and the next transaction from the payer
+    // would reuse its nonce and be dropped by the sequencer.
+    if matches!(wallet_core.get_account_public(treasury).await, Ok(Some(_))) {
+        println!("  Treasury already on chain; not seeded again");
+        return;
+    }
     let (hash, _) = NativeTokenTransfer(wallet_core)
         .transfer(
             AccountIdentity::Public(payer),
