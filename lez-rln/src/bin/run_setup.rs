@@ -12,8 +12,8 @@
 
 use logos_lez_rln::rln::{
     client::{
-        init_wallet, load_programs, resolve_payer, run_setup, save_payment_account,
-        tree_id_from_env,
+        init_wallet, load_programs, public_key_of, resolve_payer, run_setup,
+        save_payment_account, tree_id_from_env,
     },
     derive_config_account, derive_tree_main_account,
     program_ids::hex_id,
@@ -37,6 +37,10 @@ async fn main() {
 
     save_payment_account(&tree_id, &payer);
     println!("Payment account saved: {payer}");
+    println!(
+        "Payer public key: {}",
+        public_key_of(&wallet_core, payer, "payer")
+    );
     println!("Registration program: {}", hex_id(&programs.registration));
     println!("Merkle program:       {}", hex_id(&programs.merkle));
     println!(

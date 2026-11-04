@@ -7,6 +7,7 @@
 //! program's shard of its PDA.
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Borsh layout for the registration program's config account.
 ///
@@ -22,7 +23,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 /// a wrong price — rather than failing. Removing or reordering a field means
 /// regenerating those tables in the same change, and readers should assert the
 /// account's exact size before trusting any offset.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConfigState {
     pub merkle_program_id: [u8; 32],
     pub tree_id: [u8; 32],
@@ -59,7 +60,7 @@ impl ConfigState {
 /// Fixed size: 56 bytes. It records no leaf index: the tree assigns the index
 /// at insert time, and a reader finds a member's leaf by scanning the tree
 /// for `H(id_commitment, rate_limit)`.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MembershipState {
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],

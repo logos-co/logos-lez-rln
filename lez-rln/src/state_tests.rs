@@ -1,50 +1,44 @@
 //! State-level tests for the RLN registration and merkle programs.
 //!
 //! Every test drives the real guest `.bin`s through `V03State`, the same state
-//! machine the sequencer runs, so a transaction here plans and applies exactly
-//! as it would on chain.
+//! machine the sequencer runs, so a transaction here is delivered to its
+//! actors exactly as it would be on chain.
 //!
 //! The programs sit at fixed header accounts (`REG_ID`, `MERKLE_ID`), seeded
 //! with `V03State::with_named_programs` the way a deployer's `CreateHeader`
-//! would place them; every PDA hangs off `REG_ID`. Instruction claims (clock
-//! timestamp, config price and callee, membership rate limit) are read from
-//! the state just before a transaction is built, as the host client does, and
-//! the wrong-claim tests below mutate one claim at a time. Leaf indices are
-//! not claims: the tree assigns them, and slash/erase find theirs by scanning
-//! the tree, as the host client does.
+//! would place them; every PDA hangs off `REG_ID`. A transaction sends one
+//! message to one actor and declares every actor the program will touch; an
+//! actor that does not exist yet is admitted by the PDA seed it is derived
+//! from, as the host client does. Chain time is the block timestamp a
+//! transaction is applied at (`TestSetup::now_ms`), and every time-dependent
+//! message carries it as `now_ms`, read just before the transaction is built,
+//! as the host client does. Leaf indices are never sent for a registration:
+//! the tree assigns them, and slash/erase find theirs by scanning the tree.
 //!
 //! Run (the suite is feature-gated; see `lez-rln/CLAUDE.md`):
 //! ```bash
 //! RISC0_DEV_MODE=1 cargo test --release --features rc5-state-tests
 //! ```
-//!
-//! TODO(v0.3.0 privacy port): the `rc5-state-tests-privacy` tests
-//! (`register_from_a_private_payer`, `tokens_survive_a_shield_transfer_deshield_round_trip`)
-//! were written against the rc6 account model (`AccountWithMetadata`,
-//! `balance` field, token program payment) and are not ported yet. They need
-//! `ProvingInput { shard_selectors, .. }`, the new `PrivateWitness` shape and
-//! a private payer whose native shard is paid through the chained native
-//! transfer. The feature still builds and runs the public suite.
 
 /// Fixtures shared by `state_tests` and `cycle_harness`.
 pub(crate) mod fixtures {
-    use std::{fs, path::PathBuf};
+    use std::{collections::BTreeMap, fs, path::PathBuf};
 
     use borsh::BorshSerialize;
     use nssa::{
-        AccountId, PrivateKey, ProgramShardSelector, PublicKey, PublicTransaction, V03State,
+        AccountId, Actor, ActorState, PrivateKey, PublicAccountEvidence, PublicKey,
+        PublicTransaction, V03State,
         program::Program,
-        public_transaction::{Message, WitnessSet},
+        public_transaction::{Message as TxMessage, WitnessSet},
     };
-    use nssa_core::account::Account;
-    use rln_layouts::{ConfigState, Instruction, MembershipState};
+    use nssa_core::{account::Account, program::PdaSeed};
+    use rln_layouts::{ConfigState, MembershipState, Message};
 
     use crate::{
-        merkle_tree::{ParsedTreeMain, find_leaf_index},
+        merkle_tree::{ParsedTreeMain, find_leaf_index, main_seed},
         rln::{
-            CLOCK_50_ACCOUNT_ID_BYTES,
-            client::{clock_selector, registration_leaf},
-            derive_config_account, derive_membership_account, derive_tree_main_account,
+            client::registration_leaf, config_seed, derive_config_account,
+            derive_membership_account, derive_tree_main_account, membership_seed,
         },
     };
 
@@ -55,8 +49,8 @@ pub(crate) mod fixtures {
     /// Header account of the merkle program.
     pub const MERKLE_ID: AccountId = AccountId::new([0xB2; 32]);
     /// A second copy of the merkle program, deployed where the config does
-    /// not point: a caller naming it must be refused by the claim check, not
-    /// by a missing program.
+    /// not point: a transaction declaring it gets nothing from the config,
+    /// which messages only the program it stores.
     pub const ROGUE_MERKLE_ID: AccountId = AccountId::new([0xC3; 32]);
 
     /// Test tree ID (first 24 bytes carry data, last 8 zero).
@@ -111,34 +105,15 @@ pub(crate) mod fixtures {
     }
 
     /// Fresh state with both programs at their header accounts (and the
-    /// merkle program again at `ROGUE_MERKLE_ID`), `CLOCK_50` at genesis time.
+    /// merkle program again at `ROGUE_MERKLE_ID`).
     pub fn state_with_programs() -> Option<V03State> {
         let registration = load_registration()?;
         let merkle = load_merkle()?;
-        let mut state = V03State::new().with_named_programs([
+        Some(V03State::new().with_named_programs([
             (REG_ID, registration),
             (MERKLE_ID, merkle.clone()),
             (ROGUE_MERKLE_ID, merkle),
-        ]);
-        set_clock_50(&mut state, GENESIS_TIMESTAMP_MS, 0);
-        Some(state)
-    }
-
-    /// Overwrite `CLOCK_50`'s clock shard. The sequencer refreshes it only
-    /// every 50 blocks, so tests time-travel through the `test-utils` hatch.
-    pub fn set_clock_50(state: &mut V03State, timestamp_ms: u64, block_id: u64) {
-        let data = clock_core::ClockAccountData {
-            block_id,
-            timestamp: timestamp_ms,
-        }
-        .to_bytes();
-        state.force_insert_account(
-            AccountId::new(CLOCK_50_ACCOUNT_ID_BYTES),
-            Account::default().with_shard(
-                clock_core::clock_account_id(),
-                data.try_into().expect("clock data fits"),
-            ),
-        );
+        ]))
     }
 
     // ── keys and balances ──────────────────────────────────────────────
@@ -151,7 +126,7 @@ pub(crate) mod fixtures {
         (key, id)
     }
 
-    /// A funded wallet account: a native shard and nothing else. No program
+    /// A funded wallet account: a native balance and nothing else. No program
     /// can mint native balance, hence the escape hatch. Keeps the nonce.
     pub fn fund_native(state: &mut V03State, account_id: &AccountId, balance: u128) {
         let nonce = state.get_account_by_id(*account_id).nonce;
@@ -169,61 +144,66 @@ pub(crate) mod fixtures {
             .get_account_by_id(*account_id)
             .data
             .native_balance()
-            .expect("native shard decodes")
+            .expect("native balance decodes")
     }
 
-    // ── selectors ──────────────────────────────────────────────────────
+    // ── actors ─────────────────────────────────────────────────────────
 
-    pub fn config_selector(tree_id: &[u8; 32]) -> ProgramShardSelector {
-        ProgramShardSelector::new(derive_config_account(&REG_ID, tree_id), REG_ID)
+    pub fn config_actor(tree_id: &[u8; 32]) -> Actor {
+        Actor::new(derive_config_account(&REG_ID, tree_id), REG_ID)
     }
 
-    /// `merkle` is whichever program the instruction claims; the plan
-    /// requires the tree selector to name it.
-    pub fn tree_selector(tree_id: &[u8; 32], merkle: AccountId) -> ProgramShardSelector {
-        ProgramShardSelector::new(derive_tree_main_account(&REG_ID, tree_id), merkle)
+    /// The tree under `merkle`: the configured program, or a rogue copy a
+    /// transaction may declare but the config never messages.
+    pub fn tree_actor(tree_id: &[u8; 32], merkle: AccountId) -> Actor {
+        Actor::new(derive_tree_main_account(&REG_ID, tree_id), merkle)
     }
 
-    pub fn membership_selector(
-        tree_id: &[u8; 32],
-        id_commitment: &[u8; 32],
-    ) -> ProgramShardSelector {
-        ProgramShardSelector::new(
+    pub fn membership_actor(tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> Actor {
+        Actor::new(
             derive_membership_account(&REG_ID, tree_id, id_commitment),
             REG_ID,
         )
     }
 
+    /// Admission for a PDA of the registration program that does not exist
+    /// on chain yet.
+    pub fn pda_evidence(seed: [u8; 32]) -> PublicAccountEvidence {
+        PublicAccountEvidence::Pda {
+            program: REG_ID,
+            seed: PdaSeed::new(seed),
+        }
+    }
+
     // ── readers ────────────────────────────────────────────────────────
 
-    pub fn shard(state: &V03State, selector: ProgramShardSelector) -> Vec<u8> {
+    pub fn actor_state(state: &V03State, actor: Actor) -> Vec<u8> {
         state
-            .get_account_by_id(selector.account_id)
+            .get_account_by_id(actor.account_id)
             .data
-            .shard(selector.program_account_id)
-            .as_ref()
+            .actor_state(actor.program_account_id)
             .to_vec()
     }
 
     pub fn config_bytes(state: &V03State) -> Vec<u8> {
-        shard(state, config_selector(&TREE_ID))
+        actor_state(state, config_actor(&TREE_ID))
     }
 
     pub fn config(state: &V03State) -> ConfigState {
-        borsh::from_slice(&config_bytes(state)).expect("config shard decodes")
+        borsh::from_slice(&config_bytes(state)).expect("config state decodes")
     }
 
     pub fn membership(state: &V03State, id_commitment: &[u8; 32]) -> Option<MembershipState> {
-        let bytes = shard(state, membership_selector(&TREE_ID, id_commitment));
-        (!bytes.is_empty()).then(|| borsh::from_slice(&bytes).expect("membership shard decodes"))
+        let bytes = actor_state(state, membership_actor(&TREE_ID, id_commitment));
+        (!bytes.is_empty()).then(|| borsh::from_slice(&bytes).expect("membership state decodes"))
     }
 
-    pub fn tree_shard(state: &V03State) -> Vec<u8> {
-        shard(state, tree_selector(&TREE_ID, MERKLE_ID))
+    pub fn tree_state(state: &V03State) -> Vec<u8> {
+        actor_state(state, tree_actor(&TREE_ID, MERKLE_ID))
     }
 
     pub fn tree_header(state: &V03State) -> ParsedTreeMain {
-        ParsedTreeMain::from_bytes(&tree_shard(state))
+        ParsedTreeMain::from_bytes(&tree_state(state))
     }
 
     /// Where the live membership of `id_commitment` sits in the tree, found
@@ -231,45 +211,40 @@ pub(crate) mod fixtures {
     pub fn leaf_index_of(state: &V03State, id_commitment: &[u8; 32]) -> Option<u64> {
         let rate_limit = membership(state, id_commitment)?.rate_limit;
         find_leaf_index(
-            &tree_shard(state),
+            &tree_state(state),
             &registration_leaf(id_commitment, rate_limit),
         )
     }
 
-    pub fn clock_ms(state: &V03State) -> u64 {
-        clock_core::ClockAccountData::from_bytes(&shard(state, clock_selector())).timestamp
-    }
-
     // ── transactions ───────────────────────────────────────────────────
 
-    /// A public transaction signed by `signers`, each at its current nonce.
+    /// A public transaction with one root message, signed by `signers`, each
+    /// at its current nonce.
     pub fn public_tx(
         state: &V03State,
-        selectors: Vec<ProgramShardSelector>,
-        instruction: impl BorshSerialize,
-        program: AccountId,
+        root: Actor,
+        public_actors: Vec<Actor>,
+        evidence: Vec<PublicAccountEvidence>,
+        message: impl BorshSerialize,
         signers: &[&PrivateKey],
     ) -> PublicTransaction {
-        let nonces = signers
+        let nonces: BTreeMap<AccountId, _> = signers
             .iter()
             .map(|key| {
                 let id = AccountId::from(&PublicKey::new_from_private_key(key));
-                state.get_account_by_id(id).nonce
+                (id, state.get_account_by_id(id).nonce)
             })
             .collect();
-        let message =
-            Message::try_new(program, selectors, nonces, instruction).expect("valid message");
+        let message = TxMessage::new(
+            root,
+            Program::serialize_message(message).expect("message serializes"),
+            public_actors,
+            nonces,
+            None,
+            evidence,
+        );
         let witness = WitnessSet::for_message(&message, signers);
         PublicTransaction::new(message, witness)
-    }
-
-    pub fn registration_tx(
-        state: &V03State,
-        selectors: Vec<ProgramShardSelector>,
-        instruction: Instruction,
-        signers: &[&PrivateKey],
-    ) -> PublicTransaction {
-        public_tx(state, selectors, instruction, REG_ID, signers)
     }
 
     pub fn init_config_tx(
@@ -280,10 +255,12 @@ pub(crate) mod fixtures {
         grace_period_duration_sec: u32,
         (min_rate_limit, max_rate_limit): (u64, u64),
     ) -> PublicTransaction {
-        registration_tx(
+        public_tx(
             state,
-            vec![config_selector(&TREE_ID)],
-            Instruction::Initialize {
+            config_actor(&TREE_ID),
+            vec![config_actor(&TREE_ID)],
+            vec![pda_evidence(config_seed(&TREE_ID))],
+            Message::Initialize {
                 merkle_program_id: *MERKLE_ID.value(),
                 tree_id: TREE_ID,
                 price_per_unit: PRICE_PER_UNIT,
@@ -298,35 +275,48 @@ pub(crate) mod fixtures {
         )
     }
 
-    /// `InitializeMerkleTree` for `tree_id`, claiming `merkle` as the callee.
+    /// `InitializeMerkleTree` for `tree_id`, declaring the tree under
+    /// `merkle`. The tree is admitted by the seed the config grants it.
     pub fn init_tree_tx(
         state: &V03State,
         tree_id: &[u8; 32],
         merkle: AccountId,
     ) -> PublicTransaction {
-        registration_tx(
+        public_tx(
             state,
-            vec![config_selector(tree_id), tree_selector(tree_id, merkle)],
-            Instruction::InitializeMerkleTree {
-                tree_id: *tree_id,
-                merkle_program_id: *merkle.value(),
-            },
+            config_actor(tree_id),
+            vec![config_actor(tree_id), tree_actor(tree_id, merkle)],
+            Vec::new(),
+            Message::InitializeMerkleTree { tree_id: *tree_id },
             &[],
         )
     }
 
     pub struct TestSetup {
         pub state: V03State,
-        /// Where the price is credited. Deliberately never seeded: a native
-        /// credit lands on an account that has never been written to, which
-        /// is what `run_setup` relies on in a real deployment.
+        /// Where the price is credited: a plain keyed account that exists on
+        /// chain with no balance, as `run_setup`'s seed leaves it, so a
+        /// transaction may declare it without evidence.
         pub treasury_id: AccountId,
-        /// Signs register/extend and pays the price from its native shard.
+        /// Signs register/extend and pays the price from its native balance.
         pub payer_id: AccountId,
         pub payer_key: PrivateKey,
+        /// Chain time: the timestamp of the block every transaction is
+        /// applied in, and the `now_ms` time-dependent messages carry.
+        pub now_ms: u64,
     }
 
-    /// Programs deployed, payer funded, config written — tree NOT initialized.
+    impl TestSetup {
+        /// Apply `tx` in a block at `now_ms`.
+        pub fn apply(&mut self, tx: &PublicTransaction) -> Result<(), nssa::error::LeeError> {
+            self.state
+                .transition_from_public_transaction(tx, 1, self.now_ms)
+                .map(drop)
+        }
+    }
+
+    /// Programs deployed, payer funded, treasury existing, config written —
+    /// tree NOT initialized.
     pub fn setup_config_only(
         max_total_rate_limit: u64,
         active_duration_sec: u32,
@@ -346,27 +336,27 @@ pub(crate) mod fixtures {
         grace_period_duration_sec: u32,
         bounds: (u64, u64),
     ) -> Option<TestSetup> {
-        let mut state = state_with_programs()?;
         let (_, treasury_id) = keypair(1);
         let (payer_key, payer_id) = keypair(2);
+        let mut state = state_with_programs()?.with_empty_public_accounts([treasury_id]);
         fund_native(&mut state, &payer_id, DEFAULT_PAYER_BALANCE);
+        let mut setup = TestSetup {
+            state,
+            treasury_id,
+            payer_id,
+            payer_key,
+            now_ms: GENESIS_TIMESTAMP_MS,
+        };
         let tx = init_config_tx(
-            &state,
+            &setup.state,
             &treasury_id,
             max_total_rate_limit,
             active_duration_sec,
             grace_period_duration_sec,
             bounds,
         );
-        state
-            .transition_from_public_transaction(&tx, 1, 0)
-            .expect("Initialize should succeed");
-        Some(TestSetup {
-            state,
-            treasury_id,
-            payer_id,
-            payer_key,
-        })
+        setup.apply(&tx).expect("Initialize should succeed");
+        Some(setup)
     }
 
     /// Programs deployed, payer funded, config and tree initialized.
@@ -381,10 +371,7 @@ pub(crate) mod fixtures {
             grace_period_duration_sec,
         )?;
         let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        setup
-            .state
-            .transition_from_public_transaction(&tx, 1, 0)
-            .expect("InitializeMerkleTree should succeed");
+        setup.apply(&tx).expect("InitializeMerkleTree should succeed");
         Some(setup)
     }
 
@@ -405,116 +392,112 @@ pub(crate) mod fixtures {
             (min_rate_limit, max_rate_limit),
         )?;
         let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        setup
-            .state
-            .transition_from_public_transaction(&tx, 1, 0)
-            .expect("InitializeMerkleTree should succeed");
+        setup.apply(&tx).expect("InitializeMerkleTree should succeed");
         Some(setup)
     }
 
-    /// `Register` with every claim read from `state`, as the host client does.
-    pub fn register_ix(state: &V03State, id_commitment: [u8; 32], rate_limit: u64) -> Instruction {
-        let config = config(state);
-        Instruction::Register {
+    /// `Register` as the host client sends it: paid by the setup's payer,
+    /// dated by chain time.
+    pub fn register_msg(setup: &TestSetup, id_commitment: [u8; 32], rate_limit: u64) -> Message {
+        Message::Register {
             tree_id: TREE_ID,
             id_commitment,
             rate_limit,
-            merkle_program_id: config.merkle_program_id,
-            now_ms: clock_ms(state),
-            price_per_unit: config.price_per_unit,
-            active_duration_sec: config.active_duration_for_new_memberships_sec,
-            grace_period_duration_sec: config.grace_period_duration_for_new_memberships_sec,
+            payer: *setup.payer_id.value(),
+            now_ms: setup.now_ms,
         }
     }
 
-    /// A `Register` transaction paying `treasury`; accounts follow the claims.
+    /// A `Register` transaction signed by `payer_key`, declaring `treasury`
+    /// as the price's destination and the tree under `merkle`.
     pub fn register_tx_to(
         state: &V03State,
         payer_key: &PrivateKey,
-        payer_id: &AccountId,
         treasury: &AccountId,
-        ix: Instruction,
+        merkle: AccountId,
+        msg: Message,
     ) -> PublicTransaction {
-        let Instruction::Register {
+        let Message::Register {
             tree_id,
             id_commitment,
-            merkle_program_id,
+            payer,
             ..
-        } = ix
+        } = msg
         else {
-            panic!("not a Register instruction");
+            panic!("not a Register message");
         };
-        let selectors = vec![
-            config_selector(&tree_id),
-            tree_selector(&tree_id, AccountId::new(merkle_program_id)),
-            ProgramShardSelector::native_balance(*payer_id),
-            ProgramShardSelector::native_balance(*treasury),
-            clock_selector(),
-            membership_selector(&tree_id, &id_commitment),
-        ];
-        registration_tx(state, selectors, ix, &[payer_key])
-    }
-
-    pub fn register_tx(setup: &TestSetup, ix: Instruction) -> PublicTransaction {
-        register_tx_to(
-            &setup.state,
-            &setup.payer_key,
-            &setup.payer_id,
-            &setup.treasury_id,
-            ix,
+        public_tx(
+            state,
+            config_actor(&tree_id),
+            vec![
+                config_actor(&tree_id),
+                membership_actor(&tree_id, &id_commitment),
+                tree_actor(&tree_id, merkle),
+                Actor::native_balance(AccountId::new(payer)),
+                Actor::native_balance(*treasury),
+            ],
+            vec![pda_evidence(membership_seed(&tree_id, &id_commitment))],
+            msg,
+            &[payer_key],
         )
     }
 
-    /// Register `id_commitment` with correct claims; panics on failure.
-    pub fn register(setup: &mut TestSetup, id_commitment: [u8; 32], rate_limit: u64) {
-        let tx = register_tx(setup, register_ix(&setup.state, id_commitment, rate_limit));
-        setup
-            .state
-            .transition_from_public_transaction(&tx, 1, 0)
-            .expect("Register should succeed");
+    pub fn register_tx(setup: &TestSetup, msg: Message) -> PublicTransaction {
+        register_tx_to(
+            &setup.state,
+            &setup.payer_key,
+            &setup.treasury_id,
+            MERKLE_ID,
+            msg,
+        )
     }
 
-    pub fn slash_ix(
-        state: &V03State,
-        identity_secret: [u8; 32],
-        id_commitment: [u8; 32],
-    ) -> Instruction {
-        Instruction::Slash {
+    /// Register `id_commitment`; panics on failure.
+    pub fn register(setup: &mut TestSetup, id_commitment: [u8; 32], rate_limit: u64) {
+        let tx = register_tx(setup, register_msg(setup, id_commitment, rate_limit));
+        setup.apply(&tx).expect("Register should succeed");
+    }
+
+    /// `Slash` with the leaf index found by scanning, as the host does.
+    pub fn slash_msg(state: &V03State, identity_secret: [u8; 32], id_commitment: [u8; 32]) -> Message {
+        Message::Slash {
             tree_id: TREE_ID,
             id_commitment,
             identity_secret,
-            merkle_program_id: config(state).merkle_program_id,
             leaf_index: leaf_index_of(state, &id_commitment).unwrap_or(0),
-            rate_limit: membership(state, &id_commitment).map_or(0, |m| m.rate_limit),
         }
     }
 
     /// Slash needs no signer: the identity secret is the authorization.
-    pub fn slash_tx(state: &V03State, ix: Instruction) -> PublicTransaction {
-        let Instruction::Slash {
+    pub fn slash_tx(state: &V03State, msg: Message) -> PublicTransaction {
+        let Message::Slash {
             tree_id,
             id_commitment,
-            merkle_program_id,
             ..
-        } = ix
+        } = msg
         else {
-            panic!("not a Slash instruction");
+            panic!("not a Slash message");
         };
-        let selectors = vec![
-            config_selector(&tree_id),
-            tree_selector(&tree_id, AccountId::new(merkle_program_id)),
-            membership_selector(&tree_id, &id_commitment),
-        ];
-        registration_tx(state, selectors, ix, &[])
+        public_tx(
+            state,
+            membership_actor(&tree_id, &id_commitment),
+            vec![
+                membership_actor(&tree_id, &id_commitment),
+                config_actor(&tree_id),
+                tree_actor(&tree_id, MERKLE_ID),
+            ],
+            Vec::new(),
+            msg,
+            &[],
+        )
     }
 
-    pub fn extend_ix(state: &V03State, id_commitment: [u8; 32]) -> Instruction {
-        Instruction::Extend {
+    pub fn extend_msg(setup: &TestSetup, payer: &AccountId, id_commitment: [u8; 32]) -> Message {
+        Message::Extend {
             tree_id: TREE_ID,
             id_commitment,
-            now_ms: clock_ms(state),
-            price_per_unit: config(state).price_per_unit,
-            rate_limit: membership(state, &id_commitment).map_or(0, |m| m.rate_limit),
+            payer: *payer.value(),
+            now_ms: setup.now_ms,
         }
     }
 
@@ -522,72 +505,90 @@ pub(crate) mod fixtures {
     pub fn extend_tx(
         setup: &TestSetup,
         payer_key: &PrivateKey,
-        ix: Instruction,
+        msg: Message,
     ) -> PublicTransaction {
-        let Instruction::Extend {
+        let Message::Extend {
             tree_id,
             id_commitment,
+            payer,
             ..
-        } = ix
+        } = msg
         else {
-            panic!("not an Extend instruction");
+            panic!("not an Extend message");
         };
-        let payer_id = AccountId::from(&PublicKey::new_from_private_key(payer_key));
-        let selectors = vec![
-            config_selector(&tree_id),
-            membership_selector(&tree_id, &id_commitment),
-            ProgramShardSelector::native_balance(payer_id),
-            ProgramShardSelector::native_balance(setup.treasury_id),
-            clock_selector(),
-        ];
-        registration_tx(&setup.state, selectors, ix, &[payer_key])
+        public_tx(
+            &setup.state,
+            membership_actor(&tree_id, &id_commitment),
+            vec![
+                membership_actor(&tree_id, &id_commitment),
+                config_actor(&tree_id),
+                Actor::native_balance(AccountId::new(payer)),
+                Actor::native_balance(setup.treasury_id),
+            ],
+            Vec::new(),
+            msg,
+            &[payer_key],
+        )
     }
 
-    pub fn erase_ix(state: &V03State, id_commitment: [u8; 32]) -> Instruction {
-        Instruction::Erase {
+    pub fn erase_msg(setup: &TestSetup, id_commitment: [u8; 32]) -> Message {
+        Message::Erase {
             tree_id: TREE_ID,
             id_commitment,
-            merkle_program_id: config(state).merkle_program_id,
-            leaf_index: leaf_index_of(state, &id_commitment).unwrap_or(0),
-            rate_limit: membership(state, &id_commitment).map_or(0, |m| m.rate_limit),
-            now_ms: clock_ms(state),
+            leaf_index: leaf_index_of(&setup.state, &id_commitment).unwrap_or(0),
+            now_ms: setup.now_ms,
         }
     }
 
-    pub fn erase_tx(state: &V03State, ix: Instruction) -> PublicTransaction {
-        let Instruction::Erase {
+    pub fn erase_tx(state: &V03State, msg: Message) -> PublicTransaction {
+        let Message::Erase {
             tree_id,
             id_commitment,
-            merkle_program_id,
             ..
-        } = ix
+        } = msg
         else {
-            panic!("not an Erase instruction");
+            panic!("not an Erase message");
         };
-        let selectors = vec![
-            config_selector(&tree_id),
-            tree_selector(&tree_id, AccountId::new(merkle_program_id)),
-            membership_selector(&tree_id, &id_commitment),
-            clock_selector(),
-        ];
-        registration_tx(state, selectors, ix, &[])
+        public_tx(
+            state,
+            membership_actor(&tree_id, &id_commitment),
+            vec![
+                membership_actor(&tree_id, &id_commitment),
+                config_actor(&tree_id),
+                tree_actor(&tree_id, MERKLE_ID),
+            ],
+            Vec::new(),
+            msg,
+            &[],
+        )
+    }
+
+    /// The tree's seed as evidence, for tests that must admit it themselves.
+    pub fn tree_evidence(tree_id: &[u8; 32]) -> PublicAccountEvidence {
+        pda_evidence(main_seed(tree_id))
+    }
+
+    /// Overwrite the tree's actor state.
+    pub fn set_tree_state(state: &mut V03State, data: Vec<u8>) {
+        let tree = tree_actor(&TREE_ID, MERKLE_ID);
+        let account = state
+            .get_account_by_id(tree.account_id)
+            .with_actor_state(MERKLE_ID, ActorState::from(data));
+        state.force_insert_account(tree.account_id, account);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nssa::{AccountId, ProgramShardSelector, PublicTransaction, V03State, error::LeeError};
+    use nssa::{AccountId, Actor, PublicTransaction, V03State, error::LeeError};
     use rand_chacha::ChaCha20Rng;
     use rln::prelude::{
         Fr, Hasher, IdentityKeys, PoseidonHash, RLNMerkleProof, RLNWitnessInput, hash_to_field_le,
     };
     use rln_layouts::{
-        CLOCK_CLAIM_TOLERANCE_MS, Instruction, MerkleInstruction, OFFSET_NEXT_INDEX,
-        OFFSET_TREE_DATA, SPARSE_ENTRY_LEN, TREE_LEAVES, TREE_SHARD_MAX_BYTES,
-        exit::{
-            EXIT_LEAF_MISMATCH, EXIT_STALE_CLOCK, EXIT_STALE_RATE_LIMIT, EXIT_TREE_FULL,
-            exit_code_name,
-        },
+        CLOCK_CLAIM_TOLERANCE_MS, MerkleMessage, Message, OFFSET_NEXT_INDEX, OFFSET_TREE_DATA,
+        SPARSE_ENTRY_LEN, TREE_LEAVES, TREE_SHARD_MAX_BYTES,
+        exit::{EXIT_LEAF_MISMATCH, EXIT_MEMBERSHIP_EXISTS, EXIT_TREE_FULL, exit_code_name},
     };
 
     use super::fixtures::*;
@@ -601,22 +602,22 @@ mod tests {
             CONFIG_OFFSET_MERKLE_PROGRAM_ID, CONFIG_OFFSET_PRICE_PER_UNIT,
             CONFIG_OFFSET_TOTAL_REGISTRATIONS, CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
             CONFIG_OFFSET_TREE_ID, CONFIG_SIZE, MEMBERSHIP_SIZE, TREE_DEPTH,
-            client::{clock_selector, registration_leaf},
-            derive_config_account, derive_membership_account, derive_tree_main_account,
+            client::registration_leaf, derive_config_account, derive_membership_account,
+            derive_tree_main_account,
         },
     };
 
     /// `fee_core::market::MAX_GAS_EXEC`: one gas per cycle, summed over every
-    /// plan and apply session of a transaction.
+    /// session of a transaction.
     const MAX_GAS_EXEC: u64 = 10_000_000;
 
-    /// Cycles a whole transaction costs against `state`, all sessions summed.
-    fn whole_tx_cycles(state: &V03State, tx: &PublicTransaction) -> u64 {
+    /// Cycles a whole transaction costs against `setup`, all sessions summed.
+    fn whole_tx_cycles(setup: &TestSetup, tx: &PublicTransaction) -> u64 {
         let (_diff, charge) = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
             tx,
-            state,
+            &setup.state,
             1,
-            0,
+            setup.now_ms,
             MAX_GAS_EXEC,
         )
         .expect("the transaction should execute within the ceiling");
@@ -647,13 +648,6 @@ mod tests {
         )
     }
 
-    fn apply(
-        state: &mut V03State,
-        tx: &nssa::PublicTransaction,
-    ) -> Result<(), nssa::error::LeeError> {
-        state.transition_from_public_transaction(tx, 1, 0).map(drop)
-    }
-
     /// `result` is a guest halting with exit `code`.
     fn assert_exit(result: Result<(), LeeError>, code: u8, what: &str) {
         match result {
@@ -668,15 +662,15 @@ mod tests {
         }
     }
 
-    /// Replace one field of an instruction, keeping every other claim.
-    macro_rules! with_claim {
-        ($ix:expr, $variant:ident { $field:ident : $value:expr }) => {{
-            let mut ix = $ix;
-            match &mut ix {
-                Instruction::$variant { $field, .. } => *$field = $value,
-                _ => panic!(concat!("not a ", stringify!($variant), " instruction")),
+    /// Replace one field of a message, keeping every other.
+    macro_rules! with_field {
+        ($msg:expr, $variant:ident { $field:ident : $value:expr }) => {{
+            let mut msg = $msg;
+            match &mut msg {
+                Message::$variant { $field, .. } => *$field = $value,
+                _ => panic!(concat!("not a ", stringify!($variant), " message")),
             }
-            ix
+            msg
         }};
     }
 
@@ -717,45 +711,55 @@ mod tests {
     }
 
     // ====================================================================
-    // Direct merkle calls: only the registration program's PDA grant
+    // Direct merkle messages: only the registration program's PDA grant
     // authorizes the tree account.
     // ====================================================================
 
     #[test]
     fn test_direct_merkle_init_blocked_by_authorization() {
-        let mut state = state_with_programs().expect("programs should load");
+        let mut setup = setup_config_only(
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
+        )
+        .expect("programs should load");
+        // Admitted by evidence, so authorization is what refuses it.
         let tx = public_tx(
-            &state,
-            vec![tree_selector(&TREE_ID, MERKLE_ID)],
-            MerkleInstruction::Initialize,
-            MERKLE_ID,
+            &setup.state,
+            tree_actor(&TREE_ID, MERKLE_ID),
+            vec![tree_actor(&TREE_ID, MERKLE_ID)],
+            vec![tree_evidence(&TREE_ID)],
+            MerkleMessage::Initialize,
             &[],
         );
+        let result = setup.apply(&tx);
         assert!(
-            apply(&mut state, &tx).is_err(),
-            "direct merkle init must fail: tree_main is not authorized"
+            matches!(result, Err(LeeError::ProgramExecutionFailed(_))),
+            "direct merkle init must fail in the guest: tree_main is not authorized, got {result:?}"
         );
-        assert!(tree_shard(&state).is_empty());
+        assert!(tree_state(&setup.state).is_empty());
     }
 
     #[test]
     fn test_direct_merkle_insert_blocked_by_authorization() {
         let mut setup = setup_or_skip();
-        let before = tree_shard(&setup.state);
+        let before = tree_state(&setup.state);
         let tx = public_tx(
             &setup.state,
-            vec![tree_selector(&TREE_ID, MERKLE_ID)],
-            MerkleInstruction::Insert {
+            tree_actor(&TREE_ID, MERKLE_ID),
+            vec![tree_actor(&TREE_ID, MERKLE_ID)],
+            Vec::new(),
+            MerkleMessage::Insert {
                 leaf: valid_field_element(0x42),
             },
-            MERKLE_ID,
             &[],
         );
+        let result = setup.apply(&tx);
         assert!(
-            apply(&mut setup.state, &tx).is_err(),
-            "direct merkle insert must fail: tree_main is not authorized"
+            matches!(result, Err(LeeError::ProgramExecutionFailed(_))),
+            "direct merkle insert must fail in the guest: tree_main is not authorized, got {result:?}"
         );
-        assert_eq!(tree_shard(&setup.state), before);
+        assert_eq!(tree_state(&setup.state), before);
     }
 
     // ====================================================================
@@ -766,7 +770,7 @@ mod tests {
     fn test_registration_init_succeeds() {
         let setup = setup_or_skip();
         assert!(!config_bytes(&setup.state).is_empty());
-        assert!(!tree_shard(&setup.state).is_empty());
+        assert!(!tree_state(&setup.state).is_empty());
     }
 
     #[test]
@@ -780,7 +784,7 @@ mod tests {
         assert_eq!(
             data.len(),
             CONFIG_SIZE,
-            "config shard must be exactly CONFIG_SIZE bytes"
+            "config state must be exactly CONFIG_SIZE bytes"
         );
 
         let u64_at = |off: usize| u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
@@ -827,10 +831,10 @@ mod tests {
     #[test]
     fn test_registration_init_creates_tree_main() {
         let setup = setup_or_skip();
-        let shard = tree_shard(&setup.state);
+        let tree = tree_state(&setup.state);
 
         assert_eq!(
-            shard.len(),
+            tree.len(),
             OFFSET_TREE_DATA,
             "a fresh tree is the header plus cached defaults, with no sparse map yet"
         );
@@ -839,7 +843,7 @@ mod tests {
         assert_eq!(header.next_index, 0);
         assert_eq!(
             header.root,
-            cached_defaults(&shard)[0],
+            cached_defaults(&tree)[0],
             "an empty tree's root is the root level's default"
         );
     }
@@ -859,18 +863,52 @@ mod tests {
             (DEFAULT_MIN_RATE_LIMIT, DEFAULT_MAX_RATE_LIMIT),
         );
         assert!(
-            apply(&mut setup.state, &reinit).is_err(),
-            "Initialize must refuse a config shard that already holds data"
+            setup.apply(&reinit).is_err(),
+            "Initialize must refuse a config state that already holds data"
         );
         assert_eq!(config_bytes(&setup.state), config_before);
     }
 
-    /// SECURITY (callee substitution): the program an init chained call
-    /// targets must be the one the config names. `merkle_program_id` is a
-    /// claim, asserted by the config apply before the chained call — which
-    /// carries this program's `main` PDA seed — runs.
+    /// A config PDA does not exist before `Initialize` writes it, so the
+    /// transaction has to admit it by its seed; without that it is refused
+    /// before the guest runs.
     #[test]
-    fn test_init_merkle_refuses_a_merkle_program_the_config_does_not_name() {
+    fn initialize_needs_evidence_for_the_new_config_pda() {
+        let (_, treasury_id) = keypair(1);
+        let mut state = state_with_programs()
+            .expect("programs should load")
+            .with_empty_public_accounts([treasury_id]);
+        let tx = public_tx(
+            &state,
+            config_actor(&TREE_ID),
+            vec![config_actor(&TREE_ID)],
+            Vec::new(),
+            Message::Initialize {
+                merkle_program_id: *MERKLE_ID.value(),
+                tree_id: TREE_ID,
+                price_per_unit: PRICE_PER_UNIT,
+                treasury_account_id: *treasury_id.value(),
+                max_total_rate_limit: DEFAULT_MAX_TOTAL_RATE_LIMIT,
+                active_duration_for_new_memberships_sec: DEFAULT_ACTIVE_DURATION_SEC,
+                grace_period_duration_for_new_memberships_sec: DEFAULT_GRACE_PERIOD_DURATION_SEC,
+                min_rate_limit: DEFAULT_MIN_RATE_LIMIT,
+                max_rate_limit: DEFAULT_MAX_RATE_LIMIT,
+            },
+            &[],
+        );
+        let result = state.transition_from_public_transaction(&tx, 1, GENESIS_TIMESTAMP_MS);
+        assert!(
+            result.is_err(),
+            "an unadmitted config PDA must be refused, got {result:?}"
+        );
+        assert!(config_bytes(&state).is_empty());
+    }
+
+    /// SECURITY (callee substitution): the config messages the merkle program
+    /// it stores, and grants the tree's PDA to that one alone. A transaction
+    /// declaring another copy of the merkle program gets nothing.
+    #[test]
+    fn test_init_merkle_messages_only_the_configured_program() {
         let mut setup = setup_config_only(
             DEFAULT_MAX_TOTAL_RATE_LIMIT,
             DEFAULT_ACTIVE_DURATION_SEC,
@@ -878,52 +916,55 @@ mod tests {
         )
         .expect("programs should load");
 
-        // A tree_id whose config was never initialized has nothing to check
-        // the claim against.
+        // A tree_id whose config was never initialized has no config to act.
         let orphan_tree = [0x99u8; 32];
         let orphan = init_tree_tx(&setup.state, &orphan_tree, MERKLE_ID);
         assert!(
-            apply(&mut setup.state, &orphan).is_err(),
+            setup.apply(&orphan).is_err(),
             "InitializeMerkleTree without an initialized config must fail"
         );
 
-        // A real merkle program, deployed, but not the configured one.
+        // A real merkle program, deployed, but not the configured one: the
+        // config's message goes to the configured program's actor, which the
+        // transaction did not declare.
         let rogue = init_tree_tx(&setup.state, &TREE_ID, ROGUE_MERKLE_ID);
         assert!(
-            apply(&mut setup.state, &rogue).is_err(),
-            "InitializeMerkleTree claiming an unconfigured merkle program must fail"
+            setup.apply(&rogue).is_err(),
+            "InitializeMerkleTree declaring an unconfigured merkle program must fail"
         );
         assert!(
-            shard(&setup.state, tree_selector(&TREE_ID, ROGUE_MERKLE_ID)).is_empty(),
+            actor_state(&setup.state, tree_actor(&TREE_ID, ROGUE_MERKLE_ID)).is_empty(),
             "the rogue program must not have been granted the tree account"
         );
+        assert!(tree_state(&setup.state).is_empty());
 
         // Positive control: the configured program is accepted.
         let honest = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        apply(&mut setup.state, &honest).expect("the configured merkle program is accepted");
+        setup.apply(&honest).expect("the configured merkle program is accepted");
         assert_eq!(tree_header(&setup.state).next_index, 0);
     }
 
     /// SECURITY (tree reset): replaying InitializeMerkleTree must not reset a
-    /// live tree. Public transactions need no signature, so the merkle apply's
-    /// empty-shard check is the only thing between anyone and a tree wipe that
-    /// would invalidate every member's proof while their memberships survive.
+    /// live tree. Public transactions need no signature, so the merkle
+    /// program's empty-state check is the only thing between anyone and a
+    /// tree wipe that would invalidate every member's proof while their
+    /// memberships survive.
     #[test]
     fn test_initialize_merkle_tree_cannot_reset_a_live_tree() {
         let mut setup = setup_or_skip();
         register(&mut setup, valid_field_element(0x42), 300);
 
-        let before = tree_shard(&setup.state);
+        let before = tree_state(&setup.state);
         assert_eq!(tree_header(&setup.state).next_index, 1);
 
         let attack = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        let result = apply(&mut setup.state, &attack);
+        let result = setup.apply(&attack);
         assert!(
             result.is_err(),
             "re-initializing a live tree must fail, got {result:?}"
         );
         assert_eq!(
-            tree_shard(&setup.state),
+            tree_state(&setup.state),
             before,
             "the rejected reset must leave the tree byte-identical"
         );
@@ -936,11 +977,8 @@ mod tests {
     #[test]
     fn test_register_succeeds() {
         let mut setup = setup_or_skip();
-        let tx = register_tx(
-            &setup,
-            register_ix(&setup.state, valid_field_element(0x42), 300),
-        );
-        let result = apply(&mut setup.state, &tx);
+        let tx = register_tx(&setup, register_msg(&setup, valid_field_element(0x42), 300));
+        let result = setup.apply(&tx);
         assert!(result.is_ok(), "Register should succeed: {result:?}");
     }
 
@@ -974,10 +1012,10 @@ mod tests {
         register(&mut setup, id_commitment, 300);
 
         assert_eq!(
-            shard(&setup.state, membership_selector(&TREE_ID, &id_commitment)).len(),
+            actor_state(&setup.state, membership_actor(&TREE_ID, &id_commitment)).len(),
             MEMBERSHIP_SIZE
         );
-        let m = membership(&setup.state, &id_commitment).expect("membership shard exists");
+        let m = membership(&setup.state, &id_commitment).expect("membership state exists");
         assert_eq!(leaf_index_of(&setup.state, &id_commitment), Some(0));
         assert_eq!(m.rate_limit, 300);
         assert_eq!(m.id_commitment, id_commitment);
@@ -992,24 +1030,24 @@ mod tests {
         );
     }
 
-    /// The shard stores one sparse entry per populated node and nothing else,
-    /// so a full tree is `TREE_SHARD_MAX_BYTES`, which `rln_layouts`
-    /// const-asserts under the protocol's `SHARD_MAX_BYTES`.
+    /// The tree state stores one sparse entry per populated node and nothing
+    /// else, so a full tree is `TREE_SHARD_MAX_BYTES`, which `rln_layouts`
+    /// const-asserts under its own `SHARD_MAX_BYTES`.
     #[test]
-    fn merkle_shard_stores_exactly_the_populated_nodes() {
+    fn tree_state_stores_exactly_the_populated_nodes() {
         let mut setup = setup_or_skip();
         let size = |nodes: usize| OFFSET_TREE_DATA + 2 + nodes * SPARSE_ENTRY_LEN;
 
         register(&mut setup, valid_field_element(0x41), 100);
         assert_eq!(
-            tree_shard(&setup.state).len(),
+            tree_state(&setup.state).len(),
             size(TREE_DEPTH + 1),
             "one leaf stores exactly its root-to-leaf path"
         );
 
         // Leaf 1 shares every ancestor with leaf 0: one new node.
         register(&mut setup, valid_field_element(0x42), 100);
-        assert_eq!(tree_shard(&setup.state).len(), size(TREE_DEPTH + 2));
+        assert_eq!(tree_state(&setup.state).len(), size(TREE_DEPTH + 2));
         assert_eq!(size(rln_layouts::TREE_NODES), TREE_SHARD_MAX_BYTES);
     }
 
@@ -1020,19 +1058,14 @@ mod tests {
     fn register_is_refused_once_every_leaf_index_is_used() {
         let mut setup = setup_or_skip();
 
-        let tree = tree_selector(&TREE_ID, MERKLE_ID);
-        let mut data = tree_shard(&setup.state);
+        let mut data = tree_state(&setup.state);
         data[OFFSET_NEXT_INDEX..OFFSET_NEXT_INDEX + 8].copy_from_slice(&TREE_LEAVES.to_le_bytes());
-        let account = setup
-            .state
-            .get_account_by_id(tree.account_id)
-            .with_shard(MERKLE_ID, data.try_into().unwrap());
-        setup.state.force_insert_account(tree.account_id, account);
+        set_tree_state(&mut setup.state, data);
 
         let idc = valid_field_element(0xC2);
-        let tx = register_tx(&setup, register_ix(&setup.state, idc, 100));
+        let tx = register_tx(&setup, register_msg(&setup, idc, 100));
         assert_exit(
-            apply(&mut setup.state, &tx),
+            setup.apply(&tx),
             EXIT_TREE_FULL,
             "a registration past the last leaf",
         );
@@ -1041,7 +1074,7 @@ mod tests {
     }
 
     /// The membership init guard is the ONLY duplicate check: neither the
-    /// register plan nor the merkle insert dedupes.
+    /// register handler nor the merkle insert dedupes.
     #[test]
     fn test_register_same_commitment_twice_fails() {
         let mut setup = setup_or_skip();
@@ -1049,44 +1082,36 @@ mod tests {
         register(&mut setup, id_commitment, 300);
 
         let payer_before = native_balance(&setup.state, &setup.payer_id);
-        let tree_before = tree_shard(&setup.state);
-        let tx = register_tx(&setup, register_ix(&setup.state, id_commitment, 300));
-        assert!(
-            apply(&mut setup.state, &tx).is_err(),
-            "a second registration of the same id_commitment must fail"
+        let tree_before = tree_state(&setup.state);
+        let tx = register_tx(&setup, register_msg(&setup, id_commitment, 300));
+        assert_exit(
+            setup.apply(&tx),
+            EXIT_MEMBERSHIP_EXISTS,
+            "a second registration of the same id_commitment",
         );
-        assert_eq!(tree_shard(&setup.state), tree_before, "no second leaf");
+        assert_eq!(tree_state(&setup.state), tree_before, "no second leaf");
         assert_eq!(native_balance(&setup.state, &setup.payer_id), payer_before);
         assert_eq!(config(&setup.state).total_registrations, 1);
     }
 
-    // ── wrong claims ────────────────────────────────────────────────────
-    //
-    // Plan sees no account data, so each of these values is a claim that an
-    // apply asserts against the stored bytes. Every one must fail the whole
-    // transaction and leave no trace.
-
-    fn assert_register_refused(setup: &mut TestSetup, ix: Instruction, what: &str) {
-        let Instruction::Register { id_commitment, .. } = ix else {
-            unreachable!()
-        };
+    /// A registration that fails for any reason leaves no trace.
+    fn assert_register_refused(setup: &mut TestSetup, tx: &PublicTransaction, idc: &[u8; 32], what: &str) {
         let payer_before = native_balance(&setup.state, &setup.payer_id);
-        let tree_before = tree_shard(&setup.state);
+        let tree_before = tree_state(&setup.state);
         let config_before = config_bytes(&setup.state);
 
-        let tx = register_tx(setup, ix);
-        let result = apply(&mut setup.state, &tx);
+        let result = setup.apply(tx);
         assert!(
             result.is_err(),
             "register with {what} must fail, got {result:?}"
         );
 
         assert!(
-            membership(&setup.state, &id_commitment).is_none(),
+            membership(&setup.state, idc).is_none(),
             "{what}: no membership"
         );
         assert_eq!(
-            tree_shard(&setup.state),
+            tree_state(&setup.state),
             tree_before,
             "{what}: tree untouched"
         );
@@ -1114,35 +1139,34 @@ mod tests {
         fund_native(&mut setup.state, &payer_b, DEFAULT_PAYER_BALANCE);
         let (idc_a, idc_b) = (valid_field_element(0x0A), valid_field_element(0x0B));
 
-        let snapshot = &setup.state;
-        let tx_a = register_tx(&setup, register_ix(snapshot, idc_a, 100));
-        let tx_b = register_tx_to(
-            snapshot,
-            &key_b,
-            &payer_b,
-            &setup.treasury_id,
-            register_ix(snapshot, idc_b, 200),
+        let tx_a = register_tx(&setup, register_msg(&setup, idc_a, 100));
+        let msg_b = with_field!(
+            register_msg(&setup, idc_b, 200),
+            Register {
+                payer: *payer_b.value()
+            }
         );
+        let tx_b = register_tx_to(&setup.state, &key_b, &setup.treasury_id, MERKLE_ID, msg_b);
 
-        apply(&mut setup.state, &tx_a).expect("first registration of the block");
-        apply(&mut setup.state, &tx_b).expect("second registration, built from the same state");
+        setup.apply(&tx_a).expect("first registration of the block");
+        setup.apply(&tx_b).expect("second registration, built from the same state");
 
-        let shard = tree_shard(&setup.state);
+        let tree = tree_state(&setup.state);
         assert_eq!(tree_header(&setup.state).next_index, 2);
         assert_eq!(
-            node_hash(&shard, TREE_DEPTH, 0),
+            node_hash(&tree, TREE_DEPTH, 0),
             registration_leaf(&idc_a, 100)
         );
         assert_eq!(
-            node_hash(&shard, TREE_DEPTH, 1),
+            node_hash(&tree, TREE_DEPTH, 1),
             registration_leaf(&idc_b, 200)
         );
         assert_eq!(
-            find_leaf_index(&shard, &registration_leaf(&idc_a, 100)),
+            find_leaf_index(&tree, &registration_leaf(&idc_a, 100)),
             Some(0)
         );
         assert_eq!(
-            find_leaf_index(&shard, &registration_leaf(&idc_b, 200)),
+            find_leaf_index(&tree, &registration_leaf(&idc_b, 200)),
             Some(1)
         );
         assert_eq!(membership(&setup.state, &idc_a).unwrap().rate_limit, 100);
@@ -1152,158 +1176,79 @@ mod tests {
         assert_eq!(config.current_total_rate_limit, 300);
     }
 
+    /// The tree lives under the program the config stores; a transaction
+    /// declaring another copy of the merkle program has not declared the
+    /// actor the config messages.
     #[test]
-    fn register_rejects_a_wrong_price_claim() {
+    fn register_declaring_a_rogue_merkle_program_is_refused() {
         let mut setup = setup_or_skip();
-        let ix = register_ix(&setup.state, valid_field_element(0x42), 300);
-        assert_register_refused(
-            &mut setup,
-            with_claim!(
-                ix.clone(),
-                Register {
-                    price_per_unit: PRICE_PER_UNIT - 1
-                }
-            ),
-            "an under-priced claim",
+        let idc = valid_field_element(0x42);
+        let tx = register_tx_to(
+            &setup.state,
+            &setup.payer_key,
+            &setup.treasury_id,
+            ROGUE_MERKLE_ID,
+            register_msg(&setup, idc, 300),
         );
-        assert_register_refused(
-            &mut setup,
-            with_claim!(ix, Register { price_per_unit: 0 }),
-            "a zero price claim",
-        );
-    }
-
-    #[test]
-    fn register_rejects_a_wrong_merkle_program_claim() {
-        let mut setup = setup_or_skip();
-        let ix = register_ix(&setup.state, valid_field_element(0x42), 300);
-        assert_register_refused(
-            &mut setup,
-            with_claim!(
-                ix,
-                Register {
-                    merkle_program_id: *ROGUE_MERKLE_ID.value()
-                }
-            ),
-            "an unconfigured merkle program",
-        );
+        assert_register_refused(&mut setup, &tx, &idc, "an unconfigured merkle program");
         assert!(
-            shard(&setup.state, tree_selector(&TREE_ID, ROGUE_MERKLE_ID)).is_empty(),
+            actor_state(&setup.state, tree_actor(&TREE_ID, ROGUE_MERKLE_ID)).is_empty(),
             "the rogue program must not have written the tree account"
         );
     }
 
-    #[test]
-    fn register_rejects_a_wrong_now_ms_claim() {
-        let mut setup = setup_or_skip();
-        let ix = register_ix(&setup.state, valid_field_element(0x42), 300);
-        // A future clock would extend the membership for free; a claim older
-        // than the tolerance is a stale read. Both are refused.
-        assert_register_refused(
-            &mut setup,
-            with_claim!(
-                ix.clone(),
-                Register {
-                    now_ms: GENESIS_TIMESTAMP_MS + ACTIVE_MS
-                }
-            ),
-            "a future now_ms",
-        );
-        assert_register_refused(
-            &mut setup,
-            with_claim!(
-                ix,
-                Register {
-                    now_ms: GENESIS_TIMESTAMP_MS - CLOCK_CLAIM_TOLERANCE_MS - 1
-                }
-            ),
-            "a now_ms older than the tolerance",
-        );
-    }
+    // ── chain time ──────────────────────────────────────────────────────
+    //
+    // `now_ms` dates the membership and pins the transaction to blocks whose
+    // timestamp lies in `[now_ms, now_ms + CLOCK_CLAIM_TOLERANCE_MS)`.
 
-    /// `CLOCK_50` steps once per 50 blocks; a register read just before a
-    /// step and included just after it carries a claim one step behind. That
-    /// is accepted, and the membership is dated by the claim — earlier than
-    /// the chain's time, which only shortens the member's own window.
+    /// A register read just before a block and included some blocks later
+    /// carries a `now_ms` behind the including block's timestamp. That is
+    /// accepted up to the tolerance, and the membership is dated by the
+    /// claim — earlier than the chain's time, which only shortens the
+    /// member's own window.
     #[test]
-    fn a_clock_claim_slightly_behind_the_clock_is_accepted() {
+    fn a_now_ms_behind_the_block_is_accepted_up_to_the_tolerance() {
         let mut setup = setup_or_skip();
         let idc = valid_field_element(0x42);
-        let ix = register_ix(&setup.state, idc, 300);
-        let read_at = clock_ms(&setup.state);
-        set_clock_50(&mut setup.state, read_at + 750_000, 100);
-
-        let tx = register_tx(&setup, ix);
-        apply(&mut setup.state, &tx).expect("a claim one clock step behind is accepted");
+        let read_at = setup.now_ms;
+        let tx = register_tx(&setup, register_msg(&setup, idc, 300));
+        setup.now_ms = read_at + 750_000;
+        setup.apply(&tx).expect("a claim twelve minutes behind the block is accepted");
         assert_eq!(
             membership(&setup.state, &idc)
                 .unwrap()
                 .grace_period_start_timestamp_ms,
             read_at + ACTIVE_MS,
-            "dated by the claim, not by the clock"
+            "dated by the claim, not by the block"
         );
 
-        // The tolerance itself is inclusive.
+        // The window is half-open: the last admitted block is one
+        // millisecond short of the tolerance.
         let idc = valid_field_element(0x43);
-        let ix = with_claim!(
-            register_ix(&setup.state, idc, 300),
-            Register {
-                now_ms: clock_ms(&setup.state) - CLOCK_CLAIM_TOLERANCE_MS
-            }
-        );
-        let tx = register_tx(&setup, ix);
-        apply(&mut setup.state, &tx).expect("a claim exactly the tolerance behind is accepted");
+        let read_at = setup.now_ms;
+        let tx = register_tx(&setup, register_msg(&setup, idc, 300));
+        setup.now_ms = read_at + CLOCK_CLAIM_TOLERANCE_MS - 1;
+        setup.apply(&tx).expect("a claim just inside the tolerance is accepted");
     }
 
-    /// A claim ahead of the clock, or further behind it than the tolerance,
-    /// exits `EXIT_STALE_CLOCK` and leaves nothing behind.
+    /// A `now_ms` ahead of the block, or further behind it than the
+    /// tolerance, puts the block outside the validity window: the
+    /// transaction reverts and leaves nothing behind.
     #[test]
-    fn a_clock_claim_ahead_or_older_than_the_tolerance_is_refused() {
+    fn a_now_ms_outside_the_window_is_refused() {
         let mut setup = setup_or_skip();
         let idc = valid_field_element(0x42);
-        let now = clock_ms(&setup.state);
+        let block = setup.now_ms;
         for (what, claim) in [
-            ("1 ms ahead", now + 1),
-            (
-                "1 ms past the tolerance",
-                now - CLOCK_CLAIM_TOLERANCE_MS - 1,
-            ),
+            ("1 ms ahead of the block", block + 1),
+            ("exactly the tolerance behind", block - CLOCK_CLAIM_TOLERANCE_MS),
+            ("a future that would lengthen the membership", block + ACTIVE_MS),
         ] {
-            let ix = with_claim!(
-                register_ix(&setup.state, idc, 300),
-                Register { now_ms: claim }
-            );
-            let tx = register_tx(&setup, ix);
-            assert_exit(apply(&mut setup.state, &tx), EXIT_STALE_CLOCK, what);
-            assert!(membership(&setup.state, &idc).is_none(), "{what}");
-            assert_eq!(config(&setup.state).total_registrations, 0, "{what}");
+            let msg = with_field!(register_msg(&setup, idc, 300), Register { now_ms: claim });
+            let tx = register_tx(&setup, msg);
+            assert_register_refused(&mut setup, &tx, &idc, what);
         }
-    }
-
-    #[test]
-    fn register_rejects_wrong_duration_claims() {
-        let mut setup = setup_or_skip();
-        let ix = register_ix(&setup.state, valid_field_element(0x42), 300);
-        assert_register_refused(
-            &mut setup,
-            with_claim!(
-                ix.clone(),
-                Register {
-                    active_duration_sec: DEFAULT_ACTIVE_DURATION_SEC * 10
-                }
-            ),
-            "an inflated active duration",
-        );
-        assert_register_refused(
-            &mut setup,
-            with_claim!(
-                ix,
-                Register {
-                    grace_period_duration_sec: DEFAULT_GRACE_PERIOD_DURATION_SEC * 10
-                }
-            ),
-            "an inflated grace duration",
-        );
     }
 
     // ====================================================================
@@ -1322,8 +1267,8 @@ mod tests {
         secret: [u8; 32],
         idc: [u8; 32],
     ) -> Result<(), nssa::error::LeeError> {
-        let tx = slash_tx(&setup.state, slash_ix(&setup.state, secret, idc));
-        apply(&mut setup.state, &tx)
+        let tx = slash_tx(&setup.state, slash_msg(&setup.state, secret, idc));
+        setup.apply(&tx)
     }
 
     #[test]
@@ -1340,8 +1285,8 @@ mod tests {
         let (secret, idc) = registered_slashable(&mut setup, 0x42);
         slash(&mut setup, secret, idc).expect("slash");
         assert!(
-            shard(&setup.state, membership_selector(&TREE_ID, &idc)).is_empty(),
-            "the membership shard is cleared"
+            actor_state(&setup.state, membership_actor(&TREE_ID, &idc)).is_empty(),
+            "the membership state is cleared"
         );
     }
 
@@ -1394,70 +1339,37 @@ mod tests {
         let mut setup = setup_or_skip();
         let (secret, idc) = registered_slashable(&mut setup, 0x42);
         slash(&mut setup, secret, idc).expect("first slash");
-        // Claims as a slasher would guess them (the membership is gone).
-        let ix = Instruction::Slash {
+        // The index as a slasher would guess it (the membership is gone).
+        let msg = Message::Slash {
             tree_id: TREE_ID,
             id_commitment: idc,
             identity_secret: secret,
-            merkle_program_id: *MERKLE_ID.value(),
             leaf_index: 0,
-            rate_limit: 300,
         };
-        let tx = slash_tx(&setup.state, ix);
-        assert!(
-            apply(&mut setup.state, &tx).is_err(),
-            "double slash must fail"
-        );
+        let tx = slash_tx(&setup.state, msg);
+        assert!(setup.apply(&tx).is_err(), "double slash must fail");
     }
 
     /// The leaf a slash removes is the membership's, not the caller's pick:
     /// naming another member's leaf index must not evict that member. The
-    /// index is a hint the merkle apply checks by content.
+    /// index is a hint the merkle program checks by content.
     #[test]
-    fn slash_rejects_wrong_leaf_index_and_rate_limit_claims() {
+    fn slash_rejects_another_members_leaf_index() {
         let mut setup = setup_or_skip();
         register(&mut setup, valid_field_element(0x01), 100);
         let (secret, idc) = registered_slashable(&mut setup, 0x42);
-        let tree_before = tree_shard(&setup.state);
-        let ix = slash_ix(&setup.state, secret, idc);
-
-        for (what, bad) in [
-            (
-                "another member's leaf",
-                with_claim!(ix.clone(), Slash { leaf_index: 0 }),
-            ),
-            (
-                "a lower rate limit",
-                with_claim!(ix.clone(), Slash { rate_limit: 100 }),
-            ),
-            (
-                "an unconfigured merkle program",
-                with_claim!(
-                    ix,
-                    Slash {
-                        merkle_program_id: *ROGUE_MERKLE_ID.value()
-                    }
-                ),
-            ),
-        ] {
-            let tx = slash_tx(&setup.state, bad);
-            assert!(
-                apply(&mut setup.state, &tx).is_err(),
-                "slash with {what} must fail"
-            );
-            assert_eq!(
-                tree_shard(&setup.state),
-                tree_before,
-                "{what}: tree untouched"
-            );
-            assert!(
-                membership(&setup.state, &idc).is_some(),
-                "{what}: membership kept"
-            );
-        }
+        let tree_before = tree_state(&setup.state);
+        let msg = with_field!(
+            slash_msg(&setup.state, secret, idc),
+            Slash { leaf_index: 0 }
+        );
+        let tx = slash_tx(&setup.state, msg);
+        assert_exit(setup.apply(&tx), EXIT_LEAF_MISMATCH, "another member's leaf");
+        assert_eq!(tree_state(&setup.state), tree_before, "tree untouched");
+        assert!(membership(&setup.state, &idc).is_some(), "membership kept");
     }
 
-    /// Slashing clears the membership shard, so the init guard no longer
+    /// Slashing clears the membership state, so the init guard no longer
     /// stands in the way: the commitment can register again, at a new leaf.
     #[test]
     fn a_slashed_commitment_can_register_again() {
@@ -1473,7 +1385,7 @@ mod tests {
             "the old leaf index is never reused"
         );
         assert_eq!(
-            node_hash(&tree_shard(&setup.state), TREE_DEPTH, 0),
+            node_hash(&tree_state(&setup.state), TREE_DEPTH, 0),
             [0; 32],
             "the old leaf stays zeroed"
         );
@@ -1482,14 +1394,12 @@ mod tests {
     }
 
     /// Slash and erase name a leaf index the caller found by scanning; the
-    /// merkle apply removes it only if it holds `H(id_commitment,
-    /// rate_limit)`, and the membership apply has already pinned
-    /// `rate_limit`. Any other index, or the right index with the wrong rate
-    /// limit, fails the whole transaction and changes nothing.
+    /// merkle program removes it only if it holds `H(id_commitment,
+    /// rate_limit)` with the membership's own rate limit. Any other index
+    /// fails the whole transaction and changes nothing.
     #[test]
-    fn remove_refuses_a_wrong_index_or_leaf() {
+    fn remove_refuses_a_wrong_index() {
         let mut setup = setup_or_skip();
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let (_, idc_a) = slashable_identity(0x41);
         let (secret_b, idc_b) = slashable_identity(0x42);
         register(&mut setup, idc_a, 100);
@@ -1499,65 +1409,42 @@ mod tests {
         let leaf_a = registration_leaf(&idc_a, 100);
 
         // Erase becomes legal once both have expired; slash is always legal.
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
 
-        let tree_before = tree_shard(&setup.state);
+        let tree_before = tree_state(&setup.state);
         let config_before = config_bytes(&setup.state);
-        let membership_a_before = shard(&setup.state, membership_selector(&TREE_ID, &idc_a));
-        let membership_b_before = shard(&setup.state, membership_selector(&TREE_ID, &idc_b));
+        let membership_a_before = actor_state(&setup.state, membership_actor(&TREE_ID, &idc_a));
+        let membership_b_before = actor_state(&setup.state, membership_actor(&TREE_ID, &idc_b));
 
-        let slash_b = slash_ix(&setup.state, secret_b, idc_b);
-        let erase_b = erase_ix(&setup.state, idc_b);
-        let bad: Vec<(&str, PublicTransaction, u8)> = vec![
+        let slash_b = slash_msg(&setup.state, secret_b, idc_b);
+        let erase_b = erase_msg(&setup, idc_b);
+        let bad: Vec<(&str, PublicTransaction)> = vec![
             (
                 "slash at A's index",
                 slash_tx(
                     &setup.state,
-                    with_claim!(slash_b.clone(), Slash { leaf_index: 0 }),
+                    with_field!(slash_b.clone(), Slash { leaf_index: 0 }),
                 ),
-                EXIT_LEAF_MISMATCH,
             ),
             (
                 "slash past next_index",
                 slash_tx(
                     &setup.state,
-                    with_claim!(slash_b.clone(), Slash { leaf_index: 2 }),
+                    with_field!(slash_b.clone(), Slash { leaf_index: 2 }),
                 ),
-                EXIT_LEAF_MISMATCH,
-            ),
-            (
-                "slash at B's index with A's rate limit",
-                slash_tx(
-                    &setup.state,
-                    with_claim!(slash_b.clone(), Slash { rate_limit: 100 }),
-                ),
-                EXIT_STALE_RATE_LIMIT,
             ),
             (
                 "erase at A's index",
                 erase_tx(
                     &setup.state,
-                    with_claim!(erase_b.clone(), Erase { leaf_index: 0 }),
+                    with_field!(erase_b, Erase { leaf_index: 0 }),
                 ),
-                EXIT_LEAF_MISMATCH,
-            ),
-            (
-                "erase at B's index with A's rate limit",
-                erase_tx(
-                    &setup.state,
-                    with_claim!(erase_b, Erase { rate_limit: 100 }),
-                ),
-                EXIT_STALE_RATE_LIMIT,
             ),
         ];
-        for (what, tx, code) in bad {
-            assert_exit(apply(&mut setup.state, &tx), code, what);
+        for (what, tx) in bad {
+            assert_exit(setup.apply(&tx), EXIT_LEAF_MISMATCH, what);
             assert_eq!(
-                tree_shard(&setup.state),
+                tree_state(&setup.state),
                 tree_before,
                 "{what}: tree untouched"
             );
@@ -1567,12 +1454,12 @@ mod tests {
                 "{what}: config untouched"
             );
             assert_eq!(
-                shard(&setup.state, membership_selector(&TREE_ID, &idc_a)),
+                actor_state(&setup.state, membership_actor(&TREE_ID, &idc_a)),
                 membership_a_before,
                 "{what}: A untouched"
             );
             assert_eq!(
-                shard(&setup.state, membership_selector(&TREE_ID, &idc_b)),
+                actor_state(&setup.state, membership_actor(&TREE_ID, &idc_b)),
                 membership_b_before,
                 "{what}: B untouched"
             );
@@ -1580,15 +1467,15 @@ mod tests {
 
         // The right index: exactly B's leaf is zeroed.
         let tx = slash_tx(&setup.state, slash_b);
-        apply(&mut setup.state, &tx).expect("slash at B's index");
-        let shard_after = tree_shard(&setup.state);
+        setup.apply(&tx).expect("slash at B's index");
+        let tree_after = tree_state(&setup.state);
         assert_eq!(
-            node_hash(&shard_after, TREE_DEPTH, 0),
+            node_hash(&tree_after, TREE_DEPTH, 0),
             leaf_a,
             "A's leaf kept"
         );
         assert_eq!(
-            node_hash(&shard_after, TREE_DEPTH, 1),
+            node_hash(&tree_after, TREE_DEPTH, 1),
             [0; 32],
             "B's leaf zeroed"
         );
@@ -1601,7 +1488,7 @@ mod tests {
 
         // And A, the other way out.
         erase(&mut setup, idc_a).expect("erase at A's index");
-        assert_eq!(node_hash(&tree_shard(&setup.state), TREE_DEPTH, 0), [0; 32]);
+        assert_eq!(node_hash(&tree_state(&setup.state), TREE_DEPTH, 0), [0; 32]);
         assert_eq!(config(&setup.state).total_registrations, 0);
     }
 
@@ -1619,12 +1506,9 @@ mod tests {
         .expect("setup");
         register(&mut setup, valid_field_element(0x01), 300);
 
-        let tx = register_tx(
-            &setup,
-            register_ix(&setup.state, valid_field_element(0x02), 300),
-        );
+        let tx = register_tx(&setup, register_msg(&setup, valid_field_element(0x02), 300));
         assert!(
-            apply(&mut setup.state, &tx).is_err(),
+            setup.apply(&tx).is_err(),
             "a registration past max_total_rate_limit must fail"
         );
         assert_eq!(config(&setup.state).current_total_rate_limit, 300);
@@ -1645,9 +1529,9 @@ mod tests {
         assert_eq!(config(&setup.state).current_total_rate_limit, 120);
 
         for (seed, rate) in [(0x03, 19), (0x04, 101)] {
-            let tx = register_tx(&setup, register_ix(&setup.state, valid_field_element(seed), rate));
+            let tx = register_tx(&setup, register_msg(&setup, valid_field_element(seed), rate));
             assert!(
-                apply(&mut setup.state, &tx).is_err(),
+                setup.apply(&tx).is_err(),
                 "a registration at {rate} outside 20..=100 must fail"
             );
         }
@@ -1669,9 +1553,10 @@ mod tests {
     // Native payment
     // ====================================================================
     //
-    // The price moves through a chained call to the native token program,
-    // which refuses an unauthorized sender and an insufficient balance. The
-    // destination is the registry's to check, against the config's treasury.
+    // The price moves by a message to the payer's native actor, which refuses
+    // an unauthorized sender and an insufficient balance, and credits the
+    // config's treasury asynchronously — in the same transaction only when
+    // the treasury's native actor is declared.
 
     #[test]
     fn register_debits_payer_and_credits_treasury_natively() {
@@ -1692,28 +1577,32 @@ mod tests {
         assert_eq!(native_balance(&setup.state, &setup.treasury_id), price);
     }
 
-    /// SECURITY (payment routing): the treasury check in the config apply is
-    /// the only thing deciding where the price lands.
+    /// SECURITY (payment routing): the price goes to the treasury the config
+    /// stores, whatever the transaction declares. Declaring someone else's
+    /// native actor in its place leaves the real credit undeliverable, and
+    /// the transaction fails without moving anything.
     #[test]
-    fn register_rejects_a_treasury_that_is_not_the_configured_one() {
+    fn register_fails_when_the_configured_treasury_is_not_declared() {
         let mut setup = setup_or_skip();
         let (_, attacker_treasury) = keypair(9);
         assert_ne!(attacker_treasury, setup.treasury_id);
+        fund_native(&mut setup.state, &attacker_treasury, 1);
 
         let idc = valid_field_element(0x42);
         let tx = register_tx_to(
             &setup.state,
             &setup.payer_key,
-            &setup.payer_id,
             &attacker_treasury,
-            register_ix(&setup.state, idc, 300),
+            MERKLE_ID,
+            register_msg(&setup, idc, 300),
         );
-        let result = apply(&mut setup.state, &tx);
+        let result = setup.apply(&tx);
         assert!(
             result.is_err(),
-            "an unconfigured treasury must be refused; got {result:?}"
+            "a transaction not declaring the treasury must be refused; got {result:?}"
         );
-        assert_eq!(native_balance(&setup.state, &attacker_treasury), 0);
+        assert_eq!(native_balance(&setup.state, &attacker_treasury), 1);
+        assert_eq!(native_balance(&setup.state, &setup.treasury_id), 0);
         assert_eq!(
             native_balance(&setup.state, &setup.payer_id),
             DEFAULT_PAYER_BALANCE
@@ -1721,24 +1610,57 @@ mod tests {
         assert!(membership(&setup.state, &idc).is_none());
     }
 
-    /// An unsigned payer row: the payer is named but does not sign.
+    /// The treasury must exist on chain (or be a signer, or carry evidence)
+    /// to be declared: `run_setup` seeds it for that reason.
+    #[test]
+    fn register_fails_when_the_treasury_has_never_existed() {
+        let (_, treasury_id) = keypair(1);
+        let (payer_key, payer_id) = keypair(2);
+        let mut state = state_with_programs().expect("programs should load");
+        fund_native(&mut state, &payer_id, DEFAULT_PAYER_BALANCE);
+        let mut setup = TestSetup {
+            state,
+            treasury_id,
+            payer_id,
+            payer_key,
+            now_ms: GENESIS_TIMESTAMP_MS,
+        };
+        let tx = init_config_tx(
+            &setup.state,
+            &treasury_id,
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
+            (DEFAULT_MIN_RATE_LIMIT, DEFAULT_MAX_RATE_LIMIT),
+        );
+        setup.apply(&tx).expect("Initialize");
+        let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
+        setup.apply(&tx).expect("InitializeMerkleTree");
+
+        let idc = valid_field_element(0x42);
+        let tx = register_tx(&setup, register_msg(&setup, idc, 300));
+        assert_register_refused(&mut setup, &tx, &idc, "an unadmitted treasury");
+    }
+
+    /// The payer is named but does not sign: its native actor is not
+    /// authorized to be debited.
     #[test]
     fn register_rejects_an_unauthorized_payer() {
         let mut setup = setup_or_skip();
         let (other_key, other_id) = keypair(7);
         fund_native(&mut setup.state, &other_id, DEFAULT_PAYER_BALANCE);
 
-        // `other` signs, but the payer row names `setup.payer`.
+        // `other` signs, but the message names `setup.payer`.
         let idc = valid_field_element(0x42);
         let tx = register_tx_to(
             &setup.state,
             &other_key,
-            &setup.payer_id,
             &setup.treasury_id,
-            register_ix(&setup.state, idc, 300),
+            MERKLE_ID,
+            register_msg(&setup, idc, 300),
         );
         assert!(
-            apply(&mut setup.state, &tx).is_err(),
+            setup.apply(&tx).is_err(),
             "a payer that did not sign must not be debited"
         );
         assert_eq!(
@@ -1761,9 +1683,9 @@ mod tests {
         fund_native(&mut setup.state, &payer_id, price - 1);
 
         let idc = valid_field_element(0x42);
-        let tx = register_tx(&setup, register_ix(&setup.state, idc, 300));
+        let tx = register_tx(&setup, register_msg(&setup, idc, 300));
         assert!(
-            apply(&mut setup.state, &tx).is_err(),
+            setup.apply(&tx).is_err(),
             "one unit short must be refused"
         );
         assert_eq!(native_balance(&setup.state, &payer_id), price - 1);
@@ -1785,15 +1707,14 @@ mod tests {
         let mut setup = setup_or_skip();
         let idc = valid_field_element(0x42);
         let accounts: Vec<AccountId> = [
-            config_selector(&TREE_ID),
-            tree_selector(&TREE_ID, MERKLE_ID),
-            ProgramShardSelector::native_balance(setup.payer_id),
-            ProgramShardSelector::native_balance(setup.treasury_id),
-            clock_selector(),
-            membership_selector(&TREE_ID, &idc),
+            config_actor(&TREE_ID),
+            tree_actor(&TREE_ID, MERKLE_ID),
+            Actor::native_balance(setup.payer_id),
+            Actor::native_balance(setup.treasury_id),
+            membership_actor(&TREE_ID, &idc),
         ]
         .iter()
-        .map(|s| s.account_id)
+        .map(|a| a.account_id)
         .collect();
         let total = |state: &V03State| -> u128 {
             accounts.iter().map(|id| native_balance(state, id)).sum()
@@ -1814,21 +1735,21 @@ mod tests {
 
     /// The error a transaction fails with, and what the sequencer charges for
     /// it under a `MAX_GAS_EXEC` declaration.
-    fn failure_and_charge(state: &V03State, tx: &PublicTransaction) -> (LeeError, u64) {
+    fn failure_and_charge(setup: &TestSetup, tx: &PublicTransaction) -> (LeeError, u64) {
         let err = nssa::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
             tx,
-            state,
+            &setup.state,
             1,
-            0,
+            setup.now_ms,
             MAX_GAS_EXEC,
         )
         .err()
         .expect("the transaction should fail");
         let (charge, settled) = nssa::ValidatedStateDiff::from_public_transaction_metered(
             tx,
-            state,
+            &setup.state,
             1,
-            0,
+            setup.now_ms,
             MAX_GAS_EXEC,
         );
         assert!(
@@ -1836,69 +1757,65 @@ mod tests {
             "a chargeable failure settles as nonce bumps, got {:?}",
             settled.err()
         );
+        assert!(
+            charge.revert.is_some(),
+            "a chargeable failure is marked reverted"
+        );
         (err, charge.cycles)
     }
 
-    /// A claim that went stale because the chain moved (here: the clock) halts
-    /// the guest with an exit code, and is charged the cycles that ran — the
-    /// registration plan's leaf Poseidon plus two small applies — not the
-    /// declared gas. A malformed claim still panics and pays the full budget.
+    /// A view that went stale because the chain moved (here: the member
+    /// registered meanwhile) halts the guest with an exit code, and is
+    /// charged the cycles that ran — the config session's leaf Poseidon plus
+    /// the membership session — not the declared gas. A malformed message
+    /// still panics and pays the full budget.
     #[test]
-    fn a_stale_clock_claim_is_charged_measured_cycles() {
-        let setup = setup_or_skip();
-        let ix = register_ix(&setup.state, valid_field_element(0x42), 100);
+    fn a_stale_view_is_charged_measured_cycles() {
+        let mut setup = setup_or_skip();
+        let idc = valid_field_element(0x42);
+        register(&mut setup, idc, 100);
 
-        let stale = with_claim!(
-            ix.clone(),
-            Register {
-                now_ms: clock_ms(&setup.state) + 1
-            }
-        );
-        let (err, charged) = failure_and_charge(&setup.state, &register_tx(&setup, stale));
+        let duplicate = register_tx(&setup, register_msg(&setup, idc, 100));
+        let (err, charged) = failure_and_charge(&setup, &duplicate);
         println!(
-            "stale clock claim: {err:?} ({}), charged {charged} cycles ({:.1}% of MAX_GAS_EXEC)",
-            exit_code_name(u32::from(EXIT_STALE_CLOCK)).unwrap(),
+            "duplicate registration: {err:?} ({}), charged {charged} cycles ({:.1}% of MAX_GAS_EXEC)",
+            exit_code_name(u32::from(EXIT_MEMBERSHIP_EXISTS)).unwrap(),
             charged as f64 / MAX_GAS_EXEC as f64 * 100.0
         );
         assert!(
-            matches!(err, LeeError::ProgramExitedWithCode { code, .. } if code == u32::from(EXIT_STALE_CLOCK)),
+            matches!(err, LeeError::ProgramExitedWithCode { code, .. } if code == u32::from(EXIT_MEMBERSHIP_EXISTS)),
             "got {err:?}"
         );
         assert!(
             charged < 1_200_000,
-            "a stale claim must not pay the ceiling: {charged}"
+            "a stale view must not pay the ceiling: {charged}"
         );
 
-        let malformed = with_claim!(
-            ix,
-            Register {
-                merkle_program_id: *ROGUE_MERKLE_ID.value()
-            }
+        let malformed = register_tx(
+            &setup,
+            register_msg(&setup, valid_field_element(0x43), DEFAULT_MAX_RATE_LIMIT + 1),
         );
-        let (err, charged) = failure_and_charge(&setup.state, &register_tx(&setup, malformed));
+        let (err, charged) = failure_and_charge(&setup, &malformed);
         assert!(
             matches!(err, LeeError::ProgramExecutionFailed(_)),
             "got {err:?}"
         );
         assert_eq!(
             charged, MAX_GAS_EXEC,
-            "a malformed claim still pays the full budget"
+            "a malformed message still pays the full budget"
         );
     }
 
-    /// A whole register transaction — every plan and apply session of the
-    /// registration program plus the chained merkle insert — against the
-    /// ceiling that rejects it (`fee_core::market::MAX_GAS_EXEC`, one gas per
-    /// cycle). Printed: the margin is what says whether a deeper tree fits.
+    /// A whole register transaction — the config, membership and merkle
+    /// sessions — against the ceiling that rejects it
+    /// (`fee_core::market::MAX_GAS_EXEC`, one gas per cycle). Printed: the
+    /// margin is what says whether a deeper tree fits.
     #[test]
     fn register_transaction_fits_the_gas_ceiling() {
         let setup = setup_or_skip();
-        let tx = register_tx(
-            &setup,
-            register_ix(&setup.state, valid_field_element(0x42), 100),
-        );
+        let tx = register_tx(&setup, register_msg(&setup, valid_field_element(0x42), 100));
 
-        let used = whole_tx_cycles(&setup.state, &tx);
+        let used = whole_tx_cycles(&setup, &tx);
         println!(
             "register transaction: {used} cycles ({:.1}% of MAX_GAS_EXEC), tree depth {TREE_DEPTH}",
             used as f64 / MAX_GAS_EXEC as f64 * 100.0
@@ -1909,29 +1826,21 @@ mod tests {
         );
     }
 
-    /// Slash and erase hash the member's leaf in their plan (the merkle
-    /// `Remove` checks it by content) on top of a nine-level root update, so
-    /// they cost about one Poseidon more than a register.
+    /// Slash and erase hash the member's leaf (the merkle `Remove` checks it
+    /// by content) on top of a nine-level root update, so they cost about one
+    /// Poseidon more than a register.
     #[test]
     fn slash_and_erase_transactions_fit_the_gas_ceiling() {
         let mut setup = setup_or_skip();
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         let (secret, idc) = slashable_identity(0x42);
         register(&mut setup, idc, 100);
 
         let slash = whole_tx_cycles(
-            &setup.state,
-            &slash_tx(&setup.state, slash_ix(&setup.state, secret, idc)),
+            &setup,
+            &slash_tx(&setup.state, slash_msg(&setup.state, secret, idc)),
         );
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
-        let erase = whole_tx_cycles(
-            &setup.state,
-            &erase_tx(&setup.state, erase_ix(&setup.state, idc)),
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
+        let erase = whole_tx_cycles(&setup, &erase_tx(&setup.state, erase_msg(&setup, idc)));
         for (what, used) in [("slash", slash), ("erase", erase)] {
             println!(
                 "{what} transaction: {used} cycles ({:.1}% of MAX_GAS_EXEC)",
@@ -1993,7 +1902,7 @@ mod tests {
         let idc = valid_field_element(0x42);
         register(&mut setup, idc, 300);
 
-        let proof = merkle_proof(&tree_shard(&setup.state), 0);
+        let proof = merkle_proof(&tree_state(&setup.state), 0);
         assert_eq!(proof.path_elements.len(), TREE_DEPTH);
         assert_eq!(proof.path_indices.len(), TREE_DEPTH);
         assert_eq!(proof.leaf, rate_commitment(&idc, 300));
@@ -2005,7 +1914,7 @@ mod tests {
     }
 
     fn prove_and_verify(setup: &TestSetup, keys: &IdentityKeys, leaf_index: u64, rate_limit: u64) {
-        let proof = merkle_proof(&tree_shard(&setup.state), leaf_index);
+        let proof = merkle_proof(&tree_state(&setup.state), leaf_index);
         assert_eq!(
             proof.leaf,
             rate_commitment(&fr_to_bytes_le(&keys.id_commitment()), rate_limit)
@@ -2060,7 +1969,7 @@ mod tests {
 
         slash(&mut setup, secret, idc).expect("slash");
 
-        let proof = merkle_proof(&tree_shard(&setup.state), 0);
+        let proof = merkle_proof(&tree_state(&setup.state), 0);
         assert_ne!(proof.root, root_registered, "the root moved");
         assert_ne!(proof.leaf, rate_commitment(&idc, 300), "the leaf is gone");
         assert_eq!(proof.root, empty_root, "back to the empty root");
@@ -2072,7 +1981,7 @@ mod tests {
         let keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(&[0x99; 32]);
         register(&mut setup, fr_to_bytes_le(&keys.id_commitment()), 300);
 
-        let (merkle_proof, root) = circuit_proof(&merkle_proof(&tree_shard(&setup.state), 0));
+        let (merkle_proof, root) = circuit_proof(&merkle_proof(&tree_state(&setup.state), 0));
         let rln = crate::proof_circuit::engine();
         let prove = |msg: &[u8]| {
             let x = hash_to_field_le(msg);
@@ -2106,19 +2015,20 @@ mod tests {
     const EXP_RATE_LIMIT: u64 = 300;
 
     fn extend(setup: &mut TestSetup, idc: [u8; 32]) -> Result<(), nssa::error::LeeError> {
-        let tx = extend_tx(setup, &setup.payer_key, extend_ix(&setup.state, idc));
-        apply(&mut setup.state, &tx)
+        let msg = extend_msg(setup, &setup.payer_id, idc);
+        let tx = extend_tx(setup, &setup.payer_key, msg);
+        setup.apply(&tx)
     }
 
     fn erase(setup: &mut TestSetup, idc: [u8; 32]) -> Result<(), nssa::error::LeeError> {
-        let tx = erase_tx(&setup.state, erase_ix(&setup.state, idc));
-        apply(&mut setup.state, &tx)
+        let tx = erase_tx(&setup.state, erase_msg(setup, idc));
+        setup.apply(&tx)
     }
 
     /// Registered at `GENESIS_TIMESTAMP_MS`.
     fn registered_at_genesis(seed: u8) -> (TestSetup, [u8; 32]) {
         let mut setup = setup_or_skip();
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
+        setup.now_ms = GENESIS_TIMESTAMP_MS;
         let idc = valid_field_element(seed);
         register(&mut setup, idc, EXP_RATE_LIMIT);
         (setup, idc)
@@ -2128,7 +2038,7 @@ mod tests {
     fn test_register_snapshots_grace_period_start() {
         let mut setup = setup_or_skip();
         let at = GENESIS_TIMESTAMP_MS + 500;
-        set_clock_50(&mut setup.state, at, 50);
+        setup.now_ms = at;
         let idc = valid_field_element(0xA1);
         register(&mut setup, idc, EXP_RATE_LIMIT);
 
@@ -2139,21 +2049,6 @@ mod tests {
             m.grace_period_duration_sec,
             DEFAULT_GRACE_PERIOD_DURATION_SEC
         );
-    }
-
-    /// A fresh chain carries the genesis CLOCK_50 (timestamp 0) until block
-    /// 50. A membership stamped from it would expire the instant the clock is
-    /// first written, so registration refuses — even with a matching claim.
-    #[test]
-    fn test_register_is_refused_while_the_clock_reads_zero() {
-        let mut setup = setup_or_skip();
-        set_clock_50(&mut setup.state, 0, 0);
-        let idc = valid_field_element(0xB2);
-        let ix = register_ix(&setup.state, idc, EXP_RATE_LIMIT);
-        assert!(matches!(ix, Instruction::Register { now_ms: 0, .. }));
-        let tx = register_tx(&setup, ix);
-        assert!(apply(&mut setup.state, &tx).is_err());
-        assert!(membership(&setup.state, &idc).is_none());
     }
 
     /// The production defaults over a realistic timeline: guards the bug that
@@ -2172,7 +2067,7 @@ mod tests {
         )
         .expect("setup");
         let t0 = GENESIS_TIMESTAMP_MS;
-        set_clock_50(&mut setup.state, t0, 50);
+        setup.now_ms = t0;
         let idc = valid_field_element(0xB1);
         register(&mut setup, idc, EXP_RATE_LIMIT);
         assert_eq!(
@@ -2182,10 +2077,10 @@ mod tests {
             t0 + 30 * DAY_MS
         );
 
-        set_clock_50(&mut setup.state, t0 + 29 * DAY_MS, 100);
+        setup.now_ms = t0 + 29 * DAY_MS;
         assert!(extend(&mut setup, idc).is_err(), "still active on day 29");
 
-        set_clock_50(&mut setup.state, t0 + 31 * DAY_MS, 150);
+        setup.now_ms = t0 + 31 * DAY_MS;
         extend(&mut setup, idc).expect("in grace on day 31");
         assert_eq!(
             membership(&setup.state, &idc)
@@ -2195,7 +2090,7 @@ mod tests {
             "extend adds one grace + one active period"
         );
 
-        set_clock_50(&mut setup.state, t0 + 75 * DAY_MS, 200);
+        setup.now_ms = t0 + 75 * DAY_MS;
         erase(&mut setup, idc).expect("expired by day 75");
         assert!(membership(&setup.state, &idc).is_none());
     }
@@ -2204,7 +2099,7 @@ mod tests {
     fn test_extend_succeeds_in_grace_period() {
         let (mut setup, idc) = registered_at_genesis(0xA2);
         let grace_start = GENESIS_TIMESTAMP_MS + ACTIVE_MS;
-        set_clock_50(&mut setup.state, grace_start + GRACE_MS / 2, 100);
+        setup.now_ms = grace_start + GRACE_MS / 2;
         extend(&mut setup, idc).expect("extend during grace");
         assert_eq!(
             membership(&setup.state, &idc)
@@ -2217,18 +2112,14 @@ mod tests {
     #[test]
     fn test_extend_fails_when_still_active() {
         let (mut setup, idc) = registered_at_genesis(0xA3);
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + 10, 100);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + 10;
         assert!(extend(&mut setup, idc).is_err());
     }
 
     #[test]
     fn test_extend_fails_when_expired() {
         let (mut setup, idc) = registered_at_genesis(0xA4);
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
         assert!(extend(&mut setup, idc).is_err());
     }
 
@@ -2240,12 +2131,13 @@ mod tests {
         let (mut setup, idc) = registered_at_genesis(0xA5);
         let (third_key, third_id) = keypair(5);
         fund_native(&mut setup.state, &third_id, DEFAULT_PAYER_BALANCE);
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1, 100);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
 
         let treasury_before = native_balance(&setup.state, &setup.treasury_id);
         let owner_before = native_balance(&setup.state, &setup.payer_id);
-        let tx = extend_tx(&setup, &third_key, extend_ix(&setup.state, idc));
-        apply(&mut setup.state, &tx).expect("a paying third party may renew");
+        let msg = extend_msg(&setup, &third_id, idc);
+        let tx = extend_tx(&setup, &third_key, msg);
+        setup.apply(&tx).expect("a paying third party may renew");
 
         let price = u128::from(EXP_RATE_LIMIT) * PRICE_PER_UNIT;
         assert!(price > 0, "a zero-priced renewal would restore the grief");
@@ -2264,10 +2156,48 @@ mod tests {
         );
     }
 
+    /// SECURITY (renewal is priced): the price moves from the account the
+    /// message names as payer, and only its own signature authorizes that
+    /// debit — the config's `ChargeRenewal` carries no grant. A renewal naming
+    /// a payer who did not sign is refused and nothing moves.
+    #[test]
+    fn extend_rejects_an_unauthorized_payer() {
+        let (mut setup, idc) = registered_at_genesis(0xA8);
+        let (other_key, other_id) = keypair(7);
+        fund_native(&mut setup.state, &other_id, DEFAULT_PAYER_BALANCE);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
+        let before = membership(&setup.state, &idc)
+            .unwrap()
+            .grace_period_start_timestamp_ms;
+
+        // `other` signs; the message names `setup.payer`.
+        let msg = extend_msg(&setup, &setup.payer_id, idc);
+        let tx = extend_tx(&setup, &other_key, msg);
+        assert!(
+            setup.apply(&tx).is_err(),
+            "a payer that did not sign must not be debited for a renewal"
+        );
+        assert_eq!(
+            native_balance(&setup.state, &setup.payer_id),
+            DEFAULT_PAYER_BALANCE - u128::from(EXP_RATE_LIMIT) * PRICE_PER_UNIT
+        );
+        assert_eq!(
+            native_balance(&setup.state, &other_id),
+            DEFAULT_PAYER_BALANCE
+        );
+        assert_eq!(
+            membership(&setup.state, &idc)
+                .unwrap()
+                .grace_period_start_timestamp_ms,
+            before,
+            "not renewed"
+        );
+    }
+
     #[test]
     fn test_extend_fails_when_payer_cannot_cover_the_price() {
         let (mut setup, idc) = registered_at_genesis(0xA7);
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1, 100);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
         let payer = setup.payer_id;
         fund_native(&mut setup.state, &payer, 0);
         assert!(
@@ -2276,60 +2206,40 @@ mod tests {
         );
     }
 
-    /// Renewal claims: a cheaper price or a lower rate limit would renew for
-    /// less than registering costs.
+    /// A renewal dated ahead of the block is outside its validity window.
     #[test]
-    fn extend_rejects_wrong_price_and_rate_limit_claims() {
+    fn extend_rejects_a_now_ms_ahead_of_chain_time() {
         let (mut setup, idc) = registered_at_genesis(0xA9);
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1, 100);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
         let before = membership(&setup.state, &idc)
             .unwrap()
             .grace_period_start_timestamp_ms;
         let payer_before = native_balance(&setup.state, &setup.payer_id);
-        let ix = extend_ix(&setup.state, idc);
 
-        for (what, bad) in [
-            (
-                "an under-priced claim",
-                with_claim!(ix.clone(), Extend { price_per_unit: 1 }),
-            ),
-            (
-                "a lower rate limit",
-                with_claim!(ix.clone(), Extend { rate_limit: 100 }),
-            ),
-            (
-                "a now_ms ahead of the clock",
-                with_claim!(
-                    ix,
-                    Extend {
-                        now_ms: GENESIS_TIMESTAMP_MS + ACTIVE_MS + 2
-                    }
-                ),
-            ),
-        ] {
-            let tx = extend_tx(&setup, &setup.payer_key, bad);
-            assert!(
-                apply(&mut setup.state, &tx).is_err(),
-                "extend with {what} must fail"
-            );
-            assert_eq!(
-                membership(&setup.state, &idc)
-                    .unwrap()
-                    .grace_period_start_timestamp_ms,
-                before
-            );
-            assert_eq!(native_balance(&setup.state, &setup.payer_id), payer_before);
-        }
+        let msg = with_field!(
+            extend_msg(&setup, &setup.payer_id, idc),
+            Extend {
+                now_ms: GENESIS_TIMESTAMP_MS + ACTIVE_MS + 2
+            }
+        );
+        let tx = extend_tx(&setup, &setup.payer_key, msg);
+        assert!(
+            setup.apply(&tx).is_err(),
+            "extend with a now_ms ahead of the block must fail"
+        );
+        assert_eq!(
+            membership(&setup.state, &idc)
+                .unwrap()
+                .grace_period_start_timestamp_ms,
+            before
+        );
+        assert_eq!(native_balance(&setup.state, &setup.payer_id), payer_before);
     }
 
     #[test]
     fn test_erase_succeeds_when_expired() {
         let (mut setup, idc) = registered_at_genesis(0xA6);
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
         erase(&mut setup, idc).expect("erase of an expired membership");
         assert!(membership(&setup.state, &idc).is_none());
     }
@@ -2337,14 +2247,14 @@ mod tests {
     #[test]
     fn test_erase_fails_when_active() {
         let (mut setup, idc) = registered_at_genesis(0xA7);
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + 1, 100);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + 1;
         assert!(erase(&mut setup, idc).is_err());
     }
 
     #[test]
     fn test_erase_fails_in_grace_period() {
         let (mut setup, idc) = registered_at_genesis(0xA8);
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1, 100);
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + 1;
         assert!(erase(&mut setup, idc).is_err());
     }
 
@@ -2355,11 +2265,7 @@ mod tests {
             config(&setup.state).current_total_rate_limit,
             EXP_RATE_LIMIT
         );
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
         erase(&mut setup, idc).expect("erase");
         assert_eq!(config(&setup.state).current_total_rate_limit, 0);
     }
@@ -2367,65 +2273,26 @@ mod tests {
     /// Erase removes the leaf the MEMBERSHIP records: pointing it at another
     /// member's leaf must not evict that member.
     #[test]
-    fn erase_rejects_wrong_leaf_index_and_rate_limit_claims() {
+    fn erase_rejects_another_members_leaf_index() {
         let mut setup = setup_or_skip();
-        set_clock_50(&mut setup.state, GENESIS_TIMESTAMP_MS, 50);
         register(&mut setup, valid_field_element(0x01), 100);
         let idc = valid_field_element(0xAB);
         register(&mut setup, idc, EXP_RATE_LIMIT);
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
 
-        let tree_before = tree_shard(&setup.state);
-        let ix = erase_ix(&setup.state, idc);
-        for (what, bad) in [
-            (
-                "another member's leaf",
-                with_claim!(ix.clone(), Erase { leaf_index: 0 }),
-            ),
-            (
-                "a larger rate limit",
-                with_claim!(ix.clone(), Erase { rate_limit: 600 }),
-            ),
-            (
-                "an unconfigured merkle program",
-                with_claim!(
-                    ix,
-                    Erase {
-                        merkle_program_id: *ROGUE_MERKLE_ID.value()
-                    }
-                ),
-            ),
-        ] {
-            let tx = erase_tx(&setup.state, bad);
-            assert!(
-                apply(&mut setup.state, &tx).is_err(),
-                "erase with {what} must fail"
-            );
-            assert_eq!(
-                tree_shard(&setup.state),
-                tree_before,
-                "{what}: tree untouched"
-            );
-            assert!(
-                membership(&setup.state, &idc).is_some(),
-                "{what}: membership kept"
-            );
-        }
+        let tree_before = tree_state(&setup.state);
+        let msg = with_field!(erase_msg(&setup, idc), Erase { leaf_index: 0 });
+        let tx = erase_tx(&setup.state, msg);
+        assert_exit(setup.apply(&tx), EXIT_LEAF_MISMATCH, "another member's leaf");
+        assert_eq!(tree_state(&setup.state), tree_before, "tree untouched");
+        assert!(membership(&setup.state, &idc).is_some(), "membership kept");
     }
 
-    /// Erase clears the membership shard, so the commitment can register again.
+    /// Erase clears the membership state, so the commitment can register again.
     #[test]
     fn an_erased_commitment_can_register_again() {
         let (mut setup, idc) = registered_at_genesis(0xAC);
-        set_clock_50(
-            &mut setup.state,
-            GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1,
-            100,
-        );
+        setup.now_ms = GENESIS_TIMESTAMP_MS + ACTIVE_MS + GRACE_MS + 1;
         erase(&mut setup, idc).expect("erase");
 
         register(&mut setup, idc, EXP_RATE_LIMIT);

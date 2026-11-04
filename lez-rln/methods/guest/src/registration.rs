@@ -1,16 +1,10 @@
-//! Helpers shared by the `rln_registration` program's plan and apply phases.
+//! Helpers shared by the `rln_registration` program's handlers.
 
-use nssa_core::program::AccountMeta;
-use rln_layouts::exit::{EXIT_CLOCK_NOT_INITIALIZED, EXIT_STALE_CLOCK};
+use lee_core::program::Response;
 
 // Re-export expiration constants / helpers from shared crate
-pub use crate::layouts::{
-    CLOCK_50_ACCOUNT_ID_BYTES, CLOCK_CLAIM_TOLERANCE_MS, is_expired, is_in_grace_period,
-};
-use crate::{
-    ensure,
-    hash::{hash_pair, validate_field_element},
-};
+pub use crate::layouts::{CLOCK_CLAIM_TOLERANCE_MS, is_expired, is_in_grace_period};
+use crate::hash::{hash_pair, validate_field_element};
 
 /// Price of a membership at `rate_limit`, in native atomic units.
 ///
@@ -36,45 +30,21 @@ pub fn compute_registration_leaf(id_commitment: &[u8; 32], rate_limit: u64) -> [
 }
 
 // ============================================================================
-// Clock Helpers
+// Time
 // ============================================================================
 
-/// Plan side of the clock guard: `clock` must name `CLOCK_50`'s clock-program
-/// shard, the only shard of that account holding `ClockAccountData`.
-pub fn require_clock_account(clock: &AccountMeta) {
-    assert!(
-        *clock.account_id.value() == CLOCK_50_ACCOUNT_ID_BYTES,
-        "Wrong clock account provided"
-    );
-    assert!(
-        clock.program_account_id == clock_core::clock_account_id(),
-        "Clock account must select the clock program's shard"
-    );
-}
-
-/// Apply side of the clock guard: the claimed `now_ms` must be at most
-/// `CLOCK_CLAIM_TOLERANCE_MS` behind the clock shard's timestamp, and never
-/// ahead of it. An equality claim would revert any transaction that straddles
-/// a `CLOCK_50` step; see the constant for why an older claim is safe.
-///
-/// A zero timestamp is refused: CLOCK_50 carries the genesis zero until the
-/// sequencer's first refresh of it (every 50 blocks), and a membership stamped
-/// from that dates its whole lifetime to 1970 and expires the instant the
-/// clock is first written. No live chain reports zero, so every
-/// time-dependent instruction refuses to run until the clock exists.
-pub fn assert_clock_is(clock_pre_data: &[u8], now_ms: u64) {
-    let timestamp = clock_core::ClockAccountData::from_bytes(clock_pre_data).timestamp;
-    ensure!(
-        timestamp > 0,
-        EXIT_CLOCK_NOT_INITIALIZED,
-        "ClockNotInitialized: CLOCK_50 has not been written yet"
-    );
-    ensure!(
-        now_ms <= timestamp && timestamp - now_ms <= CLOCK_CLAIM_TOLERANCE_MS,
-        EXIT_STALE_CLOCK,
-        "Claimed now_ms {now_ms} is not within {CLOCK_CLAIM_TOLERANCE_MS} ms before \
-         CLOCK_50's timestamp {timestamp}"
-    );
+/// Pin `response`'s transaction to the blocks whose timestamp lies in
+/// `[now_ms, now_ms + CLOCK_CLAIM_TOLERANCE_MS)`: the claimed `now_ms` may be
+/// at most the tolerance behind chain time and never ahead of it. A
+/// transaction included outside the window is reverted (and charged), so the
+/// claim, which dates the membership, can never lengthen it.
+pub fn time_window(response: Response, now_ms: u64) -> Response {
+    let end = now_ms
+        .checked_add(CLOCK_CLAIM_TOLERANCE_MS)
+        .expect("now_ms plus the tolerance overflows u64");
+    response
+        .try_timestamp_window((Some(now_ms), Some(end)))
+        .expect("the window is non-empty")
 }
 
 // ============================================================================
@@ -145,86 +115,24 @@ mod tests {
         assert!(is_expired(start_ms, 0, 1_000));
     }
 
-    fn clock_bytes(timestamp: u64) -> Vec<u8> {
-        clock_core::ClockAccountData {
-            block_id: 7,
-            timestamp,
-        }
-        .to_bytes()
-    }
-
-    fn clock_meta(
-        account_id: [u8; 32],
-        program_account_id: nssa_core::account::AccountId,
-    ) -> AccountMeta {
-        AccountMeta::new(
-            nssa_core::account::AccountId::new(account_id),
-            false,
-            program_account_id,
-        )
-    }
-
-    #[test]
-    fn require_clock_account_accepts_clock50_clock_shard() {
-        require_clock_account(&clock_meta(
-            CLOCK_50_ACCOUNT_ID_BYTES,
-            clock_core::clock_account_id(),
-        ));
-    }
-
-    #[test]
-    #[should_panic(expected = "Wrong clock account")]
-    fn require_clock_account_rejects_other_account() {
-        require_clock_account(&clock_meta([9u8; 32], clock_core::clock_account_id()));
-    }
-
-    #[test]
-    #[should_panic(expected = "clock program's shard")]
-    fn require_clock_account_rejects_foreign_shard() {
-        require_clock_account(&clock_meta(
-            CLOCK_50_ACCOUNT_ID_BYTES,
-            nssa_core::account::AccountId::new([3u8; 32]),
-        ));
-    }
-
-    /// The host names the clock shard by `rln_layouts`' mirror of the id.
-    #[test]
-    fn clock_program_id_mirror_matches_clock_core() {
-        assert_eq!(
-            rln_layouts::clock_program_account_id(),
-            *clock_core::clock_account_id().value()
-        );
-    }
-
     const T: u64 = 10_000_000;
 
+    /// The window admits the claim itself and anything up to the tolerance
+    /// later, and nothing earlier.
     #[test]
-    fn assert_clock_is_accepts_matching_timestamp() {
-        assert_clock_is(&clock_bytes(T), T);
-    }
-
-    /// The clock stepped after the claim was read: still accepted.
-    #[test]
-    fn assert_clock_is_accepts_a_claim_up_to_the_tolerance_behind() {
-        assert_clock_is(&clock_bytes(T), T - 1);
-        assert_clock_is(&clock_bytes(T), T - CLOCK_CLAIM_TOLERANCE_MS);
-    }
-
-    #[test]
-    #[should_panic(expected = "exit 10: Claimed now_ms")]
-    fn assert_clock_is_rejects_a_claim_ahead_of_the_clock() {
-        assert_clock_is(&clock_bytes(T), T + 1);
+    fn time_window_spans_the_claim_and_the_tolerance_after_it() {
+        let window = time_window(Response::keep_state(), T).validity.timestamps;
+        assert!(!window.is_valid_for(T - 1));
+        assert!(window.is_valid_for(T));
+        assert!(window.is_valid_for(T + CLOCK_CLAIM_TOLERANCE_MS - 1));
+        assert!(!window.is_valid_for(T + CLOCK_CLAIM_TOLERANCE_MS));
+        assert_eq!(window.start(), Some(T));
+        assert_eq!(window.end(), Some(T + CLOCK_CLAIM_TOLERANCE_MS));
     }
 
     #[test]
-    #[should_panic(expected = "exit 10: Claimed now_ms")]
-    fn assert_clock_is_rejects_a_claim_older_than_the_tolerance() {
-        assert_clock_is(&clock_bytes(T), T - CLOCK_CLAIM_TOLERANCE_MS - 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "ClockNotInitialized")]
-    fn assert_clock_is_rejects_genesis_zero() {
-        assert_clock_is(&clock_bytes(0), 0);
+    #[should_panic(expected = "overflows u64")]
+    fn time_window_refuses_a_claim_near_the_end_of_time() {
+        let _ = time_window(Response::keep_state(), u64::MAX);
     }
 }

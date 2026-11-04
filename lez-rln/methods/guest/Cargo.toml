@@ -35,10 +35,8 @@ codegen-units = 1
 workspace = true
 
 [dependencies]
-# lee_core is aliased as nssa_core so guest source keeps its historical import
-# name. Pinned by tag so a fresh clone builds with no sibling checkout.
-nssa_core = { package = "lee_core", git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.1", default-features = false }
-clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.1" }
+# Pinned by tag so a fresh clone builds with no sibling checkout.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", default-features = false }
 borsh = { version = "1", default-features = false, features = ["derive"] }
 bytemuck = "1.24.0"
 risc0-zkvm = { version = "3.0.5", default-features = false }
@@ -60,6 +58,13 @@ rust-poseidon-bn254-pure = { git = "https://github.com/logos-storage/rust-poseid
 # env risc0-build sets for the guest. https://dev.risczero.com/api/zkvm/precompiles
 [patch.crates-io]
 sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8-risczero.0" }
+
+# The host-side unit tests compare `Response`s, which lee_core derives
+# `PartialEq` for under its `host` feature only. Dev-dependencies never enter
+# the risc0 build, so the feature (and its `ml-kem/getrandom`) stays out of
+# the guest ELF.
+[dev-dependencies]
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", features = ["host"] }
 
 [[bin]]
 name = "incremental_merkle_tree"

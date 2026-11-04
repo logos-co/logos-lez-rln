@@ -72,6 +72,16 @@ for b in "$RUN_SETUP" "$DERIVE" "$MINT_PAYER"; do [ -x "$b" ] || { echo "missing
 WS=$(mktemp -d); trap 'rm -rf "$WS"' EXIT
 if [ -n "$ADOPT" ]; then
   [ -f "$ADOPT" ] || { echo "adopt wallet not found: $ADOPT" >&2; exit 1; }
+  # A storage written by a wallet before LEZ v0.4.0 holds private-account
+  # entries ("shards") the v0.4 wallet cannot parse; re-mint the wallet. An
+  # encrypted storage (top-level "ciphertext") needs LEE_WALLET_PASSWORD and
+  # cannot be inspected by the jq below.
+  if jq -e 'has("ciphertext")' "$ADOPT" >/dev/null 2>&1; then
+    echo "provision: $ADOPT is an encrypted wallet storage; stage.sh and this script read it with jq — adopt an unencrypted one" >&2; exit 1
+  fi
+  if grep -q '"shards"' "$ADOPT"; then
+    echo "provision: $ADOPT was written by a pre-v0.4.0 wallet (private entries carry \"shards\") and no longer parses; mint a fresh wallet" >&2; exit 1
+  fi
   cp "$ADOPT" "$WS/storage.json"; echo "provision: adopting wallet $ADOPT"
 fi
 # Triple-shape sequencer field — see stage.sh: `sequencer` (v0.3.1 wallet),
@@ -91,6 +101,9 @@ jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencer:{sequencer_addr:$s}, s
 
 echo "provision: tree=$TREE sequencer=$SEQUENCER payer=$PAYER (deploying via run_setup — several min)"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS"
+# Headless: an unencrypted storage opens with the empty password and the
+# tools never prompt.
+export LEE_WALLET_PASSWORD="${LEE_WALLET_PASSWORD:-}"
 export LEZ_RLN_TREE_ID_HEX="$TREE" RISC0_DEV_MODE=1
 export LEZ_RLN_PAYER="$PAYER"
 export DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-/Library/Developer/CommandLineTools/Library/Frameworks}"
@@ -111,6 +124,12 @@ PAY=$(tr -d '\n\r' < "$WS/.logos-lez-rln/payment_account_${TREE}.txt")
 # registry's revenue accrues.
 TREASURY=$(grep -E "^  Treasury:" "$LOG" | awk '{print $NF}')
 [ -n "$TREASURY" ] || { echo "provision: FAIL: run_setup printed no treasury account" >&2; exit 1; }
+# Public keys beside the ids: genesis funding and admission evidence name
+# a key, not an account.
+TREASURY_PK=$(grep -E "^  Treasury public key:" "$LOG" | awk '{print $NF}')
+[[ "$TREASURY_PK" =~ ^[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no treasury public key" >&2; exit 1; }
+PAYER_PK=$(grep -E "^Payer public key:" "$LOG" | awk '{print $NF}')
+[[ "$PAYER_PK" =~ ^[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no payer public key" >&2; exit 1; }
 BOUNDS=$(grep -E "^  Rate limit bounds:" "$LOG" | awk '{print $NF}')
 [[ "$BOUNDS" =~ ^([0-9]+)\.\.=([0-9]+)$ ]] || { echo "provision: FAIL: run_setup printed no rate limit bounds" >&2; exit 1; }
 MIN_RATE="${BASH_REMATCH[1]}"; MAX_RATE="${BASH_REMATCH[2]}"
@@ -127,7 +146,8 @@ jq -n \
   --arg reg "$REG" --arg mrk "$MRK" \
   --arg cfg "$CFG" --arg pay "$PAY" --arg treasury "$TREASURY" \
   --argjson min_rate "$MIN_RATE" --argjson max_rate "$MAX_RATE" \
-  '{name:$name, tree_id:$tree, sequencer:$seq, registration_program_id:$reg, merkle_program_id:$mrk, config_account:$cfg, payer_account:$pay, treasury_account:$treasury, min_rate_limit:$min_rate, max_rate_limit:$max_rate}' \
+  --arg treasury_pk "$TREASURY_PK" --arg payer_pk "$PAYER_PK" \
+  '{name:$name, tree_id:$tree, sequencer:$seq, registration_program_id:$reg, merkle_program_id:$mrk, config_account:$cfg, payer_account:$pay, treasury_account:$treasury, min_rate_limit:$min_rate, max_rate_limit:$max_rate, payer_public_key:$payer_pk, treasury_public_key:$treasury_pk}' \
   > "$DEP_DIR/deployment.json"
 
 echo "provision: wrote $DEP_DIR/{deployment.json,storage.json}"

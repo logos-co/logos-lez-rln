@@ -9,7 +9,7 @@ A **deployment** = one on-chain RLN instance, fully captured by two files:
 ```
 deployments/<name>/
   deployment.json   # tree_id + sequencer + both program ids + derived config + payer/treasury
-  storage.json      # the wallet (holds the payer's keypair)
+  storage.json      # the wallet (holds the payer's keypair); unencrypted, written by a v0.4 wallet
 ```
 
 `deployment.json`:
@@ -49,9 +49,11 @@ signs the `Register` transaction — which is also that transaction's fee payer.
 One account, one balance, no holding to derive and nothing to claim first.
 
 That account is `payer_account`, and it must already hold native balance:
-**no program can mint native**, so it arrives at genesis (`mint_payer` prints an
-id, `dev.sh`'s `LEZ_RLN_GENESIS_FUND` funds it), over the L1 bridge, or by a
-transfer from something already funded. Budget roughly
+**no program can mint native**, so it arrives at genesis (`mint_payer` prints the
+payer's id and public key; `dev.sh`'s `LEZ_RLN_GENESIS_FUND` takes the public
+key), over the L1 bridge, or by a transfer from something already funded
+(`fund_account`; an account that has never existed on chain is credited by
+`--to-public-key`). Budget roughly
 `rate_limit x price_per_unit + 6.5e8` per registration — the fee reserve dwarfs
 the price, so an account sized only for the price cannot transact at all.
 

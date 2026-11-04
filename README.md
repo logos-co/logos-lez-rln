@@ -52,8 +52,8 @@ bash ../tools/e2e-local.sh                                # lifecycle against a 
 genesis, and runs `lez-rln/tests/local_sequencer.rs`: deploy, init, three
 registrations, an RLN proof against the on-chain root, a refused duplicate,
 slash, extend and erase. It stamps memberships with second-long durations so
-the two time-gated steps clear within a few `CLOCK_50` ticks; expect it to take
-a few minutes. On macOS the state tests need
+the two time-gated steps clear within a minute of chain time; expect it to
+take a few minutes. On macOS the state tests need
 `DYLD_FRAMEWORK_PATH=/Library/Developer/CommandLineTools/Library/Frameworks`
 (see `lez-rln/CLAUDE.md`).
 
@@ -77,6 +77,20 @@ cargo run --bin run_rln_proof    # generate + verify RLN proof against on-chain 
 
 `run_rln_proof` is the canonical end-to-end smoke test: it registers an identity, fetches the merkle proof from the chain, generates an RLN proof via zerokit, and verifies it. Pass = the on-chain Poseidon merkle root matches what zerokit computes.
 
+### Wallets
+
+The host tools open a `WalletCore` from `LEE_WALLET_HOME_DIR`
+(`wallet_config.json` + `storage.json`). A storage may be sealed with a
+password: the tools read `LEE_WALLET_PASSWORD` and never prompt, and an unset
+or empty variable means an unencrypted file (the default for every throwaway
+wallet here). A storage written by a wallet before LEZ v0.4.0 no longer parses
+— its private-account entries changed shape — so re-mint such wallets.
+
+`mint_payer` prints two lines, the payer's account id and its public key.
+`dev.sh` funds the payer at genesis from the **public key**
+(`LEZ_RLN_GENESIS_FUND=<64 hex>`); `run_setup` and the registration tools take
+the **account id** (`LEZ_RLN_PAYER`).
+
 ## Structure
 
 - `rln-layouts/` - Shared zero-copy layouts, constants, and PDA seed construction (no_std, used by both host and guest)
@@ -87,26 +101,44 @@ cargo run --bin run_rln_proof    # generate + verify RLN proof against on-chain 
 
 ## Execution model
 
-LEZ runs a program in two phases. **Plan** sees only account ids and
-authorization flags plus the instruction, and emits *effects* (one per shard it
-touches) and chained calls. **Apply** runs once per effect, sees exactly one
-shard's bytes, and returns that shard's new bytes. Every value a handler needs
-from an account — the clock's timestamp, the config's price and merkle program
-id, a membership's rate limit — therefore travels in the instruction as a
-**claim**, and the apply that can see the account asserts it. Effects are
-applied before the plan's chained calls run, so a false claim fails the
-transaction before anything downstream executes.
+LEZ runs a program as **actors**: one `(account, program)` pair per message
+delivery, each a zkVM session that sees only that actor's own state and the
+message, and returns its new state plus the messages it sends on. A
+transaction submits one root message to one actor and declares every actor
+the program will touch. Sync messages run in emission order, each to
+completion before the next; a panic anywhere fails the whole transaction.
 
-The leaf index is not a claim. The merkle program assigns it on insert (its own
-`next_index`), so two registrations built from the same chain state both land,
-at consecutive indices. No account records it: clients find a member's leaf by
-scanning the tree for `hash(id_commitment, rate_limit)`
+An actor reads what it owns and asks for the rest: the config knows its price,
+treasury, merkle program and rate bounds; a membership knows its rate limit
+and dates. Nothing is claimed. What one actor tells another is accepted only
+from the actor it must come from — a `Release` from anyone but the member's
+own membership, or an `InitMembership` from anyone but the tree's config, is
+refused — because the protocol lets any transaction message any actor.
+
+Authorization is per account: a signer, or a PDA whose owning program sends
+to it with the PDA's seed. The merkle program writes the tree only when the
+registration program's config actor messages it with the `main` seed. An
+actor that does not exist yet (a new config or membership PDA) is admitted by
+that seed as **evidence** in the transaction, or by the seed on the message
+that reaches it; a declared account that neither exists, signs, nor is
+seeded fails the transaction.
+
+Chain time is the including block's timestamp. A time-dependent message
+carries `now_ms`, the submitter's reading of it, and pins the transaction to
+blocks whose timestamp lies in `[now_ms, now_ms + CLOCK_CLAIM_TOLERANCE_MS)`;
+a claim behind chain time only shortens the member's own window, and one
+ahead is never included.
+
+The leaf index is never sent for a registration. The merkle program assigns
+it on insert (its own `next_index`), so two registrations built from the same
+chain state both land, at consecutive indices. No account records it: clients
+find a member's leaf by scanning the tree for `hash(id_commitment, rate_limit)`
 (`merkle_tree::find_leaf_index`).
 
-Each account is a map of per-program **shards**. Registration state lives in
-the registration program's shard of its PDAs, the tree in the merkle program's
-shard of `tree_main`, balances in the native shard, and the clock in the clock
-program's shard of `CLOCK_50`. A program can write only its own shards.
+Each account holds one state per program. Registration state lives in the
+registration program's state of its PDAs, the tree in the merkle program's
+state of `tree_main`, balances in the native program's. A program can write
+only its own states.
 
 ## Merkle Tree Program
 
@@ -116,11 +148,12 @@ per level, and a register transaction's 10M-gas budget has room for nine.
 
 ### Storage Layout
 
-The merkle program's shard of the **main account** (seeds `["main", tree_id]`)
+The merkle program's state at the **main account** (seeds `["main", tree_id]`)
 holds tree metadata (depth, `next_index`, root, 4 previous roots, 10 cached
 default hashes) followed by every populated node of the tree in sparse format.
-A full tree is under 35 KB, inside the 100 KiB per-shard cap (asserted at
-build time via `TREE_SHARD_MAX_BYTES`).
+A full tree is under 35 KB (asserted at build time via `TREE_SHARD_MAX_BYTES`);
+every merkle session reads and rewrites the whole state, which is what bounds
+its size now that the protocol no longer caps it.
 
 ### Sparse Node Storage
 
@@ -134,17 +167,17 @@ default hashes.
 
 ### Operations
 
-`rln_layouts::MerkleInstruction` (Borsh) is the chained-call payload:
+`rln_layouts::MerkleMessage` (Borsh) is what the tree actor receives:
 
-| Operation  | Accounts | Payload                        |
-|------------|----------|--------------------------------|
-| Initialize | main     |                                |
-| Insert     | main     | `leaf` (index = tree's `next_index`) |
-| Remove     | main     | `index: u64, leaf` (leaf at `index` must equal `leaf`) |
+| Message    | Actor | Payload                        |
+|------------|-------|--------------------------------|
+| Initialize | main  |                                |
+| Insert     | main  | `leaf` (index = tree's `next_index`) |
+| Remove     | main  | `index: u64, leaf` (leaf at `index` must equal `leaf`) |
 
-The merkle tree program is never called directly by clients. The RLN
-registration program calls it via **chained calls** carrying the `main` PDA
-seed, which is what authorizes the tree write.
+The merkle tree program is never messaged directly by clients. The RLN
+registration program's config actor messages it carrying the `main` PDA seed,
+which is what authorizes the tree write.
 
 ## RLN Registration Program
 
@@ -163,56 +196,60 @@ zero-padded to 32 bytes (string labels) or passed through (32-byte args).
 | Account          | Seeds                                       | Contents                                              |
 |------------------|---------------------------------------------|-------------------------------------------------------|
 | Config           | `["config", tree_id]`                       | Merkle program ID, tree ID, price, treasury, rate limit tracking, membership durations |
-| Tree main        | `["main", tree_id]`                         | The whole merkle tree (merkle program's shard)        |
+| Tree main        | `["main", tree_id]`                         | The whole merkle tree (merkle program's state)        |
 | Membership       | `["membership", tree_id, id_commitment]`    | Per-identity (rate_limit, expiry timestamps) |
 
-The treasury is deliberately **not** a PDA. A PDA is spendable only through a
-chained call carrying its seeds, issued by its owning program, and this program
-has no instruction that would issue one — so a PDA treasury would accrue revenue
-nothing could ever move. It is a plain account named in the config instead.
+The treasury is deliberately **not** a PDA. A PDA is spendable only by its
+owning program, and this program has no message that would spend it — so a
+PDA treasury would accrue revenue nothing could ever move. It is a plain
+account named in the config instead. A registration declares the treasury's
+native actor (the price is credited to it in the same transaction), and a
+declared account must exist on chain: `run_setup` moves one unit into the
+treasury so that every later transaction can name it.
 
-### Instructions
+### Messages
 
-Instructions are the Borsh `Instruction` enum in `rln-layouts/src/instruction.rs`,
+Messages are the Borsh `Message` enum in `rln-layouts/src/instruction.rs`,
 shared by the guest (`methods/guest/src/program.rs`, entry point
 `methods/guest/src/bin/rln_registration.rs`) and the host. The doc comment
-there lists which fields are claims and which apply asserts each one.
+there says which actor each entry message is for and which messages are
+internal to the program's own actors.
 
-**Initialize** — Writes the config PDA: merkle program ID, tree ID, price,
-treasury, rate-limit cap and membership durations. `InitializeMerkleTree` then
-chains to the merkle program to initialize the tree; the config apply asserts
-the claimed merkle program id against the stored one before the chained call
-is handed the `main` PDA seed.
+**Initialize** (to the config) — Writes the config PDA: merkle program ID,
+tree ID, price, treasury, rate-limit cap and bounds, membership durations.
+One-shot: a non-empty state is refused. **InitializeMerkleTree** (to the
+config) — the config messages the merkle program it stores to initialize the
+tree, granting it the `main` PDA seed.
 
-**Register** — Atomic payment + registration, in one asset. Chains a native
-transfer of `rate_limit * price_per_unit` from the signing account to the
-treasury, computes `leaf = hash(id_commitment, rate_limit)`, creates a
-membership PDA (apply refuses a non-empty shard, which is what makes an
-`id_commitment` unique), and chains to the merkle program to append the leaf
-at the tree's `next_index` (the tree picks the index; the instruction names
-none). The clock
-timestamp is claimed and guarded by a read-only effect on `CLOCK_50`: the claim
-may trail the clock by up to `CLOCK_CLAIM_TOLERANCE_MS` (one clock step, so a
-register straddling a step still lands) and never lead it. The
-signer is also the transaction's fee payer, so one account and one balance
-cover the whole thing.
+**Register** (to the config) — Atomic payment + registration, in one asset.
+The config checks the rate against its bounds and capacity, computes
+`leaf = hash(id_commitment, rate_limit)`, then sends in order: a native
+transfer of `rate_limit * price_per_unit` from the paying account to the
+treasury; `InitMembership` to the new membership PDA (refused on a non-empty
+state, which is what makes an `id_commitment` unique); `Insert` to the merkle
+program to append the leaf at the tree's `next_index` (the tree picks the
+index; the message names none). The payer signs the transaction and is also
+its fee payer, so one account and one balance cover the whole thing, and
+`now_ms` dates the membership and pins the validity window.
 
-**Slash** — Anyone can remove a spammer by providing their `identity_secret`.
-The program verifies `id_commitment = hash(identity_secret)`, the membership
-apply checks the claimed rate limit, and a chained call removes the leaf at the
-caller's leaf-index hint, which the merkle apply refuses unless that leaf is
-`hash(id_commitment, rate_limit)`. Frees the consumed rate limit.
+**Slash** (to the membership) — Anyone can remove a spammer by providing their
+`identity_secret`. The membership verifies `id_commitment =
+hash(identity_secret)`, clears itself, and sends `Release` to the config,
+which uncounts the rate limit and has the merkle program remove the leaf at
+the caller's leaf-index hint — refused unless that leaf is
+`hash(id_commitment, rate_limit)` with the membership's own rate limit.
 
-**Extend** — Renews an existing membership's active period from the current
-clock (a membership in its grace period can be extended rather than
-re-registered). Anyone may call it, including on someone else's behalf, but it
-costs the same as registering that membership's rate limit — free renewal would
-let a third party pin an abandoned membership's share of the rate-limit budget
-indefinitely.
+**Extend** (to the membership) — Renews an existing membership's active
+period (a membership in its grace period can be extended rather than
+re-registered), then sends `ChargeRenewal` to the config, which moves the
+registration price from the payer to the treasury. Anyone may call it,
+including on someone else's behalf, but it costs the same as registering that
+membership's rate limit — free renewal would let a third party pin an
+abandoned membership's share of the rate-limit budget indefinitely.
 
-**Erase** — Removes an expired membership and chains to the merkle program to
-remove its leaf (index checked by content, as for Slash), returning the
-member's rate limit to the pool.
+**Erase** (to the membership) — Removes an expired membership and, through
+`Release`, has the merkle program remove its leaf (index checked by content,
+as for Slash), returning the member's rate limit to the pool.
 
 There is no faucet and no free-registration path. A faucet is not expressible
 for the native asset — no program can mint it — so balance arrives only at
@@ -221,7 +258,7 @@ genesis, over the L1 bridge, or by transfer. See
 
 ### Rate Limits
 
-Each registration consumes rate limit from a global pool (`current_total_rate_limit` in config). Rate limit per member must be between 100 and 600. Slashing returns the member's rate limit to the pool.
+Each registration consumes rate limit from a global pool (`current_total_rate_limit` in config). The rate limit per member must lie within the registry's own bounds, set at `Initialize` (`min_rate_limit..=max_rate_limit`; `run_setup` defaults to 100..=600, `LEZ_RLN_MIN_RATE_LIMIT` / `LEZ_RLN_MAX_RATE_LIMIT` override). Slashing returns the member's rate limit to the pool.
 
 ## Testnet deployments
 

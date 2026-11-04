@@ -15,12 +15,14 @@ E2E="$REPO/dev/e2e"
 SEQ_LOG="$E2E/sequencer.log"
 PORT=3040
 
-# Seconds, so `extend` becomes legal after one CLOCK_50 tick and `erase` after
-# two or three. The guest refuses a zero active duration.
+# Seconds, so `extend` becomes legal within a few blocks and `erase` a minute
+# later. The guest refuses a zero active duration.
 export LEZ_RLN_ACTIVE_DURATION_SECS="${LEZ_RLN_ACTIVE_DURATION_SECS:-1}"
 export LEZ_RLN_GRACE_PERIOD_DURATION_SECS="${LEZ_RLN_GRACE_PERIOD_DURATION_SECS:-60}"
 export LEZ_RLN_LOCAL_SEQUENCER=1
 export LEE_WALLET_HOME_DIR="$E2E/wallet"
+# A throwaway wallet, unencrypted: the tools never prompt.
+export LEE_WALLET_PASSWORD=""
 export RUST_LOG="${RUST_LOG:-warn}"
 
 if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
@@ -44,16 +46,21 @@ echo "Building host binaries and the lifecycle test..."
 cargo build --manifest-path "$REPO/lez-rln/Cargo.toml" --bin mint_payer
 cargo test --manifest-path "$REPO/lez-rln/Cargo.toml" --test local_sequencer --no-run
 
-PAYER="$("$REPO/lez-rln/target/debug/mint_payer" | tail -1)"
+# mint_payer prints the account id, then its public key: the id is what
+# signs and pays, the key is what genesis credits.
+PAYER_LINES="$("$REPO/lez-rln/target/debug/mint_payer")"
+PAYER="$(printf '%s\n' "$PAYER_LINES" | sed -n 1p)"
+PAYER_PK="$(printf '%s\n' "$PAYER_LINES" | sed -n 2p)"
 export LEZ_RLN_PAYER="$PAYER"
-echo "Payer: $PAYER"
+echo "Payer: $PAYER (public key $PAYER_PK)"
 
 echo "Starting the sequencer (log: $SEQ_LOG)..."
-LEZ_RLN_GENESIS_FUND="$PAYER" "$REPO/dev.sh" > "$SEQ_LOG" 2>&1 &
+LEZ_RLN_GENESIS_FUND="$PAYER_PK" "$REPO/dev.sh" > "$SEQ_LOG" 2>&1 &
 SEQ_PID=$!
 cleanup() {
-  # dev.sh execs cargo run, which spawns the sequencer binary; kill by port.
-  kill "$(lsof -ti tcp:$PORT 2>/dev/null)" "$SEQ_PID" 2>/dev/null || true
+  # dev.sh execs cargo run, which spawns the sequencer binary; kill the
+  # listener, not whoever is connected to the port.
+  kill "$(lsof -ti tcp:$PORT -sTCP:LISTEN 2>/dev/null)" "$SEQ_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 

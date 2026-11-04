@@ -1,6 +1,6 @@
 //! Client-side reads of the incremental Merkle tree.
 //!
-//! The whole tree is one shard: the merkle program's shard of the
+//! The whole tree is one actor state: the merkle program's actor at the
 //! registration program's `tree_main` PDA. Its layout (`rln_layouts`):
 //! `[0..OFFSET_CACHED_NODES)` the `TreeMainLayout` header,
 //! `[OFFSET_CACHED_NODES..OFFSET_TREE_DATA)` the default hash of each level
@@ -8,22 +8,21 @@
 //! `[count u16le][(node_offset(level, index) u16le, hash32)…]`. A node absent
 //! from the map holds its level's default.
 //!
-//! Tree writes happen only through the registration program's chained calls;
+//! Tree writes happen only through the registration program's messages;
 //! nothing here builds a merkle transaction.
 
 use std::time::Duration;
 
-use nssa::{AccountId, ProgramShardSelector};
+use nssa::{AccountId, Actor};
 use rln::prelude::{Fr, RLNMerkleProof};
 pub use rln_layouts::{node_offset, read_sparse_node};
 use tokio::time::sleep;
-use wallet::WalletCore;
 
 use super::{
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY,
     OFFSET_TREE_DATA, ROOT_HISTORY_SIZE, TREE_DEPTH, TREE_LEAVES, derive_main_account,
 };
-use crate::{fr_bytes::bytes_le_to_fr, rln::ProgramIds};
+use crate::{fr_bytes::bytes_le_to_fr, rln::ProgramIds, rln::client::Wallet};
 
 // ============================================================================
 // Parsed Tree State
@@ -152,55 +151,56 @@ pub fn merkle_proof(shard: &[u8], leaf_index: u64) -> MerkleProof {
 // Tree State Reading
 // ============================================================================
 
-/// The tree's shard selector: the merkle program's shard of `tree_main`.
-pub fn tree_shard_selector(programs: &ProgramIds, tree_id: &[u8; 32]) -> ProgramShardSelector {
-    ProgramShardSelector::new(tree_main_account(programs, tree_id), programs.merkle)
+/// The tree's actor: the merkle program at `tree_main`.
+pub fn tree_actor(programs: &ProgramIds, tree_id: &[u8; 32]) -> Actor {
+    Actor::new(tree_main_account(programs, tree_id), programs.merkle)
 }
 
 pub fn tree_main_account(programs: &ProgramIds, tree_id: &[u8; 32]) -> AccountId {
     derive_main_account(&programs.registration, tree_id)
 }
 
-/// Fetch the tree shard's bytes; empty before the tree is initialized.
-pub async fn fetch_tree_shard(
-    wallet_core: &WalletCore,
+/// Fetch the tree state's bytes; empty before the tree is initialized.
+pub async fn fetch_tree_state(
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> Vec<u8> {
-    let account = wallet_core
-        .get_account_view(tree_shard_selector(programs, tree_id))
+    wallet_core
+        .get_account_view(tree_actor(programs, tree_id))
         .await
-        .expect("Failed to fetch the tree main account");
-    account.data.shard(programs.merkle).to_vec()
+        .expect("Failed to fetch the tree main account")
+        .map(|account| account.data.actor_state(programs.merkle).to_vec())
+        .unwrap_or_default()
 }
 
 /// Fetches the current next_index.
 pub async fn fetch_next_index(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> u64 {
-    ParsedTreeMain::from_bytes(&fetch_tree_shard(wallet_core, programs, tree_id).await).next_index
+    ParsedTreeMain::from_bytes(&fetch_tree_state(wallet_core, programs, tree_id).await).next_index
 }
 
 /// Fetches the current root.
 pub async fn fetch_root(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> [u8; 32] {
-    ParsedTreeMain::from_bytes(&fetch_tree_shard(wallet_core, programs, tree_id).await).root
+    ParsedTreeMain::from_bytes(&fetch_tree_state(wallet_core, programs, tree_id).await).root
 }
 
 /// Fetches the current root plus non-zero history entries, newest first:
 /// `[current_root, history[0], history[1], ...]`.
 pub async fn fetch_root_history(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> Vec<[u8; 32]> {
     let parsed =
-        ParsedTreeMain::from_bytes(&fetch_tree_shard(wallet_core, programs, tree_id).await);
+        ParsedTreeMain::from_bytes(&fetch_tree_state(wallet_core, programs, tree_id).await);
     let mut roots = vec![parsed.root];
     roots.extend(
         parsed
@@ -213,23 +213,23 @@ pub async fn fetch_root_history(
 
 /// Fetches the default hash of each level, root level first.
 pub async fn fetch_cached_defaults(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> Vec<[u8; 32]> {
-    cached_defaults(&fetch_tree_shard(wallet_core, programs, tree_id).await)
+    cached_defaults(&fetch_tree_state(wallet_core, programs, tree_id).await)
 }
 
 /// Fetches the hash of node `(level, node_index)`; level 0 is the root.
 pub async fn fetch_node_hash(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     level: u8,
     node_index: u64,
 ) -> [u8; 32] {
     node_hash(
-        &fetch_tree_shard(wallet_core, programs, tree_id).await,
+        &fetch_tree_state(wallet_core, programs, tree_id).await,
         level as usize,
         node_index,
     )
@@ -242,7 +242,7 @@ pub async fn fetch_node_hash(
 /// anywhere: a re-registration refused on chain must not be mistaken for one
 /// that landed.
 pub async fn wait_for_leaf(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     expected_leaf: &[u8; 32],
@@ -251,7 +251,7 @@ pub async fn wait_for_leaf(
     poll_interval: Duration,
 ) -> Option<u64> {
     for _ in 0..max_attempts {
-        let shard = fetch_tree_shard(wallet_core, programs, tree_id).await;
+        let shard = fetch_tree_state(wallet_core, programs, tree_id).await;
         if shard.len() >= OFFSET_TREE_DATA
             && let Some(index) = find_leaf_index(&shard, expected_leaf)
             && newer_than.is_none_or(|old| index > old)
@@ -285,13 +285,13 @@ pub struct MerkleProof {
 /// Fetches a Merkle proof for a leaf at the given index. The leaf, siblings
 /// and root all come from one read of the shard.
 pub async fn get_merkle_proof(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     leaf_index: u64,
 ) -> MerkleProof {
     merkle_proof(
-        &fetch_tree_shard(wallet_core, programs, tree_id).await,
+        &fetch_tree_state(wallet_core, programs, tree_id).await,
         leaf_index,
     )
 }

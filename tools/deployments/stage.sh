@@ -41,6 +41,10 @@ REG=$(field registration_program_id); MRK=$(field merkle_program_id)
 [[ "$MRK" =~ ^[0-9a-f]{64}$ ]] || fail "merkle_program_id must be 64 lowercase hex chars, got '$MRK'"
 
 # Wallet schema — refuse a storage.json without the top-level 'key_chain.accounts'.
+jq -e 'has("ciphertext")' "$WALLET" >/dev/null 2>&1 \
+  && fail "storage.json is encrypted (top-level 'ciphertext'); stage an unencrypted wallet"
+grep -q '"shards"' "$WALLET" \
+  && fail "storage.json was written by a pre-v0.4.0 wallet (private entries carry \"shards\") and no longer parses; mint a fresh wallet"
 jq -e '.key_chain.accounts' "$WALLET" >/dev/null 2>&1 \
   || fail "wallet schema unrecognised (expected top-level 'key_chain.accounts')"
 # wallet<->deployment binding: the wallet must actually hold the payer, since
@@ -53,7 +57,9 @@ mkdir -p "$OUT"
 printf '%s' "$CFG" > "$OUT/config_account.txt"
 printf '%s' "$PAY" > "$OUT/payer_account.txt"
 printf '%s' "$TREASURY" > "$OUT/treasury_account.txt"
-jq '.last_synced_block = 0' "$WALLET" > "$OUT/storage.json.seed"
+# Both sync cursors reset: the v0.4 wallet also records where a fresh storage
+# started syncing from, and a re-staged copy must scan from genesis.
+jq '.last_synced_block = 0 | .synced_from_block = 0' "$WALLET" > "$OUT/storage.json.seed"
 # Triple-shape sequencer field: the v0.3.1 wallet reads `sequencer`, the
 # v0.3.0 wallet `sequencers` (multi-client), the module's wallet flat
 # `sequencer_addr`. No struct denies unknown fields, so one file serves all.
