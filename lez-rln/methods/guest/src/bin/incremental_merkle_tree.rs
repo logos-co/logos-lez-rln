@@ -1,7 +1,6 @@
 //! Incremental Merkle tree guest program.
 //!
-//! One account (`tree_main`), one shard, instructions from
-//! [`rln_layouts::MerkleInstruction`]:
+//! One actor (`tree_main`), messages from [`rln_layouts::MerkleMessage`]:
 //!
 //! - `Initialize`: empty tree with cached default hashes (one-shot)
 //! - `Insert`: add a leaf at `next_index` (sequential)
@@ -10,12 +9,4 @@
 //!
 //! The logic lives in [`logos_lez_rln_guest::merkle_tree`].
 
-use logos_lez_rln_guest::merkle_tree::{self, Effect};
-use rln_layouts::MerkleInstruction;
-
-fn main() {
-    nssa_core::program::run_program::<MerkleInstruction, Effect, [u8], Vec<u8>>(
-        merkle_tree::plan,
-        merkle_tree::apply,
-    )
-}
+lee_core::actor_entrypoint!(logos_lez_rln_guest::merkle_tree::handle_message);

@@ -1,4 +1,4 @@
-//! Zero-copy binary layouts for instruction data.
+//! Zero-copy binary layouts for message and state data.
 //!
 //! This module re-exports layouts from the shared `rln-layouts` crate.
 //! All types are no_std compatible for use in zkVM guest programs.

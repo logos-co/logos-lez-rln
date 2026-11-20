@@ -17,20 +17,12 @@
 //! Codes are `u8` because that is what `risc0_zkvm::guest::env::exit` takes;
 //! the host sees them widened to `u32`.
 
-/// `CLOCK_50`'s timestamp is not the claimed `now_ms`: the clock ticked.
-pub const EXIT_STALE_CLOCK: u8 = 10;
-/// `CLOCK_50` still carries its genesis zero.
-pub const EXIT_CLOCK_NOT_INITIALIZED: u8 = 11;
-/// The claimed price, treasury or membership durations are not the config's.
-pub const EXIT_STALE_CONFIG: u8 = 12;
 /// `rate_limit` more units no longer fit under `max_total_rate_limit`.
 pub const EXIT_RATE_LIMIT_FULL: u8 = 13;
 /// A membership for this `id_commitment` already exists.
 pub const EXIT_MEMBERSHIP_EXISTS: u8 = 14;
 /// No membership for this `id_commitment` (slashed or erased meanwhile).
 pub const EXIT_MEMBERSHIP_MISSING: u8 = 15;
-/// The claimed `rate_limit` is not the membership's.
-pub const EXIT_STALE_RATE_LIMIT: u8 = 16;
 /// Extend outside the membership's grace period.
 pub const EXIT_NOT_IN_GRACE_PERIOD: u8 = 17;
 /// Erase of a membership that has not expired.
@@ -45,13 +37,9 @@ pub const EXIT_TREE_FULL: u8 = 20;
 pub fn exit_code_name(code: u32) -> Option<&'static str> {
     let code = u8::try_from(code).ok()?;
     Some(match code {
-        EXIT_STALE_CLOCK => "StaleClock",
-        EXIT_CLOCK_NOT_INITIALIZED => "ClockNotInitialized",
-        EXIT_STALE_CONFIG => "StaleConfig",
         EXIT_RATE_LIMIT_FULL => "RateLimitFull",
         EXIT_MEMBERSHIP_EXISTS => "MembershipExists",
         EXIT_MEMBERSHIP_MISSING => "MembershipMissing",
-        EXIT_STALE_RATE_LIMIT => "StaleRateLimit",
         EXIT_NOT_IN_GRACE_PERIOD => "NotInGracePeriod",
         EXIT_NOT_EXPIRED => "NotExpired",
         EXIT_LEAF_MISMATCH => "LeafMismatch",
@@ -67,13 +55,9 @@ mod tests {
     #[test]
     fn every_code_is_named_and_distinct() {
         let codes = [
-            EXIT_STALE_CLOCK,
-            EXIT_CLOCK_NOT_INITIALIZED,
-            EXIT_STALE_CONFIG,
             EXIT_RATE_LIMIT_FULL,
             EXIT_MEMBERSHIP_EXISTS,
             EXIT_MEMBERSHIP_MISSING,
-            EXIT_STALE_RATE_LIMIT,
             EXIT_NOT_IN_GRACE_PERIOD,
             EXIT_NOT_EXPIRED,
             EXIT_LEAF_MISMATCH,
@@ -91,6 +75,6 @@ mod tests {
             }
         }
         assert_eq!(exit_code_name(0), None);
-        assert_eq!(exit_code_name(256 + u32::from(EXIT_STALE_CLOCK)), None);
+        assert_eq!(exit_code_name(256 + u32::from(EXIT_RATE_LIMIT_FULL)), None);
     }
 }

@@ -7,8 +7,6 @@
 //! guest's `#[account_type]` definitions (kept in sync via a size_of assert
 //! against `rln_layouts::{ConfigState, MembershipState}`).
 
-pub use rln_layouts::{MAX_RATE_LIMIT, MIN_RATE_LIMIT};
-
 pub use crate::merkle_tree::{TREE_DEPTH, TREE_LEAVES};
 
 // Layout source of truth: `rln_layouts::ConfigState`.
@@ -27,6 +25,8 @@ pub const CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT: usize = 120;
 pub const CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT: usize = 128;
 pub const CONFIG_OFFSET_ACTIVE_DURATION: usize = 136;
 pub const CONFIG_OFFSET_GRACE_PERIOD_DURATION: usize = 140;
+pub const CONFIG_OFFSET_MIN_RATE_LIMIT: usize = 144;
+pub const CONFIG_OFFSET_MAX_RATE_LIMIT: usize = 152;
 pub const CONFIG_SIZE: usize = rln_layouts::state::CONFIG_STATE_SIZE;
 
 // Layout source of truth: `rln_layouts::MembershipState`. Same caveat as the
@@ -38,7 +38,6 @@ pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = 48;
 pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize = 52;
 pub const MEMBERSHIP_SIZE: usize = rln_layouts::state::MEMBERSHIP_STATE_SIZE;
 
-pub use rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES;
 
 #[cfg(test)]
 mod tests {
@@ -62,6 +61,8 @@ mod tests {
             current_total_rate_limit: 0x0E0F,
             active_duration_for_new_memberships_sec: 0x1011,
             grace_period_duration_for_new_memberships_sec: 0x1213,
+            min_rate_limit: 0x1415,
+            max_rate_limit: 0x1617,
         };
         let b = borsh::to_vec(&config).expect("ConfigState serializes");
 
@@ -127,6 +128,23 @@ mod tests {
             ),
             0x1213,
         );
+        assert_eq!(
+            u64::from_le_bytes(
+                b[CONFIG_OFFSET_MIN_RATE_LIMIT..CONFIG_OFFSET_MIN_RATE_LIMIT + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x1415,
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                b[CONFIG_OFFSET_MAX_RATE_LIMIT..CONFIG_OFFSET_MAX_RATE_LIMIT + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x1617,
+        );
+        assert_eq!(CONFIG_OFFSET_MAX_RATE_LIMIT + 8, CONFIG_SIZE);
     }
 
     #[test]

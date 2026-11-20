@@ -9,7 +9,7 @@ A **deployment** = one on-chain RLN instance, fully captured by two files:
 ```
 deployments/<name>/
   deployment.json   # tree_id + sequencer + both program ids + derived config + payer/treasury
-  storage.json      # the wallet (holds the payer's keypair)
+  storage.json      # the wallet (holds the payer's keypair); unencrypted, written by a v0.4 wallet
 ```
 
 `deployment.json`:
@@ -49,9 +49,11 @@ signs the `Register` transaction — which is also that transaction's fee payer.
 One account, one balance, no holding to derive and nothing to claim first.
 
 That account is `payer_account`, and it must already hold native balance:
-**no program can mint native**, so it arrives at genesis (`mint_payer` prints an
-id, `dev.sh`'s `LEZ_RLN_GENESIS_FUND` funds it), over the L1 bridge, or by a
-transfer from something already funded. Budget roughly
+**no program can mint native**, so it arrives at genesis (`mint_payer` prints the
+payer's id and public key; `dev.sh`'s `LEZ_RLN_GENESIS_FUND` takes the public
+key), over the L1 bridge, or by a transfer from something already funded
+(`fund_account`; an account that has never existed on chain is credited by
+`--to-public-key`). Budget roughly
 `rate_limit x price_per_unit + 6.5e8` per registration — the fee reserve dwarfs
 the price, so an account sized only for the price cannot transact at all.
 
@@ -87,13 +89,18 @@ credited, so no wallet need hold it.
 
 # fresh tree + fresh wallet. --payer is required: it pays the deploy fees and
 # becomes the deployment's payer_account. Deploy and init transactions declare
-# the wallet's gas_limit (10,000,000 in the generated wallet_config.json), so the
-# payer's balance must cover gas_limit x base fee per transaction.
+# their simulated gas plus 25%, so the payer's balance must cover that x base fee.
 bash tools/deployments/provision.sh --name my-run --payer <account-id>
 
 # reuse programs already on the chain: export their header ids first.
 LEZ_RLN_REGISTRATION_PROGRAM_ID=<64hex> LEZ_RLN_MERKLE_PROGRAM_ID=<64hex> \
   bash tools/deployments/provision.sh --name my-run --payer <account-id>
+
+# a registry with its own rate-limit range (config state, per registry; the
+# defaults are 100..=600). deployment.json records it as min_rate_limit /
+# max_rate_limit.
+LEZ_RLN_MIN_RATE_LIMIT=20 LEZ_RLN_MAX_RATE_LIMIT=100 \
+  bash tools/deployments/provision.sh --name mix --payer <account-id>
 
 # reuse another sim's wallet (shared accounts), specific tree, write into a consumer repo:
 bash tools/deployments/provision.sh --name shared --payer <account-id> --tree <64hex> \

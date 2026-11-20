@@ -22,69 +22,31 @@ pub mod sparse;
 pub use sparse::{node_offset, read_sparse_node};
 
 pub mod spel_pda;
-pub use spel_pda::{combine_seeds, label_seed, u32_seed};
+pub use spel_pda::{combine_seeds, config_seed, label_seed, main_seed, membership_seed, u32_seed};
 
 pub mod state;
 pub use state::{ConfigState, MembershipState};
 
 pub mod instruction;
-pub use instruction::{Instruction, MerkleInstruction};
+pub use instruction::{Message, MerkleMessage};
 
 pub mod exit;
 
-// ============================================================================
-// Rate Limit Constraints
-// ============================================================================
-
-/// Minimum allowed rate limit for registration.
-pub const MIN_RATE_LIMIT: u64 = 100;
-
-/// Maximum allowed rate limit for registration.
-pub const MAX_RATE_LIMIT: u64 = 600;
-
-// ============================================================================
-// Clock Account
-// ============================================================================
-
-/// Raw bytes of the CLOCK_50 system account ID, updated by the sequencer every
-/// 50 blocks. This crate mirrors the constant instead of depending on
-/// `clock_core` to stay `no_std`-friendly for the host side.
-pub const CLOCK_50_ACCOUNT_ID_BYTES: [u8; 32] = *b"/LEZ/ClockProgramAccount/0000050";
-
-/// Prefix `lee_core::AccountId::from_builtin_program_name` hashes ahead of a
-/// builtin program's name. Mirrored here so the host tooling and the guests
-/// can name a builtin's shard without depending on `lee_core`.
-pub const BUILTIN_PROGRAM_NAME_PREFIX: [u8; 32] = *b"/LEE-BuiltinProgram/v1/AccountId";
-
-/// Account id of a builtin program addressed by name:
-/// `SHA-256(BUILTIN_PROGRAM_NAME_PREFIX || name)`.
-pub fn builtin_program_account_id(name: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(BUILTIN_PROGRAM_NAME_PREFIX);
-    h.update(name);
-    h.finalize().into()
-}
-
-/// The clock program's account id — the shard on `CLOCK_50` that holds
-/// `ClockAccountData`.
-pub fn clock_program_account_id() -> [u8; 32] {
-    builtin_program_account_id(b"clock")
-}
-
-/// How far BEHIND `CLOCK_50`'s timestamp a claimed `now_ms` may be.
+/// How far BEHIND the including block's timestamp a claimed `now_ms` may be.
 ///
-/// `CLOCK_50` moves in steps, once per 50 blocks: 750 s at testnet's 15 s
-/// blocks. A client reads it, builds a transaction, and the step may land
-/// before inclusion; an equality claim then reverts a perfectly honest
-/// register. 900 s covers one step plus 20% for block-time jitter; a claim
-/// two steps stale is refused (`EXIT_STALE_CLOCK`) and the client re-reads.
+/// A time-dependent message carries `now_ms`, the submitter's reading of
+/// chain time, and the transaction is valid only for a block whose timestamp
+/// lies in `[now_ms, now_ms + CLOCK_CLAIM_TOLERANCE_MS)`. A client reads the
+/// chain head, builds a transaction, and inclusion lands some blocks later;
+/// 900 s is slack for that, not a precision claim. A transaction included
+/// outside its window is reverted and charged its full declared gas, so a
+/// client should not sit on a built transaction.
 ///
-/// The claim, not the chain's clock, is what a membership is dated by, so
-/// the tolerance is how much EARLIER than the chain's time a membership may
-/// be dated: the member's active window starts (and ends) up to 15 minutes
+/// The claim, not the block, is what a membership is dated by, so the
+/// tolerance is how much EARLIER than the chain's time a membership may be
+/// dated: the member's active window starts (and ends) up to 15 minutes
 /// early, which only shortens their own membership. A claim AHEAD of the
-/// clock — the one direction that would lengthen it — is refused outright.
+/// block — the one direction that would lengthen it — is outside the window.
 /// Erase judges expiry at the claim, so an older claim only makes erasing
 /// harder; extend may land up to the tolerance after a grace period closed.
 pub const CLOCK_CLAIM_TOLERANCE_MS: u64 = 900_000;
@@ -177,11 +139,14 @@ pub const SPARSE_ENTRY_LEN: usize = 34;
 /// Largest the merkle shard can grow: the header plus every node populated.
 pub const TREE_SHARD_MAX_BYTES: usize = OFFSET_TREE_DATA + 2 + TREE_NODES * SPARSE_ENTRY_LEN;
 
-/// `lee_core`'s per-shard data cap (`DATA_MAX_LENGTH`).
+/// The bound this crate holds the tree's actor state to. LEZ no longer caps
+/// an actor's state size; what bounds it now is the gas of the session that
+/// reads and rewrites it (every merkle message does) and the storage gas of
+/// the transaction carrying it.
 pub const SHARD_MAX_BYTES: usize = 100 * 1024;
 
-// The whole tree lives in one shard, so a full tree must fit under the
-// protocol's cap or the last inserts fail with a data-length error.
+// The whole tree lives in one actor state, so a full tree must fit under the
+// bound above or the last inserts fail.
 const _: () = assert!(
     TREE_SHARD_MAX_BYTES <= SHARD_MAX_BYTES,
     "a full tree must fit in one shard"

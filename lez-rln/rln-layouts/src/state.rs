@@ -7,10 +7,11 @@
 //! program's shard of its PDA.
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Borsh layout for the registration program's config account.
 ///
-/// Fixed size: 144 bytes. Field declaration order matches the byte layout
+/// Fixed size: 160 bytes. Field declaration order matches the byte layout
 /// (Borsh encodes fixed-width primitives + fixed arrays in declaration order
 /// with no length prefixes).
 ///
@@ -22,7 +23,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 /// a wrong price — rather than failing. Removing or reordering a field means
 /// regenerating those tables in the same change, and readers should assert the
 /// account's exact size before trusting any offset.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ConfigState {
     pub merkle_program_id: [u8; 32],
     pub tree_id: [u8; 32],
@@ -35,12 +36,22 @@ pub struct ConfigState {
     pub current_total_rate_limit: u64,
     pub active_duration_for_new_memberships_sec: u32,
     pub grace_period_duration_for_new_memberships_sec: u32,
+    /// Inclusive bounds a registration's `rate_limit` must satisfy. Per
+    /// registry, set at `Initialize`: two registries on one program
+    /// deployment may accept different ranges.
+    pub min_rate_limit: u64,
+    pub max_rate_limit: u64,
 }
 
 impl ConfigState {
     /// Whether `rate_limit` more units fit under `max_total_rate_limit`.
     pub fn can_register(&self, rate_limit: u64) -> bool {
         self.current_total_rate_limit.saturating_add(rate_limit) <= self.max_total_rate_limit
+    }
+
+    /// Whether `rate_limit` lies within this registry's inclusive bounds.
+    pub fn accepts_rate(&self, rate_limit: u64) -> bool {
+        (self.min_rate_limit..=self.max_rate_limit).contains(&rate_limit)
     }
 }
 
@@ -49,7 +60,7 @@ impl ConfigState {
 /// Fixed size: 56 bytes. It records no leaf index: the tree assigns the index
 /// at insert time, and a reader finds a member's leaf by scanning the tree
 /// for `H(id_commitment, rate_limit)`.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MembershipState {
     pub rate_limit: u64,
     pub id_commitment: [u8; 32],
@@ -65,7 +76,7 @@ pub struct MembershipState {
 /// is exactly this long before trusting a byte offset into it. `ConfigState`
 /// carries no version discriminator, so the length is the only thing that
 /// distinguishes this layout from an older one.
-pub const CONFIG_STATE_SIZE: usize = 144;
+pub const CONFIG_STATE_SIZE: usize = 160;
 
 /// Serialized size of [`MembershipState`], in bytes.
 pub const MEMBERSHIP_STATE_SIZE: usize = 56;
@@ -90,6 +101,8 @@ mod tests {
             current_total_rate_limit: 7,
             active_duration_for_new_memberships_sec: 8,
             grace_period_duration_for_new_memberships_sec: 9,
+            min_rate_limit: 10,
+            max_rate_limit: 11,
         };
         let bytes = borsh::to_vec(&config).expect("ConfigState serializes");
         assert_eq!(bytes.len(), CONFIG_STATE_SIZE);
@@ -109,6 +122,8 @@ mod tests {
             current_total_rate_limit: 0x090A_0B0C,
             active_duration_for_new_memberships_sec: 0x0D0E,
             grace_period_duration_for_new_memberships_sec: 0x0F10,
+            min_rate_limit: 0x1112_1314,
+            max_rate_limit: 0x1516_1718,
         };
         let b = borsh::to_vec(&config).expect("ConfigState serializes");
         assert_eq!(&b[0..32], &[0xAA; 32], "merkle_program_id @0");
@@ -144,6 +159,37 @@ mod tests {
             0x0F10,
             "grace_period_duration_sec @140",
         );
+        assert_eq!(
+            u64::from_le_bytes(b[144..152].try_into().unwrap()),
+            0x1112_1314,
+            "min_rate_limit @144",
+        );
+        assert_eq!(
+            u64::from_le_bytes(b[152..160].try_into().unwrap()),
+            0x1516_1718,
+            "max_rate_limit @152",
+        );
+    }
+
+    #[test]
+    fn accepts_rate_is_inclusive() {
+        let config = ConfigState {
+            merkle_program_id: [0; 32],
+            tree_id: [0; 32],
+            price_per_unit: 0,
+            treasury_account_id: [0; 32],
+            total_registrations: 0,
+            max_total_rate_limit: 0,
+            current_total_rate_limit: 0,
+            active_duration_for_new_memberships_sec: 0,
+            grace_period_duration_for_new_memberships_sec: 0,
+            min_rate_limit: 20,
+            max_rate_limit: 100,
+        };
+        assert!(!config.accepts_rate(19));
+        assert!(config.accepts_rate(20));
+        assert!(config.accepts_rate(100));
+        assert!(!config.accepts_rate(101));
     }
 
     #[test]

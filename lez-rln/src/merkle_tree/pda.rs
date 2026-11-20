@@ -2,26 +2,17 @@
 //!
 //! `tree_main` is a PDA of the **registration program's** id; the tree itself
 //! lives in the merkle program's shard of it, which the registration program
-//! grants through `pda_seeds` on its chained calls.
+//! grants through `pda_seeds` on the messages it sends the tree.
 //!
 //! Seed scheme: `compute_pda(SHA-256(label("main") || tree_id))`.
 
 use nssa::AccountId;
 use nssa_core::program::PdaSeed;
-
-use crate::spel_seeds::{combine_seeds, label_seed};
+pub use rln_layouts::main_seed;
 
 /// Tree main account: `seeds = [literal("main"), arg("tree_id")]`.
 pub fn derive_main_account(registration_program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
-    AccountId::for_public_pda(
-        registration_program_id,
-        &PdaSeed::new(main_pda_seed(tree_id)),
-    )
-}
-
-/// Raw seed bytes for the tree main PDA.
-pub fn main_pda_seed(tree_id: &[u8; 32]) -> [u8; 32] {
-    combine_seeds(&[&label_seed("main"), tree_id])
+    AccountId::for_public_pda(registration_program_id, &PdaSeed::new(main_seed(tree_id)))
 }
 
 #[cfg(test)]
@@ -42,7 +33,7 @@ mod tests {
         let p = AccountId::new([1u8; 32]);
         let t = [2u8; 32];
         assert_eq!(
-            AccountId::for_public_pda(&p, &PdaSeed::new(main_pda_seed(&t))),
+            AccountId::for_public_pda(&p, &PdaSeed::new(main_seed(&t))),
             derive_main_account(&p, &t),
         );
     }

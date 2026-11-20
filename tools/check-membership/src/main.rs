@@ -6,11 +6,12 @@
 //! decodable shard IS the registration's on-chain effect — this sequencer has
 //! no transaction-by-hash lookup, so the account read is the confirmation.
 //!
-//! Accounts are sharded: `getAccount` returns
-//! `{"nonce":N,"data":{"shards":{"<base58 program account id>":[bytes..]}}}`.
-//! The membership bytes sit under the registration program's id; the clock
-//! bytes sit on `CLOCK_50` under the clock program's id. An absent shard key
-//! means "not registered".
+//! An account holds one state per program: `getAccount` returns
+//! `{"nonce":N,"data":{"actor_states":{"<base58 program account id>":[bytes..]}}}`,
+//! or `null` for an account that was never written. The membership bytes sit
+//! under the registration program's id. A `null` account or an absent key
+//! means "not registered". Chain time, which the lifecycle state is judged
+//! against, is the head block's timestamp (`getLastBlockId`, `getBlock`).
 //!
 //! Wallet-free and daemon-free: it reuses the shared `rln-layouts` seed rules
 //! and account layouts (the same the module uses), replicating only the
@@ -22,8 +23,8 @@
 
 use borsh::BorshDeserialize;
 use rln_layouts::{
-    clock_program_account_id, combine_seeds, is_expired, is_in_grace_period, label_seed,
-    secs_to_millis, state::MEMBERSHIP_STATE_SIZE, MembershipState, CLOCK_50_ACCOUNT_ID_BYTES,
+    combine_seeds, is_expired, is_in_grace_period, label_seed,
+    secs_to_millis, state::MEMBERSHIP_STATE_SIZE, MembershipState,
 };
 use sha2::{Digest, Sha256};
 
@@ -104,7 +105,7 @@ fn main() {
     let state = MembershipState::try_from_slice(&data[..MEMBERSHIP_STATE_SIZE])
         .unwrap_or_else(|_| fail("failed to decode membership account"));
 
-    let now_ms = clock_timestamp_ms(&cfg.sequencer);
+    let now_ms = chain_time_ms(&cfg.sequencer);
     let status = lifecycle(&state, now_ms);
     report_registered(json, &state, status, now_ms);
 }
@@ -138,8 +139,8 @@ fn derive_membership_account(
 }
 
 /// `getAccount` over the sequencer's JSON-RPC via curl, reduced to the bytes of
-/// one program's shard. Returns `None` when the account or that shard is absent
-/// (the sequencer's "not registered" answer).
+/// one program's actor state. Returns `None` when the account or that state is
+/// absent (the sequencer's "not registered" answer).
 fn get_account_shard(sequencer: &str, id: &[u8; 32], shard: &[u8; 32]) -> Option<Vec<u8>> {
     let result = rpc(
         sequencer,
@@ -150,15 +151,19 @@ fn get_account_shard(sequencer: &str, id: &[u8; 32], shard: &[u8; 32]) -> Option
 }
 
 /// Bytes stored under `shard` (keyed by the program account id's base58) in a
-/// `getAccount` result; `None` when the key is absent or its bytes are empty.
+/// `getAccount` result; `None` when the account is `null`, the key is absent
+/// or its bytes are empty.
 fn shard_bytes(account: &serde_json::Value, shard: &[u8; 32]) -> Option<Vec<u8>> {
-    let shards = account["data"]["shards"]
+    if account.is_null() {
+        return None;
+    }
+    let shards = account["data"]["actor_states"]
         .as_object()
-        .unwrap_or_else(|| fail("getAccount reply has no data.shards map"));
+        .unwrap_or_else(|| fail("getAccount reply has no data.actor_states map"));
     let bytes = shards
         .get(&bs58::encode(shard).into_string())?
         .as_array()
-        .unwrap_or_else(|| fail("getAccount shard is not a byte array"));
+        .unwrap_or_else(|| fail("getAccount actor state is not a byte array"));
     let data: Vec<u8> = bytes
         .iter()
         .map(|v| {
@@ -174,17 +179,39 @@ fn shard_bytes(account: &serde_json::Value, shard: &[u8; 32]) -> Option<Vec<u8>>
     }
 }
 
-fn clock_timestamp_ms(sequencer: &str) -> u64 {
-    let data = get_account_shard(
-        sequencer,
-        &CLOCK_50_ACCOUNT_ID_BYTES,
-        &clock_program_account_id(),
-    )
-    .unwrap_or_else(|| fail("clock account is absent — cannot compute lifecycle state"));
-    if data.len() < 16 {
-        fail("clock account too short");
+/// Chain time in milliseconds: the head block's timestamp, which is what the
+/// registration program judges extend and erase against.
+fn chain_time_ms(sequencer: &str) -> u64 {
+    let head = rpc(sequencer, "getLastBlockId", serde_json::json!([]));
+    let head = head
+        .as_u64()
+        .unwrap_or_else(|| fail("getLastBlockId reply is not a block number"));
+    let block = rpc(sequencer, "getBlock", serde_json::json!([head]));
+    block_timestamp_ms(&block)
+}
+
+/// Where the timestamp sits in a borsh `Block`: the header is `block_id u64`,
+/// `prev_block_hash [u8; 32]`, `hash [u8; 32]`, then `timestamp u64`.
+const BLOCK_TIMESTAMP_OFFSET: usize = 8 + 32 + 32;
+
+/// The timestamp of a `getBlock` result: the block is a base64 string of its
+/// borsh encoding, and the header is a fixed-width prefix of that.
+fn block_timestamp_ms(block: &serde_json::Value) -> u64 {
+    use base64::Engine as _;
+    let encoded = block
+        .as_str()
+        .unwrap_or_else(|| fail("getBlock reply is not a base64 block"));
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap_or_else(|e| fail(&format!("getBlock reply is not base64: {e}")));
+    let field = bytes
+        .get(BLOCK_TIMESTAMP_OFFSET..BLOCK_TIMESTAMP_OFFSET + 8)
+        .unwrap_or_else(|| fail("getBlock reply is shorter than a block header"));
+    let timestamp = u64::from_le_bytes(field.try_into().expect("8-byte field"));
+    if timestamp == 0 {
+        fail("the head block carries no timestamp");
     }
-    u64::from_le_bytes(data[8..16].try_into().expect("8-byte clock timestamp"))
+    timestamp
 }
 
 fn rpc(sequencer: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -350,7 +377,7 @@ mod tests {
         let other = [9u8; 32];
         let doc = serde_json::json!({
             "nonce": 0,
-            "data": { "shards": {
+            "data": { "actor_states": {
                 bs58::encode(reg).into_string(): [1, 2, 3],
                 bs58::encode(other).into_string(): [4],
             }},
@@ -361,19 +388,24 @@ mod tests {
 
     #[test]
     fn empty_shard_map_is_not_registered() {
-        let doc = serde_json::json!({ "nonce": 0, "data": { "shards": {} } });
+        let doc = serde_json::json!({ "nonce": 0, "data": { "actor_states": {} } });
         assert_eq!(shard_bytes(&doc, &[7u8; 32]), None);
     }
 
     #[test]
-    fn clock_shard_key_is_the_builtin_clock_program_id() {
-        let clock = clock_program_account_id();
-        let doc = serde_json::json!({
-            "nonce": 0,
-            "data": { "shards": { bs58::encode(clock).into_string(): [0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0] } },
-        });
-        let data = shard_bytes(&doc, &clock).unwrap();
-        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), 5);
+    fn chain_time_is_the_blocks_header_timestamp() {
+        use base64::Engine as _;
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&7u64.to_le_bytes());
+        raw.extend_from_slice(&[0x11; 32]);
+        raw.extend_from_slice(&[0x22; 32]);
+        raw.extend_from_slice(&1_700_000_000_123u64.to_le_bytes());
+        // An empty body and a bedrock status, as a real block carries.
+        raw.extend_from_slice(&[0; 9]);
+        let block = serde_json::Value::String(
+            base64::engine::general_purpose::STANDARD.encode(&raw),
+        );
+        assert_eq!(block_timestamp_ms(&block), 1_700_000_000_123);
     }
 
     #[test]
