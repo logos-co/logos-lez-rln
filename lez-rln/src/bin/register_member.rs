@@ -35,7 +35,7 @@ async fn main() {
         } = create_identity(&mut wallet_core, USER_MESSAGE_LIMIT).await;
 
         let leaf_index = register_identity(
-            &wallet_core,
+            &mut wallet_core,
             &programs,
             &tree_id,
             &id_commitment_bytes,

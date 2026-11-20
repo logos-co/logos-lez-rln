@@ -1,4 +1,4 @@
-# lez-rln — non-obvious facts (LEZ v0.3.0)
+# lez-rln — non-obvious facts (LEZ v0.4.0-rc3)
 
 ## Guest binaries: two stale-binary traps
 - Building or testing the host crate NEVER rebuilds the guest — lez-rln has
@@ -33,78 +33,130 @@
   across the tags (v0.3.0 -> v0.3.1: no source change, both bins differ), so
   every dependency bump is a redeploy.
 
-## Execution model: plan, then apply, one shard per session
-- A program's `plan` sees `AccountMeta { account_id, is_authorized,
-  program_account_id }` and the instruction — never account data. Everything
-  a handler used to read from an account (clock timestamp, config price /
-  callee id, membership rate limit) travels in the instruction as a CLAIM
-  (`rln_layouts::Instruction`, "Claimed values"), and the `apply` session that
-  does see the shard asserts the claim. A wrong claim panics the apply and the
-  whole transaction fails.
-- The leaf index is deliberately NOT a claim: the merkle `Insert` takes it
-  from the tree's own `next_index`. An index claim goes stale the moment any
-  other registration lands first, so two registrations built from the same
-  state would contend and one would revert; without it they compose
-  (`same_block_registrations_compose`). Slash/erase send the index as a hint
-  and the merkle `Remove` checks the leaf there equals
-  `H(id_commitment, rate_limit)` — the membership apply has already pinned
-  `rate_limit`, so a wrong hint removes nothing
-  (`remove_refuses_a_wrong_index_or_leaf`). Clients locate a leaf by scanning
-  the tree (`merkle_tree::find_leaf_index`); no account stores it.
-- In a public transaction, effects are applied immediately after their plan,
-  BEFORE the plan's chained calls run (`execution_state.rs::run`). In a
-  privacy-preserving transaction public effects are deferred to settlement
-  (`DeferPublicEffects`), so the merkle call may run first — but the
-  transaction is still all-or-nothing, so a false `merkle_program_id` claim
-  still fails it and the callee's writes are discarded with it. That is what
-  keeps the "chained-call targets come from config" rule alive: the config
-  apply asserts the claimed `merkle_program_id` against the stored one, and
-  nothing lands unless it matches.
-- Each shard belongs to one program: registration data lives in the
-  registration program's shard of its PDA, the tree in the merkle program's
-  shard of `tree_main`, balances in the native shard (`[0;32]`), clock data in
-  `clock_account_id()`'s shard of `CLOCK_50`. The host selects shards with
-  `ProgramShardSelector`; a program can write only its own shard.
-- Every plan and every apply is a separate zkVM session, and the transaction's
-  gas (`≤ MAX_GAS_EXEC = 10M`, one gas per cycle) is the SUM. A register runs
-  six sessions; measured (RISC0_DEV_MODE, `cycle_harness`): registration plan
-  933,829 (one Poseidon for the leaf), config/clock/membership applies
-  ~12K/7K/8K, merkle plan ~10K, merkle Insert apply 8,173,396 (nine Poseidons)
-  — whole tx 9,143,916, 91.4% of the ceiling. Session overhead is noise;
-  Poseidon is the budget, which is why the tree is depth 9 and a tenth level
-  (+~0.9M) does not fit. Re-measure with `cycle_harness` and
+## Execution model: actors and messages, one session per delivery
+- A program runs as actors: one `(account, program)` pair per delivered
+  message (`lee_core::actor_entrypoint!`, `ReceiveInput { receiver, from,
+  is_authorized, pre_state, message }` → `Response { post_state,
+  sync_messages, async_messages, validity, .. }`). A handler sees its own
+  state and nothing else; there is no account list and no claim. What it
+  needs from another actor it asks for by message (`rln_layouts::Message`:
+  entry variants to the config or a membership, internal `InitMembership` /
+  `Release` / `ChargeRenewal` between the program's own actors).
+- ANY transaction can root-message ANY actor with any message. Internal
+  variants therefore check `from`: `InitMembership` only from the tree's
+  config actor, `Release` / `ChargeRenewal` only from the member's own
+  membership actor (`require_from`). Every message names its tree (and
+  member), and the receiver re-derives its own PDA from that and refuses a
+  mismatch (`require_receiver`), so a message for another tree lands nowhere.
+- Authorization is per account: a signer, inherited down a sync subtree, or
+  a PDA grant (`for_public_pda(sender.program, seed) == receiver`). The
+  merkle program asserts `is_authorized`, which only the registration
+  program's config actor can produce (it sends with the `main` seed, and only
+  to the merkle program its config stores — "callee targets come from config"
+  survives as: the config is the only emitter). A payment is a sync
+  `native_token::Message::Transfer` to the PAYER's native actor; the native
+  program debits it only if the payer signed, whoever sent the message, and
+  credits the treasury by an async `Credit` that lands in the same
+  transaction only because the treasury's native actor is declared.
+- Every actor a transaction touches must be declared (`public_actors`) and
+  admitted: exist on chain, sign, be reached by a sync message carrying its
+  PDA seed, or carry `admission_evidence` (`Pda { program, seed }` /
+  `Key(pk)`). The host declares config, membership, tree_main, payer-native
+  and treasury-native, with `Pda` evidence for a membership PDA that does not
+  exist yet (and for the config at `Initialize`). The treasury is a plain
+  keyed account nobody but the deployer holds the key of, so `run_setup`
+  seeds it with one unit: from then on it exists and needs no evidence. An
+  undeclared actor, an unadmitted one, or an async credit to an undeclared
+  recipient fails the transaction (charged).
+- Sync messages run in emission order, each subtree to completion
+  (`execution_state.rs` LIFO stack); the fee transfer runs after the root
+  subtree. Register emits payment, `InitMembership`, merkle `Insert` in that
+  order so a duplicate (exit 14) costs the config session and nothing more.
+- Time: no clock account. A time-dependent root message carries `now_ms`
+  (the host reads the head block's timestamp) and `time_window` pins the
+  transaction to blocks in `[now_ms, now_ms + CLOCK_CLAIM_TOLERANCE_MS)`
+  (`Response::try_timestamp_window`); a violated window is `OutOfValidityWindow`
+  after execution and is charged the full budget, so do not sit on a built
+  transaction. Memberships are dated by the claim, which the host reads
+  as the head block's timestamp less 5 s (`CHAIN_TIME_SLACK_MS`): block
+  timestamps are the sequencer's wall clock and may step back a little
+  before inclusion. Nothing in this repo reads a clock account any more.
+- The leaf index is never sent for a registration: the merkle `Insert` takes
+  it from the tree's own `next_index`, so two registrations built from the
+  same state compose (`same_block_registrations_compose`). Slash/erase send
+  the index as a hint and the merkle `Remove` checks the leaf there equals
+  `H(id_commitment, rate_limit)` with the membership's OWN rate limit
+  (`remove_refuses_a_wrong_index`). Clients locate a leaf by scanning the
+  tree (`merkle_tree::find_leaf_index`); no account stores it.
+- Each actor's state belongs to one program: registration data in the
+  registration program's state of its PDAs, the tree in the merkle program's
+  state of `tree_main`, balances in the native program's (`[0;32]`). A
+  program can write only its own actor's state. `ActorState` is unbounded —
+  nothing caps the tree's 35 KB but the session that reads and rewrites it.
+- Every delivery is a separate zkVM session, and the transaction's gas
+  (`≤ MAX_GAS_EXEC = 10M`, one gas per cycle) is the SUM. Measured on
+  v0.4.0-rc3 (RISC0_DEV_MODE, `cycle_harness`): register = config 923,178
+  (one Poseidon for the leaf) + membership 13,789 + merkle Insert 8,175,134
+  (nine Poseidons) = 9,112,101, 91.1% of the ceiling; merkle Initialize
+  24,289. Poseidon is the budget, which is why the tree is depth 9 and a
+  tenth level (+~0.9M) does not fit. Re-measure with `cycle_harness` and
   `register_transaction_fits_the_gas_ceiling` after any guest change.
-- Slash is the tightest transaction, not register: its plan hashes the
-  identity secret AND the member's leaf (for the merkle `Remove` content
-  check) before the nine-Poseidon root update — 9,736,047 cycles, 97.4% of the
-  ceiling (erase 9,135,211; `slash_and_erase_transactions_fit_the_gas_ceiling`).
-  Any guest change that adds a hash to slash does not fit.
+- Slash is the tightest transaction: the membership session hashes the
+  identity secret AND the member's leaf before the nine-Poseidon root update
+  — membership 1,525,134 + config 20,547 + merkle Remove 8,172,210 =
+  9,717,891, 97.2% of the ceiling (erase 9,107,121;
+  `slash_and_erase_transactions_fit_the_gas_ceiling`). Any guest change that
+  adds a hash to slash does not fit.
 - A guest PANIC is charged the transaction's full declared gas; a guest that
   halts with `env::exit(code != 0)` is charged the cycles it ran
-  (`ProgramExitedWithCode`, `validated_state_diff::from_public_transaction_metered`).
-  Checks an honest client fails only because the chain moved after it read it
-  use `ensure!(cond, EXIT_*, ..)` (`methods/guest/src/fail.rs`, codes in
-  `rln_layouts::exit`); malformed-input checks stay `assert!`s and keep the
-  full charge. Measured: a register with a stale clock claim costs 953,532
-  cycles (exit) vs 10,000,000 (panic) — almost all of it the plan's leaf
-  Poseidon, which runs before any apply, so effect order barely matters
-  (ClockIs first: 941,292). `a_stale_clock_claim_is_charged_measured_cycles`.
+  (`ProgramExitedWithCode`, `validated_state_diff::from_public_transaction_metered`,
+  `ExecutionCharge.revert` set). Checks an honest client fails only because
+  the chain moved after it read it use `ensure!(cond, EXIT_*, ..)`
+  (`methods/guest/src/fail.rs`, codes in `rln_layouts::exit`: 13/14/15/17/18
+  in the registration program, 19/20 in the merkle one); malformed-input
+  checks stay `assert!`s and keep the full charge. Measured: a duplicate
+  registration costs 935,645 cycles (the config session's Poseidon, then exit
+  14 in the membership session) vs 10,000,000 for a malformed one
+  (`a_stale_view_is_charged_measured_cycles`).
 
-## Init guards are apply-side empty checks
-Public transactions need no signature for PDA rows, so any instruction that
+## Init guards are empty-state checks
+Public transactions need no signature for PDA rows, so any message that
 writes a PDA is submittable by anyone. What makes an initializer one-shot is
-the apply asserting `pre_data.is_empty()` before writing (`InitConfig`,
+the handler asserting `pre_state.is_empty()` before writing (`Initialize`,
 `InitMembership`, merkle `Initialize`). Authorization (`is_authorized`) only
-says the caller may write the account, never that the account is unclaimed.
+says the sender may write the account, never that the account is unclaimed.
+Do not use `lee_core::program::write_once` for these: it tolerates an
+identical rewrite.
 
 History: `initialize_merkle_tree` once shipped with authorization only, so
 replaying it against a live tree reset `next_index` and the root history —
 invalidating every member's proof while their membership PDAs survived.
 Regressions: `test_initialize_merkle_tree_cannot_reset_a_live_tree` (state)
 and `merkle_tree::tests::test_initialize_rejects_live_tree` (guest unit).
-Duplicate registration is refused SOLELY by the membership init guard — the
-register plan has no duplicate check and the merkle insert doesn't dedupe.
-Regression: `test_register_same_commitment_twice_fails`.
+Duplicate registration is refused SOLELY by the membership init guard
+(`InitMembership`, exit 14) — the register handler has no duplicate check and
+the merkle insert doesn't dedupe. Regression:
+`test_register_same_commitment_twice_fails`.
+
+## Wallets: passwords and the v0.4 storage
+- `WalletCore` is `WalletCore<SequencerClient>` here (`rln::client::Wallet`)
+  and opens a storage with a password. The tools read `LEE_WALLET_PASSWORD`
+  (`rln::client::wallet_password`) and never prompt; unset or empty means an
+  unencrypted file, which every throwaway wallet is. An encrypted storage
+  (top-level `ciphertext`) without the variable fails at open; `stage.sh`
+  and `provision.sh` refuse it outright because they read the file with jq.
+- A storage written by a pre-v0.4.0 wallet no longer parses: its private
+  entries carry `shards` and `Regular(Identifier)`, both gone. `mint_payer`
+  made one such entry in every wallet it created, so every old wallet —
+  `dev/storage.json`, every consumer profile — must be re-minted.
+  `provision.sh`/`stage.sh` refuse a storage containing `"shards"`.
+- Genesis funds a PUBLIC KEY, not an account id: `mint_payer` prints the id
+  on line 1 and the key on line 2 (`--public-key` prints only the key), and
+  `dev.sh` takes the key in `LEZ_RLN_GENESIS_FUND` (it refuses a base58 id).
+  `run_setup` prints the payer's and the treasury's public keys, and
+  `provision.sh` records them in `deployment.json`
+  (`payer_public_key`, `treasury_public_key`): a credit to an account that
+  has never existed needs the key (`fund_account --to-public-key`).
 
 ## Program ids are deployment state
 `CreateHeader` requires an `is_authorized` target, so a program lives at a
@@ -127,11 +179,11 @@ registering — which also gives `active_duration` economic force.
 ## The tree holds 512 leaves, and that is a lifetime count
 `next_index` only advances and an erased leaf's index is never reused, so
 `TREE_LEAVES` bounds total registrations over the tree's life, not concurrent
-members. The whole tree is one sparse node map in one shard (u16 BFS offsets,
-`TREE_SHARD_MAX_BYTES` under the 100 KiB shard cap, asserted at build time);
-an index past the last leaf would alias live nodes and return a wrong root
-WITHOUT failing, so `insert_leaf` asserts the bound (the register plan cannot:
-it never sees `next_index`). `MerkleInstruction::Set` exists with no callers
+members. The whole tree is one sparse node map in one actor state (u16 BFS
+offsets, `TREE_SHARD_MAX_BYTES` under this crate's own 100 KiB bound, asserted
+at build time); an index past the last leaf would alias live nodes and return
+a wrong root WITHOUT failing, so `insert_leaf` asserts the bound (the
+registration program cannot: it never sees `next_index`). `MerkleMessage::Set` exists with no callers
 and is the only index-reuse path if capacity ever has to grow.
 
 ## Running state_tests.rs
@@ -159,7 +211,23 @@ runs `lez-rln/tests/local_sequencer.rs` — the whole lifecycle including slash,
 extend and erase — against a `dev.sh` sequencer at the pinned tag, with
 second-long membership durations (`LEZ_RLN_ACTIVE_DURATION_SECS` /
 `LEZ_RLN_GRACE_PERIOD_DURATION_SECS`). ~5 minutes, most of it waiting for
-`CLOCK_50` ticks. The test is a no-op without `LEZ_RLN_LOCAL_SEQUENCER`.
+chain time to pass. The test is a no-op without `LEZ_RLN_LOCAL_SEQUENCER`.
+
+## dev.sh on v0.4.0-rc3
+- The sequencer CLI is `setup <home> --config <file> --funding-public-key
+  <hex> --create-channel`, then `start <home> --rpc-listen-address
+  127.0.0.1:<port> --metrics-listen-address <addr>`; the config template is
+  `lez/sequencer/service/networks/local.json` (schema is
+  `deny_unknown_fields`; genesis is `{channel_params, actions:[..]}`). `setup`
+  refuses a home that already holds `sequencer_config.json`, so dev.sh wipes
+  the whole home every start. Do NOT pass `--config` to `start`: without
+  `--create-channel` it drops the genesis, and the payer's balance with it.
+- `LEZ_RLN_PORT`, `LEZ_RLN_SEQUENCER_HOME`, `LEZ_RLN_METRICS_ADDR`,
+  `LEZ_RLN_SEQUENCER_SRC` (keyed by `LEZ_REF`) and `LEZ_RLN_SEQUENCER_ARGS`
+  keep their meanings; the release workspace's `rln up lez` drives dev.sh
+  through them. Metrics default to port+6060, so a `--metrics-address` in
+  `LEZ_RLN_SEQUENCER_ARGS` duplicates the flag and the sequencer never
+  starts.
 
 ## Testnet operations
 - register_member's "Timeout waiting for leaf N" panic is often a FALSE
@@ -174,15 +242,38 @@ second-long membership durations (`LEZ_RLN_ACTIVE_DURATION_SECS` /
   panic point. Recoverable in principle (the wallet account persists;
   `seeded_keygen` is deterministic) but no tool does that recovery. Check
   on-chain state first.
-- A failed transaction is left out of the block entirely: submission returns
-  a hash, `getTransaction` → null, and the concrete error appears only in
-  the sequencer's own log. Run a local sequencer (`dev.sh`) and read its log
-  before believing any client-side diagnosis.
+- A transaction whose action fails on chain is still INCLUDED and charged:
+  `getTransaction` finds it, and the block's `body.reverted` lists its
+  position (`rln::client::tx_outcome` → `Reverted`; `await_outcome` is the
+  one wait every tool uses, and a failed block read is `Pending`, never a
+  verdict). The concrete reason
+  appears only in the sequencer's own log. Run a local sequencer (`dev.sh`)
+  and read its log before believing any client-side diagnosis. Only a
+  malformed submission (`InvalidInput`, an unknown root program) is rejected
+  for free.
 - Deploying new program instances to https://testnet.lez.logos.co/ is
   normal, routine development practice (`tools/deployments/provision.sh`).
-- The wallet declares `WalletConfig.gas_limit` (default 2M) on every
-  deploy/init transaction it sends, so the payer's reserve must cover
-  `gas_limit × base_fee_exec` per transaction; `send_metered_tx` declares its
-  own `LEZ_RLN_GAS_LIMIT` (default the 10M cap).
+- The wallet's own send path (program deploys, inits, native transfers) simulates
+  each transaction within `WalletConfig.gas_limit` (default 2M) and declares
+  the measured cycles + `public_gas_margin_percent` (25), capped at that
+  limit, so the payer's reserve covers the measured gas, not the limit. A
+  send whose simulation reverts is refused before submission
+  (`ExecutionFailureKind::SimulatedRevert`) and costs nothing.
+  `send_metered_tx` (register/extend/erase/slash) sends through the same
+  wallet but sets `FeeParams { gas_limit, max_fee }` for the one send and
+  clears them after: `LEZ_RLN_GAS_LIMIT` (default the 10M cap) and the fee
+  reserve. With both set the wallet does not simulate, so a transaction that
+  will revert is still sent and charged. Fee params are wallet state, not a
+  send argument: anything left set applies to every later send.
+- A registration needs no admission evidence for the new membership: the
+  config's sync `InitMembership` carries the PDA seed
+  (`register_admits_the_membership_without_evidence`). The host still mentions
+  it as a PDA.
+- Loader actor states are a tagged `LoaderEntry` (`Header` / `Segment`;
+  `ProgramHeader::from_loader_actor_state`), so a header written by an rc1
+  loader does not decode. `WriteSegment` needs an authorized target like the
+  header writes do: segment accounts must be keyed accounts the deployer
+  signs for. The loader charges one cycle per byte of loader state it reads,
+  so `CreateHeader` over a full chain costs up to ~1.9M gas.
 - Wallet sync is only required for tree insertion (registration); claims and
   reads work against an unsynced wallet.

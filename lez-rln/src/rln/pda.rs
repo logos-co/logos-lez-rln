@@ -1,21 +1,22 @@
 //! Program-Derived Account derivations for the RLN registration program.
 //!
-//! Every PDA address is `compute_pda(SHA-256(seed_1 || seed_2 || ...))` where
-//! each seed is a 32-byte value: string labels are zero-padded, `u32` args are
-//! little-endian in the first 4 bytes, 32-byte args pass through.
+//! Every PDA address is `for_public_pda(program, seed)` with the seed from
+//! `rln_layouts` (`config_seed`, `membership_seed`, `main_seed`): the one
+//! definition the guest checks its receivers against and the host uses both
+//! to address actors and to admit the ones that do not exist yet.
 
 use nssa::AccountId;
+use nssa_core::program::PdaSeed;
+pub use rln_layouts::{config_seed, membership_seed};
 
 // `tree_main` is a PDA of the registration program's id, but its canonical
 // derivation lives next to the merkle program's other client code.
 pub use crate::merkle_tree::derive_main_account as derive_tree_main_account;
-// `spel_seeds` is a leaf module so both this and `merkle_tree::pda` can depend
-// on it without a cross-module cycle.
 pub use crate::spel_seeds::{combine_seeds, derive_pda, label_seed};
 
 /// Config account: `seeds = [literal("config"), arg("tree_id")]`.
 pub fn derive_config_account(program_id: &AccountId, tree_id: &[u8; 32]) -> AccountId {
-    derive_pda(program_id, &[&label_seed("config"), tree_id])
+    AccountId::for_public_pda(program_id, &PdaSeed::new(config_seed(tree_id)))
 }
 
 /// Membership account: `seeds = [literal("membership"), arg("tree_id"), arg("id_commitment")]`.
@@ -24,21 +25,14 @@ pub fn derive_membership_account(
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
 ) -> AccountId {
-    derive_pda(
+    AccountId::for_public_pda(
         program_id,
-        &[&label_seed("membership"), tree_id, id_commitment],
+        &PdaSeed::new(membership_seed(tree_id, id_commitment)),
     )
-}
-
-/// Raw seed bytes for the membership PDA (used as `pda_seeds` in chained calls).
-pub fn membership_pda_seed(tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> [u8; 32] {
-    combine_seeds(&[&label_seed("membership"), tree_id, id_commitment])
 }
 
 #[cfg(test)]
 mod tests {
-    use nssa_core::program::PdaSeed;
-
     use super::*;
 
     fn mock_program_id() -> AccountId {
@@ -114,7 +108,7 @@ mod tests {
         let p = mock_program_id();
         let t = tree_id_a();
         let id = [4u8; 32];
-        let seed = membership_pda_seed(&t, &id);
+        let seed = membership_seed(&t, &id);
         let from_seed = AccountId::for_public_pda(&p, &PdaSeed::new(seed));
         assert_eq!(from_seed, derive_membership_account(&p, &t, &id));
     }

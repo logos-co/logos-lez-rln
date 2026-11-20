@@ -69,7 +69,7 @@ async fn main() {
 
     let tree_id = tree_id_from_env();
     let programs = program_ids_or_exit(&tree_id);
-    let wallet_core = init_wallet().await;
+    let mut wallet_core = init_wallet().await;
     let config_account_id = derive_config_account(&programs.registration, &tree_id);
 
     for (i, (id_commitment, rate_limit)) in entries.iter().enumerate() {
@@ -78,7 +78,7 @@ async fn main() {
         let leaf_bytes = compute_rate_commitment(id_commitment, *rate_limit);
 
         let leaf_index = register_identity(
-            &wallet_core,
+            &mut wallet_core,
             &programs,
             &tree_id,
             id_commitment,

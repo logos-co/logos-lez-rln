@@ -23,6 +23,23 @@ pub fn u32_seed(v: u32) -> [u8; 32] {
     out
 }
 
+/// Seed of a tree's config PDA: `["config", tree_id]`.
+pub fn config_seed(tree_id: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("config"), tree_id])
+}
+
+/// Seed of a tree's main PDA, the account the merkle program keeps the tree
+/// at: `["main", tree_id]`. The registration program grants it to the merkle
+/// program on every message it sends the tree.
+pub fn main_seed(tree_id: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("main"), tree_id])
+}
+
+/// Seed of a member's PDA: `["membership", tree_id, id_commitment]`.
+pub fn membership_seed(tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("membership"), tree_id, id_commitment])
+}
+
 /// SPEL `compute_pda` seed-combine: `SHA-256(s1 || s2 || ...)`. Single-seed mode
 /// returns the seed verbatim (matches SPEL's optimization).
 pub fn combine_seeds(seeds: &[&[u8; 32]]) -> [u8; 32] {
@@ -35,4 +52,33 @@ pub fn combine_seeds(seeds: &[&[u8; 32]]) -> [u8; 32] {
         h.update(s);
     }
     h.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host derives the same PDAs the guest checks its receivers
+    /// against; these seeds must not drift.
+    #[test]
+    fn seeds_combine_label_and_args() {
+        let tree_id = [0x11; 32];
+        assert_eq!(
+            config_seed(&tree_id),
+            combine_seeds(&[&label_seed("config"), &tree_id])
+        );
+        assert_eq!(
+            main_seed(&tree_id),
+            combine_seeds(&[&label_seed("main"), &tree_id])
+        );
+        assert_eq!(
+            membership_seed(&tree_id, &[1; 32]),
+            combine_seeds(&[&label_seed("membership"), &tree_id, &[1; 32]])
+        );
+        assert_ne!(config_seed(&tree_id), main_seed(&tree_id));
+        assert_ne!(
+            membership_seed(&tree_id, &[1; 32]),
+            membership_seed(&tree_id, &[2; 32])
+        );
+    }
 }

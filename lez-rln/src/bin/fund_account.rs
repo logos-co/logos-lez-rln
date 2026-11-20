@@ -7,29 +7,43 @@
 //!
 //! It lives here rather than in the harness because the harness would otherwise
 //! have to rebuild a `lee::public_transaction::Message`, its nonces and the
-//! v0.2.5 `FeeDeclaration`, and sign it — a wire format that changes with the
-//! chain. Funding stays the caller's decision; only the signing is kept in
-//! Rust, beside `mint_payer` and `run_setup`, which the same caller runs.
+//! `FeeDeclaration`, and sign it — a wire format that changes with the chain.
+//! Funding stays the caller's decision; only the signing is kept in Rust,
+//! beside `mint_payer` and `run_setup`, which the same caller runs.
 //!
 //! ```bash
 //! LEE_WALLET_HOME_DIR=<dir> LEZ_RLN_PAYER=<from> \
 //!   cargo run --release --bin fund_account -- --to <account-id> --amount <u128>
+//! LEE_WALLET_HOME_DIR=<dir> LEZ_RLN_PAYER=<from> \
+//!   cargo run --release --bin fund_account -- --to-public-key <64 hex> --amount <u128>
 //! ```
+//!
+//! A credit lands only on an account the chain admits: one that exists, or
+//! one whose public key the transaction presents. `--to` serves an account
+//! that already exists on chain (or whose key this wallet holds); an account
+//! that has never been written needs `--to-public-key`.
 //!
 //! The amount is atomic units. Budget `rate_limit x price_per_unit` plus the
 //! fee reserve (~6.5e8) for each registration the funded account will make —
 //! the reserve dominates, so an amount sized only for the price leaves an
 //! account that cannot transact.
 
-use logos_lez_rln::rln::client::{init_wallet, parse_account_id, resolve_payer};
-use wallet::{AccountIdentity, program_facades::native_token_transfer::NativeTokenTransfer};
+use logos_lez_rln::rln::client::{
+    TxOutcome, await_outcome, init_wallet, parse_account_id, resolve_payer, wait_account_attempts,
+};
+use nssa::AccountId;
+use wallet::{
+    AccountIdentity,
+    program_facades::{CreditDelivery, native_token_transfer::NativeTokenTransfer},
+};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fund_account --to <account-id> --amount <atomic units>\n\
+        "usage: fund_account (--to <account-id> | --to-public-key <64 hex>) --amount <atomic units>\n\
          \n\
          LEE_WALLET_HOME_DIR names the wallet holding the payer; LEZ_RLN_PAYER names\n\
-         the payer itself, and its key must be in that wallet."
+         the payer itself, and its key must be in that wallet. --to needs an account\n\
+         that exists on chain; --to-public-key funds one that never did."
     );
     std::process::exit(2);
 }
@@ -37,11 +51,13 @@ fn usage() -> ! {
 #[tokio::main]
 async fn main() {
     let mut to: Option<String> = None;
+    let mut to_public_key: Option<String> = None;
     let mut amount: Option<u128> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--to" => to = args.next(),
+            "--to-public-key" => to_public_key = args.next(),
             "--amount" => {
                 amount = args.next().and_then(|a| a.trim().parse().ok());
                 if amount.is_none() {
@@ -56,25 +72,58 @@ async fn main() {
             }
         }
     }
-    let (Some(to), Some(amount)) = (to, amount) else {
-        usage()
+    let Some(amount) = amount else { usage() };
+    let recipient = match (to, to_public_key) {
+        (Some(to), None) => {
+            let to = parse_account_id(&to).unwrap_or_else(|e| {
+                eprintln!("--to is {e}");
+                std::process::exit(2);
+            });
+            AccountIdentity::Public(to)
+        }
+        (None, Some(key)) => {
+            let key: nssa::PublicKey = key.trim().parse().unwrap_or_else(|e| {
+                eprintln!("--to-public-key is not a public key: {e:?}");
+                std::process::exit(2);
+            });
+            AccountIdentity::PublicForeign(key)
+        }
+        _ => usage(),
     };
-    let to = parse_account_id(&to).unwrap_or_else(|e| {
-        eprintln!("--to is {e}");
-        std::process::exit(2);
-    });
+    let to: AccountId = recipient.account_id();
 
     // Resolved before the wallet opens, so a missing LEZ_RLN_PAYER fails on
     // the configuration rather than after a sync.
     let payer = resolve_payer();
     let wallet_core = init_wallet().await;
 
+    if matches!(recipient, AccountIdentity::Public(_))
+        && wallet_core.get_account_public_signing_key(to).is_none()
+    {
+        let exists = wallet_core
+            .get_account_public(to)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("cannot read {to}: {e:?}");
+                std::process::exit(1);
+            })
+            .is_some();
+        if !exists {
+            eprintln!(
+                "{to} has never existed on chain and this wallet does not hold its key: a \
+                 credit to it cannot be admitted. Pass --to-public-key <its public key> instead."
+            );
+            std::process::exit(2);
+        }
+    }
+
     println!("funding {to} with {amount} native from {payer}");
-    NativeTokenTransfer(&wallet_core)
-        .send_public_transfer(
+    let (hash, _) = NativeTokenTransfer(&wallet_core)
+        .transfer(
             AccountIdentity::Public(payer),
-            AccountIdentity::Public(to),
+            recipient,
             amount,
+            CreditDelivery::Automatic,
         )
         .await
         .unwrap_or_else(|e| {
@@ -84,5 +133,20 @@ async fn main() {
             eprintln!("transfer failed: {e:?}");
             std::process::exit(1);
         });
-    println!("submitted");
+    println!("submitted {hash}");
+    // Nothing to read back: the block alone decides.
+    match await_outcome(&wallet_core, hash, async || None::<()>).await {
+        Err(TxOutcome::Included(block)) => println!("included in block {block}"),
+        Err(TxOutcome::Reverted(block)) => {
+            eprintln!("transfer reverted in block {block}: fee charged, nothing moved");
+            std::process::exit(1);
+        }
+        Ok(()) | Err(TxOutcome::Pending) => {
+            eprintln!(
+                "the transfer is not in a block after {} s; check the chain before re-sending",
+                wait_account_attempts() / 2
+            );
+            std::process::exit(1);
+        }
+    }
 }

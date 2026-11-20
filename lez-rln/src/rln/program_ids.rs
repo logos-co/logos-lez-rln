@@ -103,6 +103,14 @@ fn env_id(var: &str) -> Result<Option<AccountId>, String> {
     }
 }
 
+/// The ids the environment names, without any tree's record.
+pub fn env_program_ids() -> Result<KnownProgramIds, String> {
+    Ok(KnownProgramIds {
+        registration: env_id(REGISTRATION_PROGRAM_ID_ENV)?,
+        merkle: env_id(MERKLE_PROGRAM_ID_ENV)?,
+    })
+}
+
 /// Every id known for `tree_id`: environment first, then the record.
 pub fn known_program_ids(tree_id: &[u8; 32]) -> Result<KnownProgramIds, String> {
     let path = record_path(tree_id);
@@ -110,9 +118,10 @@ pub fn known_program_ids(tree_id: &[u8; 32]) -> Result<KnownProgramIds, String> 
         Ok(json) => Some(decode_record(&json).map_err(|e| format!("{}: {e}", path.display()))?),
         Err(_) => None,
     };
+    let env = env_program_ids()?;
     Ok(KnownProgramIds {
-        registration: env_id(REGISTRATION_PROGRAM_ID_ENV)?.or(record.map(|ids| ids.registration)),
-        merkle: env_id(MERKLE_PROGRAM_ID_ENV)?.or(record.map(|ids| ids.merkle)),
+        registration: env.registration.or(record.map(|ids| ids.registration)),
+        merkle: env.merkle.or(record.map(|ids| ids.merkle)),
     })
 }
 

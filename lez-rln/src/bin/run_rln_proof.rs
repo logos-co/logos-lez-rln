@@ -46,7 +46,7 @@ async fn main() {
     // Step 2: Register via the registration program
     println!("\nStep 2: Registering...");
     let leaf_index = register_identity(
-        &wallet_core,
+        &mut wallet_core,
         &programs,
         &tree_id,
         &id_commitment_bytes,

@@ -35,13 +35,13 @@ macro_rules! ensure {
 #[cfg(test)]
 mod tests {
     #[test]
-    #[should_panic(expected = "exit 10: clock moved to 5")]
+    #[should_panic(expected = "exit 13: pool holds 5")]
     fn ensure_fails_with_code_and_message() {
-        ensure!(1 + 1 == 3, 10, "clock moved to {}", 5);
+        ensure!(1 + 1 == 3, 13, "pool holds {}", 5);
     }
 
     #[test]
     fn ensure_passes_when_true() {
-        ensure!(true, 10, "unreachable");
+        ensure!(true, 13, "unreachable");
     }
 }

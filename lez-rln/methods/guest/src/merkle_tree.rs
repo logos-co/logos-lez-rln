@@ -14,29 +14,27 @@
 //! `(0, 0)`, leaves sit at level `TREE_DEPTH`. A node absent from the map holds
 //! its level's cached default. A full tree is `TREE_SHARD_MAX_BYTES`.
 //!
-//! # Plan and apply
+//! # The actor
 //!
-//! [`plan`] sees only account metadata; it checks the one declared account and
-//! emits one [`Effect`] on the tree's shard. [`apply`] sees the shard bytes and
-//! does all the tree math. Every public function below the two entry points is
-//! a pure function over shard bytes so the host test suite can drive it
-//! without a zkVM.
+//! The tree is one actor: the main PDA under this program. Each delivered
+//! [`MerkleMessage`] is one zkVM session that sees the actor's state (the
+//! bytes above) and writes it back whole. Every public function below the
+//! entry point is a pure function over state bytes so the host test suite can
+//! drive it without a zkVM.
 //!
 //! # Authorization
 //!
-//! Every instruction requires `is_authorized` on the tree account. The tree
-//! account is a PDA of the registration program, and a PDA is authorized only
-//! when its owning program chains into this one with the PDA's seeds
-//! (`with_pda_seeds`) — so only the registration program can drive the tree.
-//! Authorization says the caller may write the account, never that it is
-//! unclaimed: `Initialize` is one-shot because its apply refuses a non-empty
-//! shard.
+//! Every message requires `is_authorized`. The tree account is a PDA of the
+//! registration program, and a PDA is authorized only when its owning
+//! program sends to it with the PDA's seed (`with_pda_seeds`) — so only the
+//! registration program can drive the tree. Authorization says the sender may
+//! write the account, never that it is unclaimed: `Initialize` is one-shot
+//! because it refuses a non-empty state.
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use nssa_core::program::{Plan, PlanInput};
+use lee_core::program::{ReceiveInput, Response};
 use rln_layouts::exit::{EXIT_LEAF_MISMATCH, EXIT_TREE_FULL};
 pub use rln_layouts::{
-    MerkleInstruction, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
+    MerkleMessage, OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT,
     OFFSET_ROOT_HISTORY, OFFSET_TREE_DATA, ROOT_HISTORY_SIZE, SPARSE_ENTRY_LEN, TREE_DEPTH,
     TREE_LEAVES, node_offset, read_sparse_node,
 };
@@ -46,62 +44,22 @@ use crate::{
     hash::{ZERO, compute_default_hashes, hash_pair, validate_field_element},
 };
 
-/// What the plan asks the apply session to do to the tree's shard. Mirrors
-/// [`MerkleInstruction`] one to one; it is a separate type because it is the
-/// program's own plan-to-apply contract, not the wire format callers use.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-pub enum Effect {
-    Initialize,
-    Insert { leaf: [u8; 32] },
-    Remove { index: u64, leaf: [u8; 32] },
-    Set { index: u64, leaf: [u8; 32] },
-}
-
-impl From<MerkleInstruction> for Effect {
-    fn from(ix: MerkleInstruction) -> Self {
-        match ix {
-            MerkleInstruction::Initialize => Self::Initialize,
-            MerkleInstruction::Insert { leaf } => Self::Insert { leaf },
-            MerkleInstruction::Remove { index, leaf } => Self::Remove { index, leaf },
-            MerkleInstruction::Set { index, leaf } => Self::Set { index, leaf },
-        }
-    }
-}
-
 // ============================================================================
-// Entry points
+// Entry point
 // ============================================================================
 
-/// Plan phase: exactly one account, the tree's main PDA, authorized and
-/// selected on this program's own shard.
-pub fn plan(input: &PlanInput, ix: MerkleInstruction) -> Plan {
-    let [tree_main] = input.accounts.as_slice() else {
-        panic!(
-            "merkle program takes exactly one account (tree_main), got {}",
-            input.accounts.len()
-        );
-    };
+/// One delivered message: the tree's new state. Every message rewrites it.
+pub fn handle_message(input: &ReceiveInput, msg: MerkleMessage) -> Response {
     assert!(
-        tree_main.is_authorized,
+        input.is_authorized,
         "tree account must be authorized by its owning program's pda_seeds"
     );
-    assert_eq!(
-        tree_main.program_account_id, input.self_account_id,
-        "tree account must be selected on the merkle program's own shard"
-    );
-
-    let mut plan = Plan::new(input);
-    plan.effect(tree_main, &Effect::from(ix));
-    plan
-}
-
-/// Apply phase: the new shard bytes. Every effect rewrites the shard.
-pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
-    Some(match effect {
-        Effect::Initialize => initialize_tree(pre_data),
-        Effect::Insert { leaf } => insert_leaf(pre_data, &leaf),
-        Effect::Remove { index, leaf } => remove_leaf(pre_data, index, &leaf),
-        Effect::Set { index, leaf } => set_leaf(pre_data, index, &leaf),
+    let pre_data: &[u8] = &input.pre_state;
+    Response::set_state(match msg {
+        MerkleMessage::Initialize => initialize_tree(pre_data),
+        MerkleMessage::Insert { leaf } => insert_leaf(pre_data, &leaf),
+        MerkleMessage::Remove { index, leaf } => remove_leaf(pre_data, index, &leaf),
+        MerkleMessage::Set { index, leaf } => set_leaf(pre_data, index, &leaf),
     })
 }
 
@@ -385,7 +343,7 @@ pub fn read_root(data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use nssa_core::{account::AccountId, program::AccountMeta};
+    use lee_core::account::{AccountId, Actor, ActorState};
     use rln_layouts::{SHARD_MAX_BYTES, TREE_SHARD_MAX_BYTES};
 
     use super::*;
@@ -407,88 +365,72 @@ mod tests {
     }
 
     // ========================================================================
-    // Plan
+    // Handler
     // ========================================================================
 
     fn merkle_program_id() -> AccountId {
         AccountId::new([7; 32])
     }
 
-    fn plan_input(accounts: Vec<AccountMeta>) -> PlanInput {
-        PlanInput {
-            self_account_id: merkle_program_id(),
-            caller_account_id: None,
-            accounts,
-            instruction_data: Vec::new(),
+    fn receive(is_authorized: bool, pre: &[u8], msg: &MerkleMessage) -> ReceiveInput {
+        ReceiveInput {
+            receiver: Actor::new(AccountId::new([1; 32]), merkle_program_id()),
+            from: Some(Actor::new(AccountId::new([2; 32]), AccountId::new([9; 32]))),
+            is_authorized,
+            pre_state: ActorState::from(pre.to_vec()),
+            message: borsh::to_vec(msg).unwrap(),
         }
     }
 
-    fn tree_main(is_authorized: bool) -> AccountMeta {
-        AccountMeta::new(AccountId::new([1; 32]), is_authorized, merkle_program_id())
+    /// The handler's new state for `msg` on `pre`.
+    fn handle(is_authorized: bool, pre: &[u8], msg: MerkleMessage) -> Vec<u8> {
+        let response = handle_message(&receive(is_authorized, pre, &msg), msg);
+        assert!(response.sync_messages.is_empty() && response.async_messages.is_empty());
+        response
+            .post_state
+            .expect("every message rewrites the tree")
+            .into_inner()
     }
 
     #[test]
-    fn test_plan_emits_one_effect_on_tree_shard() {
-        let input = plan_input(vec![tree_main(true)]);
-        let ix = MerkleInstruction::Insert { leaf: [5; 32] };
-        let plan = plan(&input, ix);
-        let effects = &plan.output().effects;
-        assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].selector.account_id, AccountId::new([1; 32]));
-        assert_eq!(effects[0].selector.program_account_id, merkle_program_id());
-        let effect: Effect = borsh::from_slice(&effects[0].data).unwrap();
-        assert_eq!(effect, Effect::Insert { leaf: [5; 32] });
+    fn test_handler_dispatches_every_message() {
+        let data = handle(true, &[], MerkleMessage::Initialize);
+        let data = handle(true, &data, MerkleMessage::Insert { leaf: [1; 32] });
+        assert_eq!(read_next_index(&data), 1);
+        let data = handle(
+            true,
+            &data,
+            MerkleMessage::Remove {
+                index: 0,
+                leaf: [1; 32],
+            },
+        );
+        assert_eq!(read_root(&data), compute_default_hashes(TREE_DEPTH)[0]);
+        let data = handle(
+            true,
+            &data,
+            MerkleMessage::Set {
+                index: 0,
+                leaf: [2; 32],
+            },
+        );
+        assert_eq!(read_next_index(&data), 1);
+        assert_ne!(read_root(&data), compute_default_hashes(TREE_DEPTH)[0]);
     }
 
     #[test]
     #[should_panic(expected = "tree account must be authorized")]
-    fn test_plan_rejects_unauthorized_tree() {
-        let _ = plan(
-            &plan_input(vec![tree_main(false)]),
-            MerkleInstruction::Initialize,
-        );
+    fn test_handler_rejects_unauthorized_tree() {
+        let _ = handle(false, &[], MerkleMessage::Initialize);
     }
 
+    /// Authorization never implies an unclaimed account: a replay against a
+    /// live tree is refused by the state, not by who sent it.
     #[test]
-    #[should_panic(expected = "merkle program's own shard")]
-    fn test_plan_rejects_foreign_shard() {
-        let foreign = AccountMeta::new(AccountId::new([1; 32]), true, AccountId::new([9; 32]));
-        let _ = plan(&plan_input(vec![foreign]), MerkleInstruction::Initialize);
-    }
-
-    #[test]
-    #[should_panic(expected = "exactly one account")]
-    fn test_plan_rejects_extra_accounts() {
-        let _ = plan(
-            &plan_input(vec![tree_main(true), tree_main(true)]),
-            MerkleInstruction::Initialize,
-        );
-    }
-
-    #[test]
-    fn test_apply_dispatches_every_effect() {
-        let data = apply(Effect::Initialize, &[]).unwrap();
-        let data = apply(Effect::Insert { leaf: [1; 32] }, &data).unwrap();
-        assert_eq!(read_next_index(&data), 1);
-        let data = apply(
-            Effect::Remove {
-                index: 0,
-                leaf: [1; 32],
-            },
-            &data,
-        )
-        .unwrap();
-        assert_eq!(read_root(&data), compute_default_hashes(TREE_DEPTH)[0]);
-        let data = apply(
-            Effect::Set {
-                index: 0,
-                leaf: [2; 32],
-            },
-            &data,
-        )
-        .unwrap();
-        assert_eq!(read_next_index(&data), 1);
-        assert_ne!(read_root(&data), compute_default_hashes(TREE_DEPTH)[0]);
+    #[should_panic(expected = "tree already initialized")]
+    fn test_handler_refuses_to_reinitialize_a_live_tree() {
+        let data = handle(true, &[], MerkleMessage::Initialize);
+        let _ = handle(true, &data, MerkleMessage::Initialize);
     }
 
     // ========================================================================

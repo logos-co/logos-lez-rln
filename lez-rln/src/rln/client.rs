@@ -1,40 +1,55 @@
 //! Client helpers for the RLN registration program (shared by `run_setup`,
 //! `register_member`, `run_rln_proof` and `register_commitments`).
 //!
-//! Every read and every transaction names a SHARD: the registration program's
-//! shard of `config` and `membership`, the merkle program's shard of
-//! `tree_main`, the clock program's shard of `CLOCK_50`, and the native shard
-//! of `payer` and `treasury`. The order and selection of each instruction's
-//! accounts is the guest's `plan` contract (`methods/guest/src/program.rs`).
+//! Every read and every transaction names ACTORS: the registration program
+//! at `config` and `membership`, the merkle program at `tree_main`, and the
+//! native program at `payer` and `treasury`. A transaction sends one root
+//! message to one actor and declares every actor the program will touch;
+//! an actor that does not exist on chain yet is admitted by evidence (the
+//! PDA seed it will be derived from). Which actor a message is for is the
+//! guest's contract (`methods/guest/src/program.rs`).
 
 use std::{path::PathBuf, time::Duration};
 
-use nssa::{AccountId, ProgramShardSelector, program::Program};
-use nssa_core::program::{MAX_PROGRAM_SEGMENTS, PROGRAM_LOADER_ACCOUNT_ID, ProgramId};
+use nssa::{AccountId, Actor, program::Program};
+use nssa_core::program::{
+    MAX_PROGRAM_SEGMENTS, MessageData, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramId,
+};
 use program_loader_core::{MAX_SEGMENT_DATA_LEN, ProgramHeader};
 use rand_chacha::ChaCha20Rng;
 use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
 use rln_layouts::{ConfigState, MembershipState};
 use sequencer_service_protocol::FeeStateQuote;
 use wallet::{
-    AccountIdentity, AccountMention, WalletCore, program_facades::program_loader::ProgramLoader,
+    AccountIdentity, AccountMention, FeeParams, WalletCore,
+    program_facades::{
+        CreditDelivery, native_token_transfer::NativeTokenTransfer, program_loader::ProgramLoader,
+    },
 };
 
 use crate::{
     fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
-    merkle_tree::{fetch_tree_shard, find_leaf_index, tree_shard_selector},
+    merkle_tree::{fetch_tree_state, find_leaf_index, main_seed, tree_actor},
     rln::{
-        CONFIG_SIZE, Instruction, MEMBERSHIP_SIZE, ProgramIds, derive_config_account,
-        derive_membership_account,
-        program_ids::{hex_id, known_program_ids, save_program_ids},
+        CONFIG_SIZE, MEMBERSHIP_SIZE, Message, ProgramIds, config_seed, derive_config_account,
+        derive_membership_account, membership_seed,
+        program_ids::{KnownProgramIds, hex_id, known_program_ids, save_program_ids},
     },
 };
+
+/// The wallet this host drives: a `WalletCore` over the sequencer RPC client.
+pub type Wallet = WalletCore<sequencer_service_rpc::SequencerClient>;
 
 /// Native atomic units charged per unit of rate limit. At rate_limit 100 a
 /// membership costs 1,000,000, which is the anti-grief price `Extend` needs to
 /// stay non-zero.
 pub const PRICE_PER_UNIT: u128 = 10_000;
 pub const MAX_TOTAL_RATE_LIMIT: u64 = 1_000_000;
+
+/// Inclusive rate-limit bounds a new registry accepts registrations at,
+/// unless `LEZ_RLN_MIN_RATE_LIMIT` / `LEZ_RLN_MAX_RATE_LIMIT` say otherwise.
+pub const DEFAULT_MIN_RATE_LIMIT: u64 = 100;
+pub const DEFAULT_MAX_RATE_LIMIT: u64 = 600;
 
 /// 30 days, in seconds.
 pub const DEFAULT_ACTIVE_DURATION_SECS: u32 = 30 * 24 * 60 * 60;
@@ -63,14 +78,25 @@ pub fn membership_durations() -> (u32, u32) {
     )
 }
 
-/// CLOCK_50 system account id.
-pub fn clock_account_id() -> AccountId {
-    AccountId::new(crate::rln::CLOCK_50_ACCOUNT_ID_BYTES)
-}
-
-/// The clock program's shard of `CLOCK_50`, which holds `ClockAccountData`.
-pub fn clock_selector() -> ProgramShardSelector {
-    ProgramShardSelector::new(clock_account_id(), clock_core::clock_account_id())
+/// The `(min, max)` rate-limit bounds a new registry stamps into its config:
+/// the defaults above, or `LEZ_RLN_MIN_RATE_LIMIT` / `LEZ_RLN_MAX_RATE_LIMIT`.
+/// Checked here as the guest checks them, so a typo fails before a paid
+/// deploy rather than in the Initialize transaction.
+pub fn rate_limit_bounds() -> (u64, u64) {
+    let read = |name: &str, default: u64| {
+        std::env::var(name).ok().map_or(default, |raw| {
+            raw.parse()
+                .unwrap_or_else(|_| panic!("{name} must be a u64 rate limit, got {raw:?}"))
+        })
+    };
+    let min = read("LEZ_RLN_MIN_RATE_LIMIT", DEFAULT_MIN_RATE_LIMIT);
+    let max = read("LEZ_RLN_MAX_RATE_LIMIT", DEFAULT_MAX_RATE_LIMIT);
+    assert!(min > 0, "LEZ_RLN_MIN_RATE_LIMIT must be positive");
+    assert!(
+        min <= max,
+        "LEZ_RLN_MIN_RATE_LIMIT {min} exceeds LEZ_RLN_MAX_RATE_LIMIT {max}"
+    );
+    (min, max)
 }
 
 pub const REGISTRATION_BINARY: &str =
@@ -79,19 +105,39 @@ pub const MERKLE_TREE_BINARY: &str =
     "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/incremental_merkle_tree.bin";
 pub const DATA_DIR: &str = ".logos-lez-rln";
 
-/// Initialize a WalletCore, creating storage if missing.
+/// The password a wallet storage is sealed with: `LEE_WALLET_PASSWORD`, or
+/// empty for an unencrypted file. Tooling runs headless, so a storage that
+/// needs a password it was not given fails here rather than prompting.
+pub fn wallet_password(storage_path: &std::path::Path) -> String {
+    let password = std::env::var(wallet::PASSWORD_ENV_VAR).unwrap_or_default();
+    if password.is_empty()
+        && storage_path.exists()
+        && wallet::storage::Storage::is_encrypted(storage_path).unwrap_or(false)
+    {
+        panic!(
+            "wallet storage {} is encrypted; set {}",
+            storage_path.display(),
+            wallet::PASSWORD_ENV_VAR
+        );
+    }
+    password
+}
+
+/// Initialize a wallet, creating storage if missing.
 ///
 /// An existing `wallet_config.json` is preserved (lets callers point the
 /// wallet at a non-default sequencer, e.g. the public LEZ testnet); with
-/// none present, a fresh local-dev default is written.
-pub async fn init_wallet() -> WalletCore {
-    let config_path = wallet::helperfunctions::fetch_config_path().unwrap();
-    let storage_path = wallet::helperfunctions::fetch_persistent_storage_path().unwrap();
+/// none present, a fresh local-dev default is written. A fresh storage is
+/// sealed with `LEE_WALLET_PASSWORD` when set, else left unencrypted.
+pub async fn init_wallet() -> Wallet {
+    let config_path = wallet::utils::fetch_config_path().unwrap();
+    let storage_path = wallet::utils::fetch_persistent_storage_path().unwrap();
+    let password = wallet_password(&storage_path);
     if storage_path.exists() {
-        WalletCore::new_update_chain(config_path, storage_path, None).unwrap()
+        WalletCore::new_update_chain(config_path, storage_path, None, &password).unwrap()
     } else {
         println!("First run: initializing wallet storage at {storage_path:?}");
-        WalletCore::new_init_storage(config_path, storage_path, None, "")
+        WalletCore::new_init_storage(config_path, storage_path, None, &password)
             .unwrap()
             .0
     }
@@ -114,35 +160,26 @@ pub fn load_programs() -> (Program, Program) {
     (registration_program, merkle_program)
 }
 
-/// Read one shard, panicking with `label` on a transport error. An account
-/// or shard that was never written reads as empty.
-async fn read_shard(
-    wallet_core: &WalletCore,
-    selector: ProgramShardSelector,
-    label: &str,
-) -> Vec<u8> {
+/// Read one actor's state, panicking with `label` on a transport error. An
+/// account or actor that was never written reads as empty.
+async fn read_actor_state(wallet_core: &Wallet, actor: Actor, label: &str) -> Vec<u8> {
     wallet_core
-        .get_account_view(selector)
+        .get_account_view(actor)
         .await
-        .unwrap_or_else(|e| panic!("{label}: cannot read {}: {e:?}", selector.account_id))
-        .data
-        .shard(selector.program_account_id)
-        .to_vec()
+        .unwrap_or_else(|e| panic!("{label}: cannot read {}: {e:?}", actor.account_id))
+        .map(|account| account.data.actor_state(actor.program_account_id).to_vec())
+        .unwrap_or_default()
 }
 
-fn config_selector(programs: &ProgramIds, tree_id: &[u8; 32]) -> ProgramShardSelector {
-    ProgramShardSelector::new(
+fn config_actor(programs: &ProgramIds, tree_id: &[u8; 32]) -> Actor {
+    Actor::new(
         derive_config_account(&programs.registration, tree_id),
         programs.registration,
     )
 }
 
-fn membership_selector(
-    programs: &ProgramIds,
-    tree_id: &[u8; 32],
-    id_commitment: &[u8; 32],
-) -> ProgramShardSelector {
-    ProgramShardSelector::new(
+fn membership_actor(programs: &ProgramIds, tree_id: &[u8; 32], id_commitment: &[u8; 32]) -> Actor {
+    Actor::new(
         derive_membership_account(&programs.registration, tree_id, id_commitment),
         programs.registration,
     )
@@ -150,11 +187,11 @@ fn membership_selector(
 
 /// Check if the registry for `tree_id` is initialized on-chain.
 pub async fn is_initialized(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> bool {
-    !read_shard(wallet_core, config_selector(programs, tree_id), "config")
+    !read_actor_state(wallet_core, config_actor(programs, tree_id), "config")
         .await
         .is_empty()
 }
@@ -162,11 +199,11 @@ pub async fn is_initialized(
 /// The registry config. `ConfigState` has no version discriminator, so its
 /// exact size is asserted before decoding.
 pub async fn read_config(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
 ) -> ConfigState {
-    let bytes = read_shard(wallet_core, config_selector(programs, tree_id), "config").await;
+    let bytes = read_actor_state(wallet_core, config_actor(programs, tree_id), "config").await;
     assert!(
         !bytes.is_empty(),
         "config for tree {} is empty: the registry is not initialized",
@@ -175,22 +212,22 @@ pub async fn read_config(
     assert_eq!(
         bytes.len(),
         CONFIG_SIZE,
-        "config shard is {} bytes, the layout this host reads is {CONFIG_SIZE}",
+        "config state is {} bytes, the layout this host reads is {CONFIG_SIZE}",
         bytes.len()
     );
-    borsh::from_slice(&bytes).expect("config shard decodes as ConfigState")
+    borsh::from_slice(&bytes).expect("config state decodes as ConfigState")
 }
 
 /// A membership, or `None` if it does not exist.
 pub async fn read_membership(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
 ) -> Option<MembershipState> {
-    let bytes = read_shard(
+    let bytes = read_actor_state(
         wallet_core,
-        membership_selector(programs, tree_id, id_commitment),
+        membership_actor(programs, tree_id, id_commitment),
         "membership",
     )
     .await;
@@ -200,24 +237,53 @@ pub async fn read_membership(
     assert_eq!(
         bytes.len(),
         MEMBERSHIP_SIZE,
-        "membership shard is {} bytes, the layout this host reads is {MEMBERSHIP_SIZE}",
+        "membership state is {} bytes, the layout this host reads is {MEMBERSHIP_SIZE}",
         bytes.len()
     );
-    Some(borsh::from_slice(&bytes).expect("membership shard decodes as MembershipState"))
+    Some(borsh::from_slice(&bytes).expect("membership state decodes as MembershipState"))
 }
 
-/// `CLOCK_50`'s timestamp, the `now_ms` claim a time-dependent instruction
-/// carries. The guest refuses a zero clock, so this does too.
-pub async fn read_clock_ms(wallet_core: &WalletCore) -> u64 {
-    let bytes = read_shard(wallet_core, clock_selector(), "clock").await;
-    let timestamp = borsh::from_slice::<clock_core::ClockAccountData>(&bytes)
-        .map(|clock| clock.timestamp)
-        .unwrap_or(0);
+/// How far behind the head block's timestamp `read_chain_time_ms` dates a
+/// message. Block timestamps are the sequencer's wall clock, which can step
+/// back a little between the read and inclusion (NTP, a leader change); a
+/// claim exactly at the head would then fall outside its own window and be
+/// charged in full. A claim behind chain time only shortens the member's own
+/// window, so the slack costs nothing.
+const CHAIN_TIME_SLACK_MS: u64 = 5_000;
+
+/// Chain time in milliseconds for a time-dependent message's `now_ms`: the
+/// head block's timestamp less `CHAIN_TIME_SLACK_MS`. The message pins its
+/// transaction to blocks within `CLOCK_CLAIM_TOLERANCE_MS` after this, so it
+/// is read just before sending.
+pub async fn read_chain_time_ms(wallet_core: &Wallet) -> u64 {
+    use sequencer_service_rpc::RpcClient as _;
+    let client = wallet_core.client();
+    let head = client
+        .get_last_block_id()
+        .await
+        .unwrap_or_else(|e| panic!("cannot read the chain head: {e}"));
+    let block = client
+        .get_block(head)
+        .await
+        .unwrap_or_else(|e| panic!("cannot read block {head}: {e}"))
+        .unwrap_or_else(|| panic!("the head block {head} is missing"));
+    let timestamp = block.header.timestamp;
+    assert!(timestamp > 0, "block {head} carries no timestamp");
+    timestamp.saturating_sub(CHAIN_TIME_SLACK_MS)
+}
+
+/// A declared actor must be admitted, and the treasury's native actor is
+/// admitted only by existing: fail here, for free, rather than on chain for
+/// the full declared gas.
+async fn require_treasury(wallet_core: &Wallet, treasury: AccountId, label: &str) {
     assert!(
-        timestamp > 0,
-        "CLOCK_50 has not been written yet; the sequencer writes it every 50 blocks"
+        wallet_core
+            .get_account_public(treasury)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: cannot read the treasury {treasury}: {e:?}"))
+            .is_some(),
+        "{label}: the treasury {treasury} does not exist on chain; run_setup seeds it"
     );
-    timestamp
 }
 
 /// Default `max_attempts` for effect confirmation. Each attempt sleeps
@@ -300,14 +366,14 @@ pub fn registration_leaf(id_commitment: &[u8; 32], rate_limit: u64) -> [u8; 32] 
 /// records it. Slash and erase send it as a hint the merkle program checks by
 /// content.
 async fn locate_membership_leaf(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     membership: &MembershipState,
 ) -> u64 {
     let leaf = registration_leaf(&membership.id_commitment, membership.rate_limit);
     find_leaf_index(
-        &fetch_tree_shard(wallet_core, programs, tree_id).await,
+        &fetch_tree_state(wallet_core, programs, tree_id).await,
         &leaf,
     )
     .expect("the membership exists but no leaf in the tree holds it")
@@ -324,7 +390,7 @@ pub struct RlnIdentity {
 
 /// Create a new wallet account, derive an RLN identity from its signing key, and
 /// compute the rate commitment (leaf value = poseidon(id_commitment, rate_limit)).
-pub async fn create_identity(wallet_core: &mut WalletCore, user_message_limit: u64) -> RlnIdentity {
+pub async fn create_identity(wallet_core: &mut Wallet, user_message_limit: u64) -> RlnIdentity {
     let (account_id, _chain_index) = wallet_core.create_new_account_public(None);
     wallet_core
         .store_persistent_data()
@@ -405,27 +471,27 @@ pub fn header_deployed(loader_shard: &[u8], image_id: &ProgramId) -> Result<bool
     if loader_shard.is_empty() {
         return Ok(false);
     }
-    match ProgramHeader::from_bytes(loader_shard) {
+    match ProgramHeader::from_loader_actor_state(loader_shard) {
         Some(header) if header.image_id == *image_id => Ok(true),
         Some(header) => Err(format!("holds a header for image {:?}", header.image_id)),
         None => Err("holds something other than a program header".to_string()),
     }
 }
 
-/// Read `header`'s loader shard and judge it against `image_id`.
+/// Read `header`'s loader state and judge it against `image_id`.
 async fn program_deployed_at(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     header: AccountId,
     image_id: &ProgramId,
     label: &str,
 ) -> Result<bool, String> {
-    let shard = read_shard(
+    let state = read_actor_state(
         wallet_core,
-        ProgramShardSelector::new(header, PROGRAM_LOADER_ACCOUNT_ID),
+        Actor::new(header, PROGRAM_LOADER_ACCOUNT_ID),
         label,
     )
     .await;
-    header_deployed(&shard, image_id)
+    header_deployed(&state, image_id)
 }
 
 /// How many consecutive already-written key-chain accounts a deploy skips
@@ -441,16 +507,16 @@ const FRESH_ACCOUNT_ATTEMPTS: usize = 64;
 /// written loader shard and are charged in full. Accounts that are already
 /// written are skipped, which also steps past the leftovers of an
 /// interrupted upload.
-async fn fresh_loader_account(wallet_core: &mut WalletCore, label: &str) -> AccountId {
+async fn fresh_loader_account(wallet_core: &mut Wallet, label: &str) -> AccountId {
     for _ in 0..FRESH_ACCOUNT_ATTEMPTS {
         let (account, _) = wallet_core.create_new_account_public(None);
-        let shard = read_shard(
+        let state = read_actor_state(
             wallet_core,
-            ProgramShardSelector::new(account, PROGRAM_LOADER_ACCOUNT_ID),
+            Actor::new(account, PROGRAM_LOADER_ACCOUNT_ID),
             label,
         )
         .await;
-        if shard.is_empty() {
+        if state.is_empty() {
             return account;
         }
         println!("  {label}: skipping {account}, its loader shard is already written");
@@ -470,7 +536,7 @@ async fn fresh_loader_account(wallet_core: &mut WalletCore, label: &str) -> Acco
 /// deploy interrupted midway leaves its accounts behind and a re-run steps
 /// past them.
 pub async fn deploy_program(
-    wallet_core: &mut WalletCore,
+    wallet_core: &mut Wallet,
     program: &Program,
     bytecode_path: &str,
     program_name: &str,
@@ -522,7 +588,7 @@ pub async fn deploy_program(
 /// The program at `known`, if its header carries `program`'s image id, else
 /// a fresh deploy.
 async fn ensure_program(
-    wallet_core: &mut WalletCore,
+    wallet_core: &mut Wallet,
     known: Option<AccountId>,
     program: &Program,
     bytecode_path: &str,
@@ -552,92 +618,189 @@ async fn ensure_program(
 // Transactions
 // ============================================================================
 
-/// A public account the transaction does not sign for, selecting `program`'s
-/// shard.
-fn no_sign(account_id: AccountId, program: AccountId) -> AccountMention {
-    AccountIdentity::PublicNoSign(account_id).select_program_shard(program)
+/// A PDA of `program` derived from `seed`, mentioned as `select`'s actor and
+/// not signed for. The wallet turns the seed into admission evidence, so the
+/// mention works before the account exists.
+fn pda_mention(program: AccountId, seed: [u8; 32], select: AccountId) -> AccountMention {
+    AccountIdentity::PublicPda {
+        program,
+        seed: PdaSeed::new(seed),
+    }
+    .select_program_actor_state(select)
 }
 
-/// Wait for tx `hash` to take effect on the shard `selector` names, and fail
-/// loudly if it never does.
-///
-/// A send returning `Ok` means only that the sequencer admitted the
-/// transaction; one that fails on-chain is left out of the block, so the only
-/// client-side sign is that its target never changes.
-async fn confirm_effect(
-    wallet_core: &WalletCore,
+/// What became of a submitted transaction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TxOutcome {
+    /// Not in a block yet.
+    Pending,
+    /// In `block`, and its action settled.
+    Included(u64),
+    /// In `block`, charged, and its action reverted: no effect.
+    Reverted(u64),
+}
+
+/// Where `hash` stands. A transaction whose action fails on chain is still
+/// included and charged; the block marks it reverted, which is the only
+/// client-side sign that it had no effect. A read that fails answers
+/// `Pending`: nothing is decided until the block has been seen.
+pub async fn tx_outcome(wallet_core: &Wallet, hash: common::HashType) -> TxOutcome {
+    let Ok(Some((_, block_id))) = wallet_core.get_transaction(hash).await else {
+        return TxOutcome::Pending;
+    };
+    let Ok(Some(block)) = wallet_core.get_block(block_id).await else {
+        return TxOutcome::Pending;
+    };
+    let reverted = block
+        .body
+        .transactions
+        .iter()
+        .position(|tx| tx.hash() == hash)
+        .is_some_and(|position| block.body.is_reverted(position));
+    if reverted {
+        TxOutcome::Reverted(block_id)
+    } else {
+        TxOutcome::Included(block_id)
+    }
+}
+
+/// Wait for tx `hash` to land: `Ok` as soon as `landed` sees its effect,
+/// else the transaction's fate — `Reverted` (charged, no effect),
+/// `Included` (in a block, yet `landed` saw nothing even after a re-read),
+/// or `Pending` once `wait_account_attempts()` polls (500 ms apart) are
+/// spent. A send returning `Ok` means only that the sequencer admitted the
+/// transaction; its fate is read off the block it lands in.
+pub async fn await_outcome<T>(
+    wallet_core: &Wallet,
     hash: common::HashType,
-    selector: ProgramShardSelector,
-    landed: impl Fn(&[u8]) -> bool,
-    label: &str,
-) {
-    let attempts = wait_account_attempts();
-    for _ in 0..attempts {
-        if landed(&read_shard(wallet_core, selector, label).await) {
-            return;
+    mut landed: impl AsyncFnMut() -> Option<T>,
+) -> Result<T, TxOutcome> {
+    for _ in 0..wait_account_attempts() {
+        if let Some(seen) = landed().await {
+            return Ok(seen);
         }
-        if let Ok(Some((_, block))) = wallet_core.get_transaction(hash).await {
-            // Re-read: the shard may have been read before the block landed.
-            if landed(&read_shard(wallet_core, selector, label).await) {
-                return;
+        match tx_outcome(wallet_core, hash).await {
+            TxOutcome::Pending => {}
+            TxOutcome::Reverted(block) => return Err(TxOutcome::Reverted(block)),
+            TxOutcome::Included(block) => {
+                // Re-read: the effect may have been read before the block landed.
+                return landed().await.ok_or(TxOutcome::Included(block));
             }
-            panic!(
-                "{label}: tx {hash} is in block {block} but had no effect on {}",
-                selector.account_id
-            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    panic!(
-        "{label}: tx {hash} was accepted but after {} s is neither in a block nor has any \
-         effect on {} — a failed transaction is left out of the block; the sequencer's log \
-         names the error",
-        attempts / 2,
-        selector.account_id
-    );
+    Err(TxOutcome::Pending)
+}
+
+/// Wait for tx `hash` to take effect on `actor`'s state, and fail loudly if
+/// it never does.
+async fn confirm_effect(
+    wallet_core: &Wallet,
+    hash: common::HashType,
+    actor: Actor,
+    landed: impl Fn(&[u8]) -> bool,
+    label: &str,
+) {
+    let outcome = await_outcome(wallet_core, hash, async || {
+        landed(&read_actor_state(wallet_core, actor, label).await).then_some(())
+    })
+    .await;
+    match outcome {
+        Ok(()) => {}
+        Err(TxOutcome::Reverted(block)) => panic!(
+            "{label}: tx {hash} reverted in block {block} (fee charged, no effect) — the \
+             sequencer's log names the reason"
+        ),
+        Err(TxOutcome::Included(block)) => panic!(
+            "{label}: tx {hash} is in block {block} but had no effect on {}",
+            actor.account_id
+        ),
+        Err(TxOutcome::Pending) => panic!(
+            "{label}: tx {hash} was accepted but after {} s is not in a block",
+            wait_account_attempts() / 2,
+        ),
+    }
 }
 
 /// Build, submit, and confirm one registration-program init transaction:
-/// no signers, paid by `LEZ_RLN_PAYER`. Blocks until `wait_on` is non-empty.
+/// no signers, paid by `LEZ_RLN_PAYER`, its root the first mention. Blocks
+/// until `wait_on` is non-empty.
 async fn send_init_tx(
-    wallet_core: &WalletCore,
-    programs: &ProgramIds,
+    wallet_core: &Wallet,
     accounts: Vec<AccountMention>,
-    instruction: Instruction,
+    message: Message,
     label: &str,
-    wait_on: ProgramShardSelector,
+    wait_on: Actor,
 ) {
-    let instruction_data =
-        Program::serialize_instruction(instruction).expect("instruction serializes");
+    let message = Program::serialize_message(message).expect("message serializes");
     let hash = wallet_core
-        .send_pub_tx_paid_by(
-            accounts,
-            instruction_data,
-            programs.registration,
-            fee_payer(),
-        )
+        .send_pub_tx_paid_by(accounts, 0, message, fee_payer())
         .await
         .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"));
     println!("  {label} tx hash: {hash}");
-    confirm_effect(wallet_core, hash, wait_on, |shard| !shard.is_empty(), label).await;
+    confirm_effect(wallet_core, hash, wait_on, |state| !state.is_empty(), label).await;
 }
 
-/// Deploy (or reuse) both programs, record their ids, create the treasury, and
-/// initialize the registry for `tree_id`. Returns the program ids.
+/// The public key of an account whose signing key this wallet holds.
+pub fn public_key_of(wallet_core: &Wallet, account: AccountId, label: &str) -> nssa::PublicKey {
+    let key = wallet_core
+        .get_account_public_signing_key(account)
+        .unwrap_or_else(|| panic!("{label}: {account} is not in this wallet"));
+    nssa::PublicKey::new_from_private_key(key)
+}
+
+/// Make `treasury` exist on chain.
 ///
-/// Programs are reused from `LEZ_RLN_{REGISTRATION,MERKLE}_PROGRAM_ID` or the
-/// tree's record when their headers carry the local binaries' image ids;
-/// whatever is missing is deployed. The record is written as soon as both ids
-/// are known, before initialization.
-pub async fn run_setup(
-    wallet_core: &mut WalletCore,
+/// A public actor a transaction declares must be admitted: exist, sign, be
+/// PDA-seeded by its sender, or carry evidence. The treasury is a plain keyed
+/// account that no registrant's wallet holds the key of, so the one wallet
+/// that does — this one, at setup — moves one unit into it. From then on
+/// every registration can declare it by existence.
+async fn seed_treasury(wallet_core: &Wallet, payer: AccountId, treasury: AccountId) {
+    // An account that exists is admitted as it is. Seeding it again would send
+    // a transfer whose inclusion nothing waits for (the wait below is "the
+    // treasury exists", true at once), and the next transaction from the payer
+    // would reuse its nonce and be dropped by the sequencer.
+    if matches!(wallet_core.get_account_public(treasury).await, Ok(Some(_))) {
+        println!("  Treasury already on chain; not seeded again");
+        return;
+    }
+    let (hash, _) = NativeTokenTransfer(wallet_core)
+        .transfer(
+            AccountIdentity::Public(payer),
+            AccountIdentity::Public(treasury),
+            1,
+            CreditDelivery::Automatic,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("seeding the treasury failed: {e:?}"));
+    println!("  Treasury seed tx hash: {hash}");
+    let outcome = await_outcome(wallet_core, hash, async || {
+        matches!(wallet_core.get_account_public(treasury).await, Ok(Some(_))).then_some(())
+    })
+    .await;
+    match outcome {
+        Ok(()) => {}
+        Err(TxOutcome::Reverted(block)) => panic!("seeding the treasury reverted in block {block}"),
+        Err(TxOutcome::Included(block)) => {
+            panic!("the treasury seed is in block {block} but {treasury} is not on chain")
+        }
+        Err(TxOutcome::Pending) => panic!(
+            "the treasury {treasury} did not appear on chain after {} s",
+            wait_account_attempts() / 2
+        ),
+    }
+}
+
+/// Reuse each program `known` names when its header carries the local
+/// binary's image id, and deploy whichever is not named. Merkle first, then
+/// registration. Initializes nothing and records nothing.
+pub async fn ensure_programs(
+    wallet_core: &mut Wallet,
     registration_program: &Program,
     merkle_program: &Program,
-    tree_id: &[u8; 32],
+    known: KnownProgramIds,
 ) -> ProgramIds {
-    let known = known_program_ids(tree_id).unwrap_or_else(|e| panic!("{e}"));
-
-    println!("Setup Step 1: Checking/deploying programs...");
     let merkle = ensure_program(
         wallet_core,
         known.merkle,
@@ -654,10 +817,29 @@ pub async fn run_setup(
         "Registration program",
     )
     .await;
-    let programs = ProgramIds {
+    ProgramIds {
         registration,
         merkle,
-    };
+    }
+}
+
+/// Deploy (or reuse) both programs, record their ids, create the treasury, and
+/// initialize the registry for `tree_id`. Returns the program ids.
+///
+/// Programs are reused from `LEZ_RLN_{REGISTRATION,MERKLE}_PROGRAM_ID` or the
+/// tree's record when their headers carry the local binaries' image ids;
+/// whatever is missing is deployed. The record is written as soon as both ids
+/// are known, before initialization.
+pub async fn run_setup(
+    wallet_core: &mut Wallet,
+    registration_program: &Program,
+    merkle_program: &Program,
+    tree_id: &[u8; 32],
+) -> ProgramIds {
+    let known = known_program_ids(tree_id).unwrap_or_else(|e| panic!("{e}"));
+
+    println!("Setup Step 1: Checking/deploying programs...");
+    let programs = ensure_programs(wallet_core, registration_program, merkle_program, known).await;
     save_program_ids(tree_id, &programs);
     println!(
         "  Program ids recorded in {}",
@@ -670,27 +852,40 @@ pub async fn run_setup(
     }
 
     // The treasury is a plain public account, deliberately not a PDA: a PDA is
-    // spendable only through a chained call carrying its seeds, issued by its
-    // owning program, and this program has no instruction that would issue
-    // one. A native credit needs no prior initialization of the target.
+    // spendable only by its owning program, and this program has no message
+    // that would spend it.
     println!("Setup Step 2: Creating the treasury account...");
     let (treasury_id, _) = wallet_core.create_new_account_public(None);
     wallet_core
         .store_persistent_data()
         .expect("Failed to store wallet");
     println!("  Treasury: {treasury_id}");
+    println!(
+        "  Treasury public key: {}",
+        public_key_of(wallet_core, treasury_id, "treasury")
+    );
+    let payer = fee_payer().expect("initializing needs a funded payer — set LEZ_RLN_PAYER");
+    seed_treasury(wallet_core, payer, treasury_id).await;
 
     println!("Setup Step 3: Initializing registration program...");
     let (active_duration_sec, grace_period_duration_sec) = membership_durations();
-    let config = config_selector(&programs, tree_id);
-    let tree_main = tree_shard_selector(&programs, tree_id);
+    let (min_rate_limit, max_rate_limit) = rate_limit_bounds();
+    println!("  Rate limit bounds: {min_rate_limit}..={max_rate_limit}");
+    let config = config_actor(&programs, tree_id);
+    let tree_main = tree_actor(&programs, tree_id);
+    let config_mention = || {
+        pda_mention(
+            programs.registration,
+            config_seed(tree_id),
+            programs.registration,
+        )
+    };
     // Two transactions rather than one: a fused Initialize+merkle exceeds the
-    // execution-gas cap once the chained call runs inline.
+    // gas the wallet declares once the tree's default hashes run inline.
     send_init_tx(
         wallet_core,
-        &programs,
-        vec![no_sign(config.account_id, programs.registration)],
-        Instruction::Initialize {
+        vec![config_mention()],
+        Message::Initialize {
             merkle_program_id: *programs.merkle.value(),
             tree_id: *tree_id,
             price_per_unit: PRICE_PER_UNIT,
@@ -698,6 +893,8 @@ pub async fn run_setup(
             max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
             active_duration_for_new_memberships_sec: active_duration_sec,
             grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
+            min_rate_limit,
+            max_rate_limit,
         },
         "InitializeConfig",
         config,
@@ -706,15 +903,11 @@ pub async fn run_setup(
 
     send_init_tx(
         wallet_core,
-        &programs,
         vec![
-            no_sign(config.account_id, programs.registration),
-            no_sign(tree_main.account_id, programs.merkle),
+            config_mention(),
+            pda_mention(programs.registration, main_seed(tree_id), programs.merkle),
         ],
-        Instruction::InitializeMerkleTree {
-            tree_id: *tree_id,
-            merkle_program_id: *programs.merkle.value(),
-        },
+        Message::InitializeMerkleTree { tree_id: *tree_id },
         "InitializeMerkleTree",
         tree_main,
     )
@@ -759,11 +952,12 @@ pub fn resolve_payer() -> AccountId {
 
 /// The execution gas a transaction declares.
 ///
-/// The wallet's own send path declares its configured `gas_limit` (2,000,000
-/// by default), under half what a registration costs: a merkle insert is one
-/// Poseidon compression — about 902,000 cycles — per level of tree depth, and
-/// gas is cycles, summed over every plan and apply session. Anything that
-/// registers declares its own limit, so it builds the transaction itself.
+/// Left to itself the wallet declares what a simulation measures, capped at
+/// its configured `gas_limit` (2,000,000 by default), under half what a
+/// registration costs: a merkle insert is one Poseidon compression — about
+/// 902,000 cycles — per level of tree depth, and gas is cycles, summed over
+/// every delivery's session. So a metered transaction sets the limit for
+/// itself (`FeeParams::gas_limit`), which the wallet declares as given.
 ///
 /// Defaults to the protocol's ceiling. The sequencer refuses a transaction
 /// declaring more than `MAX_GAS_EXEC`, so this is a ceiling rather than a
@@ -782,82 +976,78 @@ fn declared_gas_limit() -> u64 {
     limit
 }
 
-/// Send a public transaction that declares its own gas limit, signed by
-/// `signer` and paid for by the configured payer.
+/// One transaction: its root message and every account it will touch.
+pub struct TxPlan {
+    pub message: Message,
+    /// Every account whose actor the program touches, the root's first. An
+    /// undeclared actor fails the transaction; an undeclared recipient of an
+    /// async credit leaves the credit pending. A PDA mention admits an account
+    /// that does not exist on chain yet.
+    pub accounts: Vec<AccountMention>,
+}
+
+fn config_mention(programs: &ProgramIds, tree_id: &[u8; 32]) -> AccountMention {
+    pda_mention(
+        programs.registration,
+        config_seed(tree_id),
+        programs.registration,
+    )
+}
+
+fn membership_mention(
+    programs: &ProgramIds,
+    tree_id: &[u8; 32],
+    id_commitment: &[u8; 32],
+) -> AccountMention {
+    pda_mention(
+        programs.registration,
+        membership_seed(tree_id, id_commitment),
+        programs.registration,
+    )
+}
+
+fn tree_mention(programs: &ProgramIds, tree_id: &[u8; 32]) -> AccountMention {
+    pda_mention(programs.registration, main_seed(tree_id), programs.merkle)
+}
+
+/// The account `LEZ_RLN_PAYER` names, which pays a registration's fee.
+fn required_fee_payer(label: &str) -> AccountId {
+    fee_payer().unwrap_or_else(|| panic!("{label} needs a funded payer — set LEZ_RLN_PAYER"))
+}
+
+/// Send a public transaction through the wallet, declaring this
+/// transaction's own gas limit and fee cap, paid for by `fee_payer`.
 ///
-/// Only accounts that sign carry a nonce: the signer's, then the payer's when
-/// it is a separate co-signer outside `shard_selectors`.
+/// The limit and the cap are set on the wallet for this one send and cleared
+/// after it. With both given the wallet declares them as they are and does
+/// not simulate, so a transaction the chain will revert is still sent, and
+/// charged: the block is where its fate is read (`await_outcome`).
+///
+/// `fee_payer` is one of the plan's signing accounts or any other account the
+/// wallet holds the key of, which then co-signs.
 ///
 /// `max_fee` is the declared cap, normally the `fee_reserve` the caller
 /// checked the payer against: the chain refuses a cap below its reserve, so
 /// the two must come from the same quote.
 async fn send_metered_tx(
-    wallet_core: &WalletCore,
-    program_account: AccountId,
-    shard_selectors: Vec<ProgramShardSelector>,
-    signer: &AccountId,
-    instruction_data: nssa_core::program::InstructionData,
+    wallet_core: &mut Wallet,
+    plan: TxPlan,
+    fee_payer: AccountId,
     max_fee: u128,
     label: &str,
 ) -> common::HashType {
-    let payer =
-        fee_payer().unwrap_or_else(|| panic!("{label} needs a funded payer — set LEZ_RLN_PAYER"));
-
-    let signer_key = wallet_core
-        .get_account_public_signing_key(*signer)
-        .unwrap_or_else(|| panic!("{label}: signer {signer:?} not in wallet"));
-
-    // Registration pays its price and its fee from ONE native balance, so
-    // signer == payer is the normal case. Listing that account twice would
-    // take two nonces and two signatures for it and advance its nonce by two,
-    // failing the NEXT transaction's nonce check.
-    let payer_is_signer = payer == *signer;
-    let payer_key = (!payer_is_signer).then(|| {
-        wallet_core
-            .get_account_public_signing_key(payer)
-            .unwrap_or_else(|| panic!("{label}: payer {payer:?} not in wallet"))
+    let message: MessageData =
+        Program::serialize_message(plan.message).expect("message serializes");
+    wallet_core.set_fee_params(FeeParams {
+        gas_limit: Some(declared_gas_limit()),
+        max_fee: Some(max_fee),
+        ..FeeParams::default()
     });
-
-    let nonce_accounts: Vec<AccountId> = if payer_is_signer {
-        vec![*signer]
-    } else {
-        vec![*signer, payer]
-    };
-    let nonces = wallet_core
-        .get_accounts_nonces(&nonce_accounts)
-        .await
-        .unwrap_or_else(|e| panic!("{label}: failed to read nonces: {e:?}"));
-
-    let fee = nssa::FeeDeclaration::new(payer, declared_gas_limit(), 0, max_fee);
-    let message = nssa::public_transaction::Message::new_preserialized(
-        program_account,
-        shard_selectors,
-        nonces,
-        instruction_data,
-        Some(fee),
-    );
-
-    let hash = message.hash();
-    let mut witnesses = vec![(
-        nssa::Signature::new(signer_key, &hash),
-        nssa::PublicKey::new_from_private_key(signer_key),
-    )];
-    if let Some(payer_key) = payer_key.as_ref() {
-        witnesses.push((
-            nssa::Signature::new(payer_key, &hash),
-            nssa::PublicKey::new_from_private_key(payer_key),
-        ));
-    }
-    let witness = nssa::public_transaction::WitnessSet::from_raw_parts(witnesses);
-
-    use sequencer_service_rpc::RpcClient as _;
-    wallet_core
-        .client()
-        .send_transaction(common::transaction::LeeTransaction::Public(
-            nssa::PublicTransaction::new(message, witness),
-        ))
-        .await
-        .unwrap_or_else(|e| panic!("Failed to send {label}: {e:?}"))
+    let sent = wallet_core
+        .send_pub_tx_paid_by(plan.accounts, 0, message, Some(fee_payer))
+        .await;
+    wallet_core.set_fee_params(FeeParams::default());
+    sent.unwrap_or_else(|e| panic!("{label}: {e:?}"))
 }
 
 /// The serialized-size allowance the wallet sizes its `max_fee` against
@@ -929,7 +1119,7 @@ fn fee_reserve<E>(quote: Result<FeeStateQuote, E>, gas_limit: u64) -> (u128, Res
 /// Quote the reserve for one transaction. The caller uses the one figure for
 /// both the affordability check and the declared `max_fee`, so the two cannot
 /// disagree about the fee state they were sized against.
-async fn quoted_fee_reserve(wallet_core: &WalletCore, label: &str) -> (u128, ReserveBasis) {
+async fn quoted_fee_reserve(wallet_core: &Wallet, label: &str) -> (u128, ReserveBasis) {
     use sequencer_service_rpc::RpcClient as _;
     let quote = wallet_core.client().get_fee_state().await;
     if let Err(e) = &quote {
@@ -946,7 +1136,7 @@ async fn quoted_fee_reserve(wallet_core: &WalletCore, label: &str) -> (u128, Res
 /// all: the sequencer refuses it with a bare "Incorrect fee" that names
 /// neither number.
 async fn assert_can_afford(
-    wallet_core: &WalletCore,
+    wallet_core: &Wallet,
     payer: &AccountId,
     price: u128,
     label: &str,
@@ -965,10 +1155,10 @@ async fn assert_can_afford(
     reserve
 }
 
-/// The config's `merkle_program_id` is what every chained call is checked
-/// against; a record naming another merkle program would select a shard the
-/// tree does not live in.
-fn check_merkle_claim(config: &ConfigState, programs: &ProgramIds) {
+/// The config's `merkle_program_id` is the program the tree runs under; a
+/// record naming another merkle program would declare an actor the tree does
+/// not live at.
+fn check_merkle_program(config: &ConfigState, programs: &ProgramIds) {
     assert_eq!(
         config.merkle_program_id,
         *programs.merkle.value(),
@@ -985,12 +1175,12 @@ fn check_merkle_claim(config: &ConfigState, programs: &ProgramIds) {
 /// polls (it was sent and may still land: check the chain before
 /// re-registering).
 ///
-/// Every claim is read from the chain just before sending: `CLOCK_50`'s
-/// timestamp and the config's price, durations and merkle program. The index
-/// is not a claim: the tree assigns it, so concurrent registrations do not
-/// contend for one.
+/// The config is read just before sending, for the price and the merkle
+/// program; chain time for `now_ms`, which the message pins its validity
+/// window to. The index is not sent: the tree assigns it, so concurrent
+/// registrations do not contend for one.
 pub async fn register_identity(
-    wallet_core: &WalletCore,
+    wallet_core: &mut Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
@@ -999,49 +1189,47 @@ pub async fn register_identity(
 ) -> Option<u64> {
     let leaf = registration_leaf(id_commitment, rate_limit);
 
-    let config = read_config(wallet_core, programs, tree_id).await;
-    check_merkle_claim(&config, programs);
-    let now_ms = read_clock_ms(wallet_core).await;
-    let already_at = find_leaf_index(
-        &fetch_tree_shard(wallet_core, programs, tree_id).await,
-        &leaf,
+    // Pre-flight reads side by side; chain time last, since the validity
+    // window starts there.
+    let (config, tree) = tokio::join!(
+        read_config(wallet_core, programs, tree_id),
+        fetch_tree_state(wallet_core, programs, tree_id),
+    );
+    check_merkle_program(&config, programs);
+    let treasury = AccountId::new(config.treasury_account_id);
+    let already_at = find_leaf_index(&tree, &leaf);
+    let ((), max_fee) = tokio::join!(
+        require_treasury(wallet_core, treasury, "register"),
+        assert_can_afford(
+            wallet_core,
+            payer_id,
+            config.price_per_unit.saturating_mul(u128::from(rate_limit)),
+            "register",
+        ),
     );
 
-    let shard_selectors = vec![
-        config_selector(programs, tree_id),
-        tree_shard_selector(programs, tree_id),
-        ProgramShardSelector::native_balance(*payer_id),
-        ProgramShardSelector::native_balance(AccountId::new(config.treasury_account_id)),
-        clock_selector(),
-        membership_selector(programs, tree_id, id_commitment),
-    ];
-
-    let max_fee = assert_can_afford(
-        wallet_core,
-        payer_id,
-        config.price_per_unit.saturating_mul(u128::from(rate_limit)),
-        "register",
-    )
-    .await;
-
-    let instruction = Instruction::Register {
-        tree_id: *tree_id,
-        id_commitment: *id_commitment,
-        rate_limit,
-        merkle_program_id: config.merkle_program_id,
-        now_ms,
-        price_per_unit: config.price_per_unit,
-        active_duration_sec: config.active_duration_for_new_memberships_sec,
-        grace_period_duration_sec: config.grace_period_duration_for_new_memberships_sec,
+    let now_ms = read_chain_time_ms(wallet_core).await;
+    let plan = TxPlan {
+        message: Message::Register {
+            tree_id: *tree_id,
+            id_commitment: *id_commitment,
+            rate_limit,
+            payer: *payer_id.value(),
+            now_ms,
+        },
+        accounts: vec![
+            config_mention(programs, tree_id),
+            // Written for the first time here.
+            membership_mention(programs, tree_id, id_commitment),
+            tree_mention(programs, tree_id),
+            AccountIdentity::Public(*payer_id).balance(),
+            AccountIdentity::PublicNoSign(treasury).balance(),
+        ],
     };
-    let instruction_data =
-        Program::serialize_instruction(instruction).expect("instruction serializes");
     let hash = send_metered_tx(
         wallet_core,
-        programs.registration,
-        shard_selectors,
-        payer_id,
-        instruction_data,
+        plan,
+        required_fee_payer("register"),
         max_fee,
         "Failed to register identity",
     )
@@ -1050,19 +1238,22 @@ pub async fn register_identity(
     // A failed registration is still included (a charged revert with no
     // effect), so the block is the signal: once the transaction is in one,
     // the leaf is either there or never will be.
-    let landed = |shard: &[u8]| {
-        find_leaf_index(shard, &leaf).filter(|&index| already_at.is_none_or(|old| index > old))
-    };
-    for _ in 0..wait_account_attempts() {
-        if let Some(index) = landed(&fetch_tree_shard(wallet_core, programs, tree_id).await) {
-            return Some(index);
+    let outcome = await_outcome(wallet_core, hash, async || {
+        find_leaf_index(
+            &fetch_tree_state(wallet_core, programs, tree_id).await,
+            &leaf,
+        )
+        .filter(|&index| already_at.is_none_or(|old| index > old))
+    })
+    .await;
+    match outcome {
+        Ok(index) => Some(index),
+        Err(TxOutcome::Reverted(block)) => {
+            eprintln!("register: tx {hash} reverted in block {block} (fee charged, no effect)");
+            None
         }
-        if let Ok(Some(_)) = wallet_core.get_transaction(hash).await {
-            return landed(&fetch_tree_shard(wallet_core, programs, tree_id).await);
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        Err(TxOutcome::Included(_) | TxOutcome::Pending) => None,
     }
-    None
 }
 
 /// Renew a membership that is currently inside its grace period.
@@ -1072,159 +1263,146 @@ pub async fn register_identity(
 /// signs and is debited, and the config's treasury is credited. Anyone may pay
 /// for anyone's renewal.
 pub async fn extend_membership(
-    wallet_core: &WalletCore,
+    wallet_core: &mut Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     payer_id: &AccountId,
-) {
+) -> common::HashType {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
-    let config = read_config(wallet_core, programs, tree_id).await;
-    let membership = read_membership(wallet_core, programs, tree_id, id_commitment)
-        .await
-        .expect("extend: no membership for this id_commitment");
-    let now_ms = read_clock_ms(wallet_core).await;
+    let (config, membership) = tokio::join!(
+        read_config(wallet_core, programs, tree_id),
+        read_membership(wallet_core, programs, tree_id, id_commitment),
+    );
+    let membership = membership.expect("extend: no membership for this id_commitment");
+    let treasury = AccountId::new(config.treasury_account_id);
+    let ((), max_fee) = tokio::join!(
+        require_treasury(wallet_core, treasury, "extend"),
+        assert_can_afford(
+            wallet_core,
+            payer_id,
+            config
+                .price_per_unit
+                .saturating_mul(u128::from(membership.rate_limit)),
+            "extend",
+        ),
+    );
 
-    let shard_selectors = vec![
-        config_selector(programs, tree_id),
-        membership_selector(programs, tree_id, id_commitment),
-        ProgramShardSelector::native_balance(*payer_id),
-        ProgramShardSelector::native_balance(AccountId::new(config.treasury_account_id)),
-        clock_selector(),
-    ];
-
-    let max_fee = assert_can_afford(
-        wallet_core,
-        payer_id,
-        config
-            .price_per_unit
-            .saturating_mul(u128::from(membership.rate_limit)),
-        "extend",
-    )
-    .await;
-
-    let instruction = Instruction::Extend {
-        tree_id: *tree_id,
-        id_commitment: *id_commitment,
-        now_ms,
-        price_per_unit: config.price_per_unit,
-        rate_limit: membership.rate_limit,
+    let now_ms = read_chain_time_ms(wallet_core).await;
+    let plan = TxPlan {
+        message: Message::Extend {
+            tree_id: *tree_id,
+            id_commitment: *id_commitment,
+            payer: *payer_id.value(),
+            now_ms,
+        },
+        accounts: vec![
+            membership_mention(programs, tree_id, id_commitment),
+            config_mention(programs, tree_id),
+            AccountIdentity::Public(*payer_id).balance(),
+            AccountIdentity::PublicNoSign(treasury).balance(),
+        ],
     };
-    let instruction_data =
-        Program::serialize_instruction(instruction).expect("instruction serializes");
     send_metered_tx(
         wallet_core,
-        programs.registration,
-        shard_selectors,
-        payer_id,
-        instruction_data,
+        plan,
+        required_fee_payer("extend"),
         max_fee,
         "Failed to extend membership",
     )
-    .await;
+    .await
 }
 
 /// Erase an expired membership, zeroing its leaf. Any funded account can call
 /// this; a membership not yet expired is refused by the guest.
 pub async fn erase_membership(
-    wallet_core: &WalletCore,
+    wallet_core: &mut Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
     fee_payer_id: &AccountId,
-) {
+) -> common::HashType {
     crate::fr_bytes::bytes_le_to_fr(id_commitment)
         .expect("id_commitment is not a valid BN254 field element");
 
     let config = read_config(wallet_core, programs, tree_id).await;
-    check_merkle_claim(&config, programs);
+    check_merkle_program(&config, programs);
     let membership = read_membership(wallet_core, programs, tree_id, id_commitment)
         .await
         .expect("erase: no membership for this id_commitment");
     let leaf_index = locate_membership_leaf(wallet_core, programs, tree_id, &membership).await;
-    let now_ms = read_clock_ms(wallet_core).await;
-
-    let shard_selectors = vec![
-        config_selector(programs, tree_id),
-        tree_shard_selector(programs, tree_id),
-        membership_selector(programs, tree_id, id_commitment),
-        clock_selector(),
-    ];
 
     // Erase pays no price, only the fee.
     let (max_fee, _) = quoted_fee_reserve(wallet_core, "erase").await;
-    let instruction = Instruction::Erase {
-        tree_id: *tree_id,
-        id_commitment: *id_commitment,
-        merkle_program_id: config.merkle_program_id,
-        leaf_index,
-        rate_limit: membership.rate_limit,
-        now_ms,
+    let now_ms = read_chain_time_ms(wallet_core).await;
+    let plan = TxPlan {
+        message: Message::Erase {
+            tree_id: *tree_id,
+            id_commitment: *id_commitment,
+            leaf_index,
+            now_ms,
+        },
+        accounts: vec![
+            membership_mention(programs, tree_id, id_commitment),
+            config_mention(programs, tree_id),
+            tree_mention(programs, tree_id),
+        ],
     };
-    let instruction_data =
-        Program::serialize_instruction(instruction).expect("instruction serializes");
     send_metered_tx(
         wallet_core,
-        programs.registration,
-        shard_selectors,
-        fee_payer_id,
-        instruction_data,
+        plan,
+        *fee_payer_id,
         max_fee,
         "Failed to erase membership",
     )
-    .await;
+    .await
 }
 
 /// Slash a member by revealing their `identity_secret`, zeroing the leaf and
 /// returning the rate limit to the pool. Any funded account can call this;
 /// the guest checks `id_commitment == Poseidon(identity_secret)`.
 pub async fn slash_membership(
-    wallet_core: &WalletCore,
+    wallet_core: &mut Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     identity_secret: &[u8; 32],
     id_commitment: &[u8; 32],
     fee_payer_id: &AccountId,
-) {
+) -> common::HashType {
     crate::fr_bytes::bytes_le_to_fr(identity_secret)
         .expect("identity_secret is not a valid BN254 field element");
 
     let config = read_config(wallet_core, programs, tree_id).await;
-    check_merkle_claim(&config, programs);
+    check_merkle_program(&config, programs);
     let membership = read_membership(wallet_core, programs, tree_id, id_commitment)
         .await
         .expect("slash: no membership for this id_commitment");
     let leaf_index = locate_membership_leaf(wallet_core, programs, tree_id, &membership).await;
 
-    let shard_selectors = vec![
-        config_selector(programs, tree_id),
-        tree_shard_selector(programs, tree_id),
-        membership_selector(programs, tree_id, id_commitment),
-    ];
-
     let (max_fee, _) = quoted_fee_reserve(wallet_core, "slash").await;
-    let instruction = Instruction::Slash {
-        tree_id: *tree_id,
-        id_commitment: *id_commitment,
-        identity_secret: *identity_secret,
-        merkle_program_id: config.merkle_program_id,
-        leaf_index,
-        rate_limit: membership.rate_limit,
+    let plan = TxPlan {
+        message: Message::Slash {
+            tree_id: *tree_id,
+            id_commitment: *id_commitment,
+            identity_secret: *identity_secret,
+            leaf_index,
+        },
+        accounts: vec![
+            membership_mention(programs, tree_id, id_commitment),
+            config_mention(programs, tree_id),
+            tree_mention(programs, tree_id),
+        ],
     };
-    let instruction_data =
-        Program::serialize_instruction(instruction).expect("instruction serializes");
     send_metered_tx(
         wallet_core,
-        programs.registration,
-        shard_selectors,
-        fee_payer_id,
-        instruction_data,
+        plan,
+        *fee_payer_id,
         max_fee,
         "Failed to slash membership",
     )
-    .await;
+    .await
 }
 
 #[cfg(test)]
@@ -1316,7 +1494,7 @@ mod tests {
             program_first_segment: AccountId::new([1; 32]),
             immutable: true,
         }
-        .to_bytes()
+        .to_loader_actor_state()
     }
 
     #[test]
@@ -1370,18 +1548,5 @@ mod tests {
     #[test]
     fn bytes_that_are_not_a_program_binary_are_refused() {
         assert!(deploy_segment_count(b"garbage").is_err());
-    }
-
-    #[test]
-    fn the_clock_selector_names_the_clock_programs_shard_of_clock_50() {
-        let selector = clock_selector();
-        assert_eq!(
-            *selector.account_id.value(),
-            rln_layouts::CLOCK_50_ACCOUNT_ID_BYTES
-        );
-        assert_eq!(
-            *selector.program_account_id.value(),
-            rln_layouts::clock_program_account_id()
-        );
     }
 }

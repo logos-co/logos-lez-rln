@@ -10,21 +10,21 @@
 //! - `LEZ_RLN_ACTIVE_DURATION_SECS` / `LEZ_RLN_GRACE_PERIOD_DURATION_SECS`: seconds, so extend and
 //!   erase become legal within a few clock ticks.
 //!
-//! `CLOCK_50` moves every 50 blocks, so the two time-gated steps each wait
-//! for the clock to pass a threshold rather than sleeping a fixed time.
+//! Chain time is the head block's timestamp, so the two time-gated steps
+//! each wait for it to pass a threshold rather than sleeping a fixed time.
 
 use std::time::Duration;
 
 use logos_lez_rln::{
     fr_bytes::fr_to_bytes_le,
     merkle_tree::{
-        fetch_tree_shard, find_leaf_index, get_merkle_proof, node_hash, proof_to_circuit,
+        fetch_tree_state, find_leaf_index, get_merkle_proof, node_hash, proof_to_circuit,
     },
     rln::{
         ProgramIds,
         client::{
-            RlnIdentity, create_identity, erase_membership, extend_membership, init_wallet,
-            load_programs, membership_durations, read_clock_ms, read_config, read_membership,
+            RlnIdentity, Wallet, create_identity, erase_membership, extend_membership, init_wallet,
+            load_programs, membership_durations, read_chain_time_ms, read_config, read_membership,
             register_identity, resolve_payer, run_setup, slash_membership,
         },
     },
@@ -32,26 +32,25 @@ use logos_lez_rln::{
 use nssa::AccountId;
 use rln::prelude::{Fr, Hasher, PoseidonHash, RLNWitnessInput, hash_to_field_le};
 use rln_layouts::secs_to_millis;
-use wallet::WalletCore;
 
 const RATE_LIMIT: u64 = 100;
 const ZERO_LEAF: [u8; 32] = [0u8; 32];
 
-/// Poll the clock until it reads at least `threshold_ms`.
-async fn wait_for_clock(wallet: &WalletCore, threshold_ms: u64, what: &str) -> u64 {
+/// Poll chain time until it reads at least `threshold_ms`.
+async fn wait_for_clock(wallet: &Wallet, threshold_ms: u64, what: &str) -> u64 {
     for _ in 0..600 {
-        let now = read_clock_ms(wallet).await;
+        let now = read_chain_time_ms(wallet).await;
         if now >= threshold_ms {
             return now;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    panic!("{what}: CLOCK_50 never reached {threshold_ms}");
+    panic!("{what}: chain time never reached {threshold_ms}");
 }
 
 /// Poll until the membership for `id_commitment` is absent.
 async fn wait_for_membership_gone(
-    wallet: &WalletCore,
+    wallet: &Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     id_commitment: &[u8; 32],
@@ -70,7 +69,7 @@ async fn wait_for_membership_gone(
 }
 
 async fn register(
-    wallet: &mut WalletCore,
+    wallet: &mut Wallet,
     programs: &ProgramIds,
     tree_id: &[u8; 32],
     payer: &AccountId,
@@ -89,7 +88,7 @@ async fn register(
     (identity, leaf_index)
 }
 
-async fn native_balance(wallet: &WalletCore, id: &AccountId) -> u128 {
+async fn native_balance(wallet: &Wallet, id: &AccountId) -> u128 {
     wallet.get_account_balance(*id).await.expect("balance read")
 }
 
@@ -148,7 +147,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     assert_eq!(membership_a.rate_limit, RATE_LIMIT);
     assert_eq!(
         find_leaf_index(
-            &fetch_tree_shard(&wallet, &programs, &tree_id).await,
+            &fetch_tree_state(&wallet, &programs, &tree_id).await,
             &member_a.leaf_bytes
         ),
         Some(leaf_a)
@@ -184,7 +183,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let next_index = leaf_c + 1;
     assert_eq!(
         register_identity(
-            &wallet,
+            &mut wallet,
             &programs,
             &tree_id,
             &member_a.id_commitment_bytes,
@@ -205,7 +204,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     );
     assert_eq!(
         find_leaf_index(
-            &fetch_tree_shard(&wallet, &programs, &tree_id).await,
+            &fetch_tree_state(&wallet, &programs, &tree_id).await,
             &member_a.leaf_bytes
         ),
         Some(leaf_a)
@@ -214,7 +213,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     // ── slash C by revealing its secret; C may then register again ────
     let secret_c = fr_to_bytes_le(&member_c.identity_secret);
     slash_membership(
-        &wallet,
+        &mut wallet,
         &programs,
         &tree_id,
         &secret_c,
@@ -233,14 +232,14 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let config = read_config(&wallet, &programs, &tree_id).await;
     assert_eq!(config.total_registrations, 2);
     assert_eq!(config.current_total_rate_limit, 2 * RATE_LIMIT);
-    let shard = fetch_tree_shard(&wallet, &programs, &tree_id).await;
+    let tree = fetch_tree_state(&wallet, &programs, &tree_id).await;
     assert_eq!(
-        node_hash(&shard, rln_layouts::TREE_DEPTH, leaf_c),
+        node_hash(&tree, rln_layouts::TREE_DEPTH, leaf_c),
         ZERO_LEAF,
         "a slashed leaf is zeroed"
     );
     let leaf_c_again = register_identity(
-        &wallet,
+        &mut wallet,
         &programs,
         &tree_id,
         &member_c.id_commitment_bytes,
@@ -259,7 +258,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     wait_for_clock(&wallet, start_a, "extend").await;
     let treasury_before = native_balance(&wallet, &treasury).await;
     extend_membership(
-        &wallet,
+        &mut wallet,
         &programs,
         &tree_id,
         &member_a.id_commitment_bytes,
@@ -298,7 +297,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let expiry_b = membership_b.grace_period_start_timestamp_ms + secs_to_millis(grace_sec);
     wait_for_clock(&wallet, expiry_b, "erase").await;
     erase_membership(
-        &wallet,
+        &mut wallet,
         &programs,
         &tree_id,
         &member_b.id_commitment_bytes,
@@ -316,13 +315,10 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     let config = read_config(&wallet, &programs, &tree_id).await;
     assert_eq!(config.total_registrations, 2);
     assert_eq!(config.current_total_rate_limit, 2 * RATE_LIMIT);
-    let shard = fetch_tree_shard(&wallet, &programs, &tree_id).await;
+    let tree = fetch_tree_state(&wallet, &programs, &tree_id).await;
+    assert_eq!(node_hash(&tree, rln_layouts::TREE_DEPTH, leaf_b), ZERO_LEAF);
     assert_eq!(
-        node_hash(&shard, rln_layouts::TREE_DEPTH, leaf_b),
-        ZERO_LEAF
-    );
-    assert_eq!(
-        node_hash(&shard, rln_layouts::TREE_DEPTH, leaf_a),
+        node_hash(&tree, rln_layouts::TREE_DEPTH, leaf_a),
         member_a.leaf_bytes,
         "erasing B leaves A's leaf alone"
     );
