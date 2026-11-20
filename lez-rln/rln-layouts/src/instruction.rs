@@ -49,9 +49,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::MembershipState;
 
 /// Messages of the registration program.
-#[derive(
-    Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq,
-)]
+#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     // ── entry: sent to the config actor ──────────────────────────────────
     /// Write the registry's config. One-shot: refused on a non-empty state.
@@ -143,9 +141,7 @@ pub enum Message {
 
 /// Messages of the incremental merkle tree program, sent by the registration
 /// program's config actor to the tree's main PDA (and, in tests, directly).
-#[derive(
-    Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq,
-)]
+#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub enum MerkleMessage {
     /// Empty tree. Refused on a non-empty state.
     Initialize,

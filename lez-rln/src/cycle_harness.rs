@@ -264,9 +264,9 @@ mod tests {
         let mut secret = [0u8; 32];
         secret[0] = 0x42;
         let secret_fr = crate::fr_bytes::bytes_le_to_fr(&secret).expect("valid secret");
-        let idc = crate::fr_bytes::fr_to_bytes_le(
-            &rln::prelude::Hasher::<rln::prelude::PoseidonHash>::hash_single(secret_fr),
-        );
+        let idc = crate::fr_bytes::fr_to_bytes_le(&rln::prelude::Hasher::<
+            rln::prelude::PoseidonHash,
+        >::hash_single(secret_fr));
         register(&mut setup, idc, 100);
         let tx = slash_tx(&setup.state, slash_msg(&setup.state, secret, idc));
         let log = measure("Slash (incl. merkle Remove)", &setup, &tx);

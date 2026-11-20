@@ -76,6 +76,9 @@ mod tests {
             combine_seeds(&[&label_seed("membership"), &tree_id, &[1; 32]])
         );
         assert_ne!(config_seed(&tree_id), main_seed(&tree_id));
-        assert_ne!(membership_seed(&tree_id, &[1; 32]), membership_seed(&tree_id, &[2; 32]));
+        assert_ne!(
+            membership_seed(&tree_id, &[1; 32]),
+            membership_seed(&tree_id, &[2; 32])
+        );
     }
 }

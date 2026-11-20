@@ -12,7 +12,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use nssa::{AccountId, Actor, program::Program};
-use nssa_core::program::{MAX_PROGRAM_SEGMENTS, MessageData, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramId};
+use nssa_core::program::{
+    MAX_PROGRAM_SEGMENTS, MessageData, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramId,
+};
 use program_loader_core::{MAX_SEGMENT_DATA_LEN, ProgramHeader};
 use rand_chacha::ChaCha20Rng;
 use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
@@ -21,8 +23,7 @@ use sequencer_service_protocol::FeeStateQuote;
 use wallet::{
     AccountIdentity, AccountMention, FeeParams, WalletCore,
     program_facades::{
-        CreditDelivery, native_token_transfer::NativeTokenTransfer,
-        program_loader::ProgramLoader,
+        CreditDelivery, native_token_transfer::NativeTokenTransfer, program_loader::ProgramLoader,
     },
 };
 
@@ -904,11 +905,7 @@ pub async fn run_setup(
         wallet_core,
         vec![
             config_mention(),
-            pda_mention(
-                programs.registration,
-                main_seed(tree_id),
-                programs.merkle,
-            ),
+            pda_mention(programs.registration, main_seed(tree_id), programs.merkle),
         ],
         Message::InitializeMerkleTree { tree_id: *tree_id },
         "InitializeMerkleTree",
@@ -1242,8 +1239,11 @@ pub async fn register_identity(
     // effect), so the block is the signal: once the transaction is in one,
     // the leaf is either there or never will be.
     let outcome = await_outcome(wallet_core, hash, async || {
-        find_leaf_index(&fetch_tree_state(wallet_core, programs, tree_id).await, &leaf)
-            .filter(|&index| already_at.is_none_or(|old| index > old))
+        find_leaf_index(
+            &fetch_tree_state(wallet_core, programs, tree_id).await,
+            &leaf,
+        )
+        .filter(|&index| already_at.is_none_or(|old| index > old))
     })
     .await;
     match outcome {

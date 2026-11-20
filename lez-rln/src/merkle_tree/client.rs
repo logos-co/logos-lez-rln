@@ -22,7 +22,10 @@ use super::{
     OFFSET_CACHED_NODES, OFFSET_DEPTH, OFFSET_NEXT_INDEX, OFFSET_ROOT, OFFSET_ROOT_HISTORY,
     OFFSET_TREE_DATA, ROOT_HISTORY_SIZE, TREE_DEPTH, TREE_LEAVES, derive_main_account,
 };
-use crate::{fr_bytes::bytes_le_to_fr, rln::ProgramIds, rln::client::Wallet};
+use crate::{
+    fr_bytes::bytes_le_to_fr,
+    rln::{ProgramIds, client::Wallet},
+};
 
 // ============================================================================
 // Parsed Tree State

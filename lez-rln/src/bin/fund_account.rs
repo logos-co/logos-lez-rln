@@ -29,8 +29,7 @@
 //! account that cannot transact.
 
 use logos_lez_rln::rln::client::{
-    TxOutcome, await_outcome, init_wallet, parse_account_id, resolve_payer,
-    wait_account_attempts,
+    TxOutcome, await_outcome, init_wallet, parse_account_id, resolve_payer, wait_account_attempts,
 };
 use nssa::AccountId;
 use wallet::{

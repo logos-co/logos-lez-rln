@@ -62,7 +62,10 @@ fn require_receiver(input: &ReceiveInput, seed: [u8; 32], what: &str) {
 
 /// The message came from `actor`, one of this program's own.
 fn require_from(input: &ReceiveInput, actor: Actor, what: &str, who: &str) {
-    assert!(input.from == Some(actor), "{what} may only be sent by {who}");
+    assert!(
+        input.from == Some(actor),
+        "{what} may only be sent by {who}"
+    );
 }
 
 fn encode<T: BorshSerialize>(value: &T) -> Vec<u8> {
@@ -77,7 +80,11 @@ fn decode_config(pre_state: &[u8]) -> ConfigState {
 /// An empty state means the membership was slashed or erased since the
 /// caller read it: a stale view, not a malformed transaction.
 fn decode_membership(pre_state: &[u8], empty_msg: &str) -> MembershipState {
-    ensure!(!pre_state.is_empty(), EXIT_MEMBERSHIP_MISSING, "{empty_msg}");
+    ensure!(
+        !pre_state.is_empty(),
+        EXIT_MEMBERSHIP_MISSING,
+        "{empty_msg}"
+    );
     MembershipState::try_from_slice(pre_state).expect("decode MembershipState")
 }
 
@@ -483,7 +490,10 @@ mod tests {
 
     fn membership_actor(id_commitment: &[u8; 32]) -> Actor {
         Actor::new(
-            pda(&registration_program(), membership_seed(&TREE_ID, id_commitment)),
+            pda(
+                &registration_program(),
+                membership_seed(&TREE_ID, id_commitment),
+            ),
             registration_program(),
         )
     }
@@ -636,7 +646,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "config already exists")]
     fn initialize_refuses_a_replay() {
-        let _ = handle_message(&receive(config_actor(), None, &config_state()), initialize());
+        let _ = handle_message(
+            &receive(config_actor(), None, &config_state()),
+            initialize(),
+        );
     }
 
     fn initialize_with(min_rate_limit: u64, max_rate_limit: u64) -> Message {
@@ -709,7 +722,10 @@ mod tests {
 
     #[test]
     fn register_counts_pays_inits_the_membership_then_inserts() {
-        let response = handle_message(&receive(config_actor(), None, &config_state()), register(RATE));
+        let response = handle_message(
+            &receive(config_actor(), None, &config_state()),
+            register(RATE),
+        );
 
         let mut expected = config_state();
         expected.total_registrations += 1;
@@ -849,7 +865,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "InitMembership may only be sent by the tree's config")]
     fn init_membership_refuses_a_root_message() {
-        let _ = handle_message(&empty(membership_actor(&commitment()), None), init_membership());
+        let _ = handle_message(
+            &empty(membership_actor(&commitment()), None),
+            init_membership(),
+        );
     }
 
     #[test]
@@ -975,7 +994,11 @@ mod tests {
     fn release_uncounts_and_removes_the_leaf() {
         let idc = commitment();
         let response = handle_message(
-            &receive(config_actor(), Some(membership_actor(&idc)), &config_state()),
+            &receive(
+                config_actor(),
+                Some(membership_actor(&idc)),
+                &config_state(),
+            ),
             release(idc),
         );
         let mut expected = config_state();
@@ -995,7 +1018,11 @@ mod tests {
     #[should_panic(expected = "Release may only be sent by the member's own membership")]
     fn release_refuses_another_membership() {
         let _ = handle_message(
-            &receive(config_actor(), Some(membership_actor(&[9; 32])), &config_state()),
+            &receive(
+                config_actor(),
+                Some(membership_actor(&[9; 32])),
+                &config_state(),
+            ),
             release(commitment()),
         );
     }
@@ -1066,7 +1093,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "exit 15: Membership account is empty")]
     fn extend_refuses_a_missing_membership() {
-        let _ = handle_message(&empty(membership_actor(&commitment()), None), extend(NOW_MS));
+        let _ = handle_message(
+            &empty(membership_actor(&commitment()), None),
+            extend(NOW_MS),
+        );
     }
 
     fn charge_renewal() -> Message {

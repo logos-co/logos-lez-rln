@@ -23,9 +23,9 @@ use logos_lez_rln::{
     rln::{
         ProgramIds,
         client::{
-            RlnIdentity, Wallet, create_identity, erase_membership, extend_membership,
-            init_wallet, load_programs, membership_durations, read_chain_time_ms, read_config,
-            read_membership, register_identity, resolve_payer, run_setup, slash_membership,
+            RlnIdentity, Wallet, create_identity, erase_membership, extend_membership, init_wallet,
+            load_programs, membership_durations, read_chain_time_ms, read_config, read_membership,
+            register_identity, resolve_payer, run_setup, slash_membership,
         },
     },
 };
@@ -316,10 +316,7 @@ async fn registry_lifecycle_on_a_live_sequencer() {
     assert_eq!(config.total_registrations, 2);
     assert_eq!(config.current_total_rate_limit, 2 * RATE_LIMIT);
     let tree = fetch_tree_state(&wallet, &programs, &tree_id).await;
-    assert_eq!(
-        node_hash(&tree, rln_layouts::TREE_DEPTH, leaf_b),
-        ZERO_LEAF
-    );
+    assert_eq!(node_hash(&tree, rln_layouts::TREE_DEPTH, leaf_b), ZERO_LEAF);
     assert_eq!(
         node_hash(&tree, rln_layouts::TREE_DEPTH, leaf_a),
         member_a.leaf_bytes,

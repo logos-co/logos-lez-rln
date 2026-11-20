@@ -28,7 +28,7 @@ pub mod state;
 pub use state::{ConfigState, MembershipState};
 
 pub mod instruction;
-pub use instruction::{Message, MerkleMessage};
+pub use instruction::{MerkleMessage, Message};
 
 pub mod exit;
 

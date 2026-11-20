@@ -12,8 +12,8 @@
 
 use logos_lez_rln::rln::{
     client::{
-        init_wallet, load_programs, public_key_of, resolve_payer, run_setup,
-        save_payment_account, tree_id_from_env,
+        init_wallet, load_programs, public_key_of, resolve_payer, run_setup, save_payment_account,
+        tree_id_from_env,
     },
     derive_config_account, derive_tree_main_account,
     program_ids::hex_id,

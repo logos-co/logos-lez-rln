@@ -38,7 +38,6 @@ pub const MEMBERSHIP_OFFSET_ACTIVE_DURATION: usize = 48;
 pub const MEMBERSHIP_OFFSET_GRACE_PERIOD_DURATION: usize = 52;
 pub const MEMBERSHIP_SIZE: usize = rln_layouts::state::MEMBERSHIP_STATE_SIZE;
 
-
 #[cfg(test)]
 mod tests {
     use rln_layouts::{ConfigState, MembershipState};

@@ -2,9 +2,9 @@
 
 use lee_core::program::Response;
 
+use crate::hash::{hash_pair, validate_field_element};
 // Re-export expiration constants / helpers from shared crate
 pub use crate::layouts::{CLOCK_CLAIM_TOLERANCE_MS, is_expired, is_in_grace_period};
-use crate::hash::{hash_pair, validate_field_element};
 
 /// Price of a membership at `rate_limit`, in native atomic units.
 ///

@@ -371,7 +371,9 @@ pub(crate) mod fixtures {
             grace_period_duration_sec,
         )?;
         let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        setup.apply(&tx).expect("InitializeMerkleTree should succeed");
+        setup
+            .apply(&tx)
+            .expect("InitializeMerkleTree should succeed");
         Some(setup)
     }
 
@@ -392,7 +394,9 @@ pub(crate) mod fixtures {
             (min_rate_limit, max_rate_limit),
         )?;
         let tx = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        setup.apply(&tx).expect("InitializeMerkleTree should succeed");
+        setup
+            .apply(&tx)
+            .expect("InitializeMerkleTree should succeed");
         Some(setup)
     }
 
@@ -459,7 +463,11 @@ pub(crate) mod fixtures {
     }
 
     /// `Slash` with the leaf index found by scanning, as the host does.
-    pub fn slash_msg(state: &V03State, identity_secret: [u8; 32], id_commitment: [u8; 32]) -> Message {
+    pub fn slash_msg(
+        state: &V03State,
+        identity_secret: [u8; 32],
+        id_commitment: [u8; 32],
+    ) -> Message {
         Message::Slash {
             tree_id: TREE_ID,
             id_commitment,
@@ -502,11 +510,7 @@ pub(crate) mod fixtures {
     }
 
     /// Renewal is paid, so `payer_key` signs and is debited.
-    pub fn extend_tx(
-        setup: &TestSetup,
-        payer_key: &PrivateKey,
-        msg: Message,
-    ) -> PublicTransaction {
+    pub fn extend_tx(setup: &TestSetup, payer_key: &PrivateKey, msg: Message) -> PublicTransaction {
         let Message::Extend {
             tree_id,
             id_commitment,
@@ -598,8 +602,8 @@ mod tests {
         rln::{
             CONFIG_OFFSET_ACTIVE_DURATION, CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT,
             CONFIG_OFFSET_GRACE_PERIOD_DURATION, CONFIG_OFFSET_MAX_RATE_LIMIT,
-            CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT, CONFIG_OFFSET_MIN_RATE_LIMIT,
-            CONFIG_OFFSET_MERKLE_PROGRAM_ID, CONFIG_OFFSET_PRICE_PER_UNIT,
+            CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT, CONFIG_OFFSET_MERKLE_PROGRAM_ID,
+            CONFIG_OFFSET_MIN_RATE_LIMIT, CONFIG_OFFSET_PRICE_PER_UNIT,
             CONFIG_OFFSET_TOTAL_REGISTRATIONS, CONFIG_OFFSET_TREASURY_ACCOUNT_ID,
             CONFIG_OFFSET_TREE_ID, CONFIG_SIZE, MEMBERSHIP_SIZE, TREE_DEPTH,
             client::registration_leaf, derive_config_account, derive_membership_account,
@@ -940,7 +944,9 @@ mod tests {
 
         // Positive control: the configured program is accepted.
         let honest = init_tree_tx(&setup.state, &TREE_ID, MERKLE_ID);
-        setup.apply(&honest).expect("the configured merkle program is accepted");
+        setup
+            .apply(&honest)
+            .expect("the configured merkle program is accepted");
         assert_eq!(tree_header(&setup.state).next_index, 0);
     }
 
@@ -1123,7 +1129,12 @@ mod tests {
     }
 
     /// A registration that fails for any reason leaves no trace.
-    fn assert_register_refused(setup: &mut TestSetup, tx: &PublicTransaction, idc: &[u8; 32], what: &str) {
+    fn assert_register_refused(
+        setup: &mut TestSetup,
+        tx: &PublicTransaction,
+        idc: &[u8; 32],
+        what: &str,
+    ) {
         let payer_before = native_balance(&setup.state, &setup.payer_id);
         let tree_before = tree_state(&setup.state);
         let config_before = config_bytes(&setup.state);
@@ -1177,7 +1188,9 @@ mod tests {
         let tx_b = register_tx_to(&setup.state, &key_b, &setup.treasury_id, MERKLE_ID, msg_b);
 
         setup.apply(&tx_a).expect("first registration of the block");
-        setup.apply(&tx_b).expect("second registration, built from the same state");
+        setup
+            .apply(&tx_b)
+            .expect("second registration, built from the same state");
 
         let tree = tree_state(&setup.state);
         assert_eq!(tree_header(&setup.state).next_index, 2);
@@ -1242,7 +1255,9 @@ mod tests {
         let read_at = setup.now_ms;
         let tx = register_tx(&setup, register_msg(&setup, idc, 300));
         setup.now_ms = read_at + 750_000;
-        setup.apply(&tx).expect("a claim twelve minutes behind the block is accepted");
+        setup
+            .apply(&tx)
+            .expect("a claim twelve minutes behind the block is accepted");
         assert_eq!(
             membership(&setup.state, &idc)
                 .unwrap()
@@ -1257,7 +1272,9 @@ mod tests {
         let read_at = setup.now_ms;
         let tx = register_tx(&setup, register_msg(&setup, idc, 300));
         setup.now_ms = read_at + CLOCK_CLAIM_TOLERANCE_MS - 1;
-        setup.apply(&tx).expect("a claim just inside the tolerance is accepted");
+        setup
+            .apply(&tx)
+            .expect("a claim just inside the tolerance is accepted");
     }
 
     /// A `now_ms` ahead of the block, or further behind it than the
@@ -1270,8 +1287,14 @@ mod tests {
         let block = setup.now_ms;
         for (what, claim) in [
             ("1 ms ahead of the block", block + 1),
-            ("exactly the tolerance behind", block - CLOCK_CLAIM_TOLERANCE_MS),
-            ("a future that would lengthen the membership", block + ACTIVE_MS),
+            (
+                "exactly the tolerance behind",
+                block - CLOCK_CLAIM_TOLERANCE_MS,
+            ),
+            (
+                "a future that would lengthen the membership",
+                block + ACTIVE_MS,
+            ),
         ] {
             let msg = with_field!(register_msg(&setup, idc, 300), Register { now_ms: claim });
             let tx = register_tx(&setup, msg);
@@ -1392,7 +1415,11 @@ mod tests {
             Slash { leaf_index: 0 }
         );
         let tx = slash_tx(&setup.state, msg);
-        assert_exit(setup.apply(&tx), EXIT_LEAF_MISMATCH, "another member's leaf");
+        assert_exit(
+            setup.apply(&tx),
+            EXIT_LEAF_MISMATCH,
+            "another member's leaf",
+        );
         assert_eq!(tree_state(&setup.state), tree_before, "tree untouched");
         assert!(membership(&setup.state, &idc).is_some(), "membership kept");
     }
@@ -1463,10 +1490,7 @@ mod tests {
             ),
             (
                 "erase at A's index",
-                erase_tx(
-                    &setup.state,
-                    with_field!(erase_b, Erase { leaf_index: 0 }),
-                ),
+                erase_tx(&setup.state, with_field!(erase_b, Erase { leaf_index: 0 })),
             ),
         ];
         for (what, tx) in bad {
@@ -1557,7 +1581,10 @@ mod tests {
         assert_eq!(config(&setup.state).current_total_rate_limit, 120);
 
         for (seed, rate) in [(0x03, 19), (0x04, 101)] {
-            let tx = register_tx(&setup, register_msg(&setup, valid_field_element(seed), rate));
+            let tx = register_tx(
+                &setup,
+                register_msg(&setup, valid_field_element(seed), rate),
+            );
             assert!(
                 setup.apply(&tx).is_err(),
                 "a registration at {rate} outside 20..=100 must fail"
@@ -1712,10 +1739,7 @@ mod tests {
 
         let idc = valid_field_element(0x42);
         let tx = register_tx(&setup, register_msg(&setup, idc, 300));
-        assert!(
-            setup.apply(&tx).is_err(),
-            "one unit short must be refused"
-        );
+        assert!(setup.apply(&tx).is_err(), "one unit short must be refused");
         assert_eq!(native_balance(&setup.state, &payer_id), price - 1);
         assert!(membership(&setup.state, &idc).is_none());
 
@@ -1821,7 +1845,11 @@ mod tests {
 
         let malformed = register_tx(
             &setup,
-            register_msg(&setup, valid_field_element(0x43), DEFAULT_MAX_RATE_LIMIT + 1),
+            register_msg(
+                &setup,
+                valid_field_element(0x43),
+                DEFAULT_MAX_RATE_LIMIT + 1,
+            ),
         );
         let (err, charged) = failure_and_charge(&setup, &malformed);
         assert!(
@@ -2311,7 +2339,11 @@ mod tests {
         let tree_before = tree_state(&setup.state);
         let msg = with_field!(erase_msg(&setup, idc), Erase { leaf_index: 0 });
         let tx = erase_tx(&setup.state, msg);
-        assert_exit(setup.apply(&tx), EXIT_LEAF_MISMATCH, "another member's leaf");
+        assert_exit(
+            setup.apply(&tx),
+            EXIT_LEAF_MISMATCH,
+            "another member's leaf",
+        );
         assert_eq!(tree_state(&setup.state), tree_before, "tree untouched");
         assert!(membership(&setup.state, &idc).is_some(), "membership kept");
     }

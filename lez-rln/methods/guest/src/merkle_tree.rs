@@ -386,7 +386,10 @@ mod tests {
     fn handle(is_authorized: bool, pre: &[u8], msg: MerkleMessage) -> Vec<u8> {
         let response = handle_message(&receive(is_authorized, pre, &msg), msg);
         assert!(response.sync_messages.is_empty() && response.async_messages.is_empty());
-        response.post_state.expect("every message rewrites the tree").into_inner()
+        response
+            .post_state
+            .expect("every message rewrites the tree")
+            .into_inner()
     }
 
     #[test]
