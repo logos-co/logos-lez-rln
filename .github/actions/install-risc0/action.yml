@@ -1,10 +1,24 @@
 name: Install risc0
-description: Installs risc0 in the environment
+description: >
+  Installs the risc0 the guest programs are built with: cargo-risczero and r0vm at the
+  version lez-rln/Cargo.toml pins risc0-zkvm to, and the risc0 Rust toolchain the guest's
+  Cargo.lock is held back for.
+
+inputs:
+  risc0-version:
+    description: cargo-risczero and r0vm.
+    default: 3.0.5
+  risc0-rust-version:
+    description: The risc0 Rust toolchain the guest builds with.
+    default: 1.88.0
+
 runs:
   using: "composite"
   steps:
     - name: Install risc0
       run: |
         curl -L https://risczero.com/install | bash
-        /home/runner/.risc0/bin/rzup install
+        /home/runner/.risc0/bin/rzup install cargo-risczero ${{ inputs.risc0-version }}
+        /home/runner/.risc0/bin/rzup install r0vm ${{ inputs.risc0-version }}
+        /home/runner/.risc0/bin/rzup install rust ${{ inputs.risc0-rust-version }}
       shell: bash
