@@ -35,6 +35,11 @@ To provision one against the new program:
 bash tools/deployments/provision.sh --name <name> --payer <account-id>
 ```
 
+A registry belongs to the account that signs its `Initialize`, and its tree id
+follows from that account and a label, so newer descriptors also name
+`owner_account` and `tree_label`. To fix a deployment's ids before its chain
+exists, see `plan.sh` and `deploy.sh` in the tooling README.
+
 `--payer` must already hold native balance. No program can mint native, so it
 arrives at genesis, over the L1 bridge, or by transfer from something already
 funded.

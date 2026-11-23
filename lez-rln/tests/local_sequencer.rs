@@ -1,6 +1,9 @@
 //! The registry's whole lifecycle against a LIVE sequencer: deploy, init,
 //! register, prove, a refused duplicate, slash, extend, erase.
 //!
+//! The registry is the payer's own, under a label drawn for the run: the
+//! tree id is what the program makes of the two.
+//!
 //! Skipped unless `LEZ_RLN_LOCAL_SEQUENCER` is set. `tools/e2e-local.sh`
 //! boots a sequencer with `dev.sh`, funds a payer at genesis and runs this
 //! with the environment it needs:
@@ -23,15 +26,16 @@ use logos_lez_rln::{
     rln::{
         ProgramIds,
         client::{
-            RlnIdentity, Wallet, create_identity, erase_membership, extend_membership, init_wallet,
-            load_programs, membership_durations, read_chain_time_ms, read_config, read_membership,
-            register_identity, resolve_payer, run_setup, slash_membership,
+            RegistryParams, RlnIdentity, Wallet, create_identity, erase_membership,
+            extend_membership, init_wallet, load_programs, membership_durations,
+            read_chain_time_ms, read_config, read_membership, register_identity, resolve_payer,
+            run_setup, slash_membership,
         },
     },
 };
 use nssa::AccountId;
 use rln::prelude::{Fr, Hasher, PoseidonHash, RLNWitnessInput, hash_to_field_le};
-use rln_layouts::secs_to_millis;
+use rln_layouts::{owner_tree_id, secs_to_millis};
 
 const RATE_LIMIT: u64 = 100;
 const ZERO_LEAF: [u8; 32] = [0u8; 32];
@@ -105,20 +109,24 @@ async fn registry_lifecycle_on_a_live_sequencer() {
          or extend and erase cannot be exercised in one run"
     );
 
-    let mut tree_id = [0u8; 32];
-    tree_id.copy_from_slice(&rand_bytes());
+    let tree_label = rand_bytes();
     let mut wallet = init_wallet().await;
     let (registration_program, merkle_program) = load_programs();
     let payer = resolve_payer();
 
     // ── deploy + init ─────────────────────────────────────────────────
-    let programs = run_setup(
+    let registry = run_setup(
         &mut wallet,
         &registration_program,
         &merkle_program,
-        &tree_id,
+        &tree_label,
+        &RegistryParams::from_env(),
+        None,
     )
     .await;
+    let (programs, tree_id) = (registry.programs, registry.tree_id);
+    assert_eq!(registry.owner, payer);
+    assert_eq!(tree_id, owner_tree_id(payer.value(), &tree_label));
     let config = read_config(&wallet, &programs, &tree_id).await;
     assert_eq!(config.tree_id, tree_id);
     assert_eq!(config.merkle_program_id, *programs.merkle.value());

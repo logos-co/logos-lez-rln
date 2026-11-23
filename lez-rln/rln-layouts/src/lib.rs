@@ -22,7 +22,9 @@ pub mod sparse;
 pub use sparse::{node_offset, read_sparse_node};
 
 pub mod spel_pda;
-pub use spel_pda::{combine_seeds, config_seed, label_seed, main_seed, membership_seed, u32_seed};
+pub use spel_pda::{
+    combine_seeds, config_seed, label_seed, main_seed, membership_seed, owner_tree_id, u32_seed,
+};
 
 pub mod state;
 pub use state::{ConfigState, MembershipState};

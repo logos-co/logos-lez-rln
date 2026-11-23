@@ -4,6 +4,8 @@
 
 pub mod client;
 pub mod constants;
+pub mod deploy_keys;
+pub mod deploy_plan;
 pub mod layouts;
 pub mod pda;
 pub mod program_ids;

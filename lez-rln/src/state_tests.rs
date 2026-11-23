@@ -6,7 +6,9 @@
 //!
 //! The programs sit at fixed header accounts (`REG_ID`, `MERKLE_ID`), seeded
 //! with `V03State::with_named_programs` the way a deployer's `CreateHeader`
-//! would place them; every PDA hangs off `REG_ID`. A transaction sends one
+//! would place them; every PDA hangs off `REG_ID`. The registry belongs to
+//! `owner()`, who signs `Initialize` at its own account, and `TREE_ID` is
+//! what the program makes of that account and `TREE_LABEL`. A transaction sends one
 //! message to one actor and declares every actor the program will touch; an
 //! actor that does not exist yet is admitted by the PDA seed it is derived
 //! from, as the host client does. Chain time is the block timestamp a
@@ -53,11 +55,16 @@ pub(crate) mod fixtures {
     /// which messages only the program it stores.
     pub const ROGUE_MERKLE_ID: AccountId = AccountId::new([0xC3; 32]);
 
-    /// Test tree ID (first 24 bytes carry data, last 8 zero).
+    /// The label the owner names its registry by: "state-tests", zero-padded.
+    pub const TREE_LABEL: [u8; 32] = *b"state-tests\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+    /// The tree `owner()` creates under `TREE_LABEL`:
+    /// `owner_tree_id(owner, TREE_LABEL)`, written out so every fixture can
+    /// name it as a constant (`the_test_tree_is_the_owners`).
     pub const TREE_ID: [u8; 32] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00,
+        0xdb, 0x45, 0x1b, 0x57, 0xab, 0x3f, 0x5f, 0xf8, 0xee, 0x1d, 0xc2, 0x14, 0x9a, 0xba, 0x8d,
+        0x5e, 0x54, 0x3c, 0xd8, 0x2b, 0x1d, 0xd5, 0x9c, 0x00, 0x4c, 0x79, 0xc0, 0x19, 0x45, 0xd9,
+        0xa3, 0xd2,
     ];
 
     pub const PRICE_PER_UNIT: u128 = 10_000;
@@ -124,6 +131,18 @@ pub(crate) mod fixtures {
         let key = PrivateKey::try_new(bytes).unwrap();
         let id = AccountId::from(&PublicKey::new_from_private_key(&key));
         (key, id)
+    }
+
+    /// The registry's owner: signs `Initialize`, and its account is half of
+    /// what `TREE_ID` is made of.
+    pub fn owner() -> (PrivateKey, AccountId) {
+        keypair(3)
+    }
+
+    /// The registration program at `account`: where a signed `Initialize`
+    /// enters.
+    pub fn owner_actor(account: &AccountId) -> Actor {
+        Actor::new(*account, REG_ID)
     }
 
     /// A funded wallet account: a native balance and nothing else. No program
@@ -247,31 +266,67 @@ pub(crate) mod fixtures {
         PublicTransaction::new(message, witness)
     }
 
+    /// `Initialize` with `TREE_LABEL`, every knob given.
+    pub fn initialize_msg(
+        treasury_id: &AccountId,
+        max_total_rate_limit: u64,
+        active_duration_sec: u32,
+        grace_period_duration_sec: u32,
+        (min_rate_limit, max_rate_limit): (u64, u64),
+    ) -> Message {
+        Message::Initialize {
+            merkle_program_id: *MERKLE_ID.value(),
+            tree_label: TREE_LABEL,
+            price_per_unit: PRICE_PER_UNIT,
+            treasury_account_id: *treasury_id.value(),
+            max_total_rate_limit,
+            active_duration_for_new_memberships_sec: active_duration_sec,
+            grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
+            min_rate_limit,
+            max_rate_limit,
+        }
+    }
+
+    /// `message` sent the way the host sends `Initialize`: to the program at
+    /// the account of `signer`, which signs, declaring the config of
+    /// `tree_id` with the evidence that admits it.
+    pub fn signed_init_tx(
+        state: &V03State,
+        signer: &PrivateKey,
+        tree_id: &[u8; 32],
+        message: Message,
+    ) -> PublicTransaction {
+        let account = AccountId::from(&PublicKey::new_from_private_key(signer));
+        public_tx(
+            state,
+            owner_actor(&account),
+            vec![owner_actor(&account), config_actor(tree_id)],
+            vec![pda_evidence(config_seed(tree_id))],
+            message,
+            &[signer],
+        )
+    }
+
     pub fn init_config_tx(
         state: &V03State,
         treasury_id: &AccountId,
         max_total_rate_limit: u64,
         active_duration_sec: u32,
         grace_period_duration_sec: u32,
-        (min_rate_limit, max_rate_limit): (u64, u64),
+        bounds: (u64, u64),
     ) -> PublicTransaction {
-        public_tx(
+        let (owner_key, _) = owner();
+        signed_init_tx(
             state,
-            config_actor(&TREE_ID),
-            vec![config_actor(&TREE_ID)],
-            vec![pda_evidence(config_seed(&TREE_ID))],
-            Message::Initialize {
-                merkle_program_id: *MERKLE_ID.value(),
-                tree_id: TREE_ID,
-                price_per_unit: PRICE_PER_UNIT,
-                treasury_account_id: *treasury_id.value(),
+            &owner_key,
+            &TREE_ID,
+            initialize_msg(
+                treasury_id,
                 max_total_rate_limit,
-                active_duration_for_new_memberships_sec: active_duration_sec,
-                grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
-                min_rate_limit,
-                max_rate_limit,
-            },
-            &[],
+                active_duration_sec,
+                grace_period_duration_sec,
+                bounds,
+            ),
         )
     }
 
@@ -591,8 +646,9 @@ mod tests {
     };
     use rln_layouts::{
         CLOCK_CLAIM_TOLERANCE_MS, MerkleMessage, Message, OFFSET_NEXT_INDEX, OFFSET_TREE_DATA,
-        SPARSE_ENTRY_LEN, TREE_LEAVES, TREE_SHARD_MAX_BYTES,
+        SPARSE_ENTRY_LEN, TREE_LEAVES, TREE_SHARD_MAX_BYTES, config_seed,
         exit::{EXIT_LEAF_MISMATCH, EXIT_MEMBERSHIP_EXISTS, EXIT_TREE_FULL, exit_code_name},
+        label_seed, owner_tree_id,
     };
 
     use super::fixtures::*;
@@ -873,39 +929,182 @@ mod tests {
         assert_eq!(config_bytes(&setup.state), config_before);
     }
 
-    /// A config PDA does not exist before `Initialize` writes it, so the
-    /// transaction has to admit it by its seed; without that it is refused
-    /// before the guest runs.
+    /// `TREE_ID` is written out as a constant; this is what it stands for.
     #[test]
-    fn initialize_needs_evidence_for_the_new_config_pda() {
+    fn the_test_tree_is_the_owners() {
+        let (_, owner_id) = owner();
+        assert_eq!(TREE_LABEL, label_seed("state-tests"));
+        assert_eq!(TREE_ID, owner_tree_id(owner_id.value(), &TREE_LABEL));
+    }
+
+    /// Programs deployed and the treasury existing: nothing initialized.
+    fn bare_state() -> (V03State, AccountId) {
         let (_, treasury_id) = keypair(1);
-        let mut state = state_with_programs()
+        let state = state_with_programs()
             .expect("programs should load")
             .with_empty_public_accounts([treasury_id]);
+        (state, treasury_id)
+    }
+
+    fn default_initialize(treasury_id: &AccountId) -> Message {
+        initialize_msg(
+            treasury_id,
+            DEFAULT_MAX_TOTAL_RATE_LIMIT,
+            DEFAULT_ACTIVE_DURATION_SEC,
+            DEFAULT_GRACE_PERIOD_DURATION_SEC,
+            (DEFAULT_MIN_RATE_LIMIT, DEFAULT_MAX_RATE_LIMIT),
+        )
+    }
+
+    /// The config is reached by the program's own sync message, which
+    /// carries the PDA's seed: that admits it, with no evidence from the
+    /// transaction.
+    #[test]
+    fn initialize_admits_the_config_without_evidence() {
+        let (mut state, treasury_id) = bare_state();
+        let (owner_key, owner_id) = owner();
+        let tx = public_tx(
+            &state,
+            owner_actor(&owner_id),
+            vec![owner_actor(&owner_id), config_actor(&TREE_ID)],
+            Vec::new(),
+            default_initialize(&treasury_id),
+            &[&owner_key],
+        );
+        state
+            .transition_from_public_transaction(&tx, 1, GENESIS_TIMESTAMP_MS)
+            .expect("the owner's Initialize should succeed");
+        assert_eq!(config(&state).tree_id, TREE_ID);
+    }
+
+    /// SECURITY (registry squatting): `Initialize` used to go straight to the
+    /// config, unsigned, so whoever knew a tree id could initialize it first
+    /// with a treasury and a merkle program of their own. A config is a PDA:
+    /// nothing signs for it, and the program now refuses the route.
+    #[test]
+    fn an_unsigned_initialize_at_the_config_is_refused() {
+        let (mut state, treasury_id) = bare_state();
         let tx = public_tx(
             &state,
             config_actor(&TREE_ID),
             vec![config_actor(&TREE_ID)],
-            Vec::new(),
-            Message::Initialize {
-                merkle_program_id: *MERKLE_ID.value(),
-                tree_id: TREE_ID,
-                price_per_unit: PRICE_PER_UNIT,
-                treasury_account_id: *treasury_id.value(),
-                max_total_rate_limit: DEFAULT_MAX_TOTAL_RATE_LIMIT,
-                active_duration_for_new_memberships_sec: DEFAULT_ACTIVE_DURATION_SEC,
-                grace_period_duration_for_new_memberships_sec: DEFAULT_GRACE_PERIOD_DURATION_SEC,
-                min_rate_limit: DEFAULT_MIN_RATE_LIMIT,
-                max_rate_limit: DEFAULT_MAX_RATE_LIMIT,
-            },
+            vec![pda_evidence(config_seed(&TREE_ID))],
+            default_initialize(&treasury_id),
             &[],
         );
         let result = state.transition_from_public_transaction(&tx, 1, GENESIS_TIMESTAMP_MS);
         assert!(
-            result.is_err(),
-            "an unadmitted config PDA must be refused, got {result:?}"
+            matches!(result, Err(LeeError::ProgramExecutionFailed(_))),
+            "an unsigned Initialize must fail in the guest, got {result:?}"
         );
         assert!(config_bytes(&state).is_empty());
+    }
+
+    /// The owner's account without the owner's signature is anybody's
+    /// message: naming the account is not enough.
+    #[test]
+    fn initialize_at_the_owners_account_needs_its_signature() {
+        let (_, treasury_id) = keypair(1);
+        let (_, owner_id) = owner();
+        // The owner exists on chain, so admission is not what refuses it.
+        let mut state = state_with_programs()
+            .expect("programs should load")
+            .with_empty_public_accounts([treasury_id, owner_id]);
+        let tx = public_tx(
+            &state,
+            owner_actor(&owner_id),
+            vec![owner_actor(&owner_id), config_actor(&TREE_ID)],
+            vec![pda_evidence(config_seed(&TREE_ID))],
+            default_initialize(&treasury_id),
+            &[],
+        );
+        let result = state.transition_from_public_transaction(&tx, 1, GENESIS_TIMESTAMP_MS);
+        assert!(
+            matches!(result, Err(LeeError::ProgramExecutionFailed(_))),
+            "Initialize without the owner's signature must fail in the guest, got {result:?}"
+        );
+        assert!(config_bytes(&state).is_empty());
+    }
+
+    /// SECURITY (registry squatting): another account signing the same label
+    /// gets a registry of its own, at another tree id. It cannot write the
+    /// owner's config, and the owner's registry is still there to initialize.
+    #[test]
+    fn another_account_cannot_take_the_owners_tree() {
+        let (mut state, treasury_id) = bare_state();
+        let (squatter_key, squatter_id) = keypair(7);
+        let (_, squatter_treasury) = keypair(8);
+        let squatter_tree = owner_tree_id(squatter_id.value(), &TREE_LABEL);
+        assert_ne!(squatter_tree, TREE_ID);
+
+        // Aimed at the owner's config: the program forwards to the
+        // squatter's own, which this transaction does not declare.
+        let aimed = signed_init_tx(
+            &state,
+            &squatter_key,
+            &TREE_ID,
+            default_initialize(&squatter_treasury),
+        );
+        let result = state.transition_from_public_transaction(&aimed, 1, GENESIS_TIMESTAMP_MS);
+        assert!(
+            result.is_err(),
+            "a stranger's Initialize must not reach the owner's config, got {result:?}"
+        );
+        assert!(config_bytes(&state).is_empty());
+
+        // Declared honestly, it initializes the squatter's own registry.
+        let own = signed_init_tx(
+            &state,
+            &squatter_key,
+            &squatter_tree,
+            default_initialize(&squatter_treasury),
+        );
+        state
+            .transition_from_public_transaction(&own, 1, GENESIS_TIMESTAMP_MS)
+            .expect("anyone may initialize a registry of their own");
+        let theirs: rln_layouts::ConfigState =
+            borsh::from_slice(&actor_state(&state, config_actor(&squatter_tree)))
+                .expect("config state decodes");
+        assert_eq!(theirs.tree_id, squatter_tree);
+        assert_eq!(theirs.treasury_account_id, *squatter_treasury.value());
+        assert!(config_bytes(&state).is_empty());
+
+        // The owner's registry is untouched and still the owner's to make.
+        let (owner_key, _) = owner();
+        let honest = signed_init_tx(
+            &state,
+            &owner_key,
+            &TREE_ID,
+            default_initialize(&treasury_id),
+        );
+        state
+            .transition_from_public_transaction(&honest, 1, GENESIS_TIMESTAMP_MS)
+            .expect("the owner's Initialize should succeed");
+        assert_eq!(config(&state).treasury_account_id, *treasury_id.value());
+    }
+
+    /// One owner, two labels: two registries on the same programs.
+    #[test]
+    fn one_owner_holds_a_registry_per_label() {
+        let (mut state, treasury_id) = bare_state();
+        let (owner_key, owner_id) = owner();
+        let other_label = label_seed("mix");
+        let other_tree = owner_tree_id(owner_id.value(), &other_label);
+        for (label, tree_id) in [(TREE_LABEL, TREE_ID), (other_label, other_tree)] {
+            let message = with_field!(
+                default_initialize(&treasury_id),
+                Initialize { tree_label: label }
+            );
+            let tx = signed_init_tx(&state, &owner_key, &tree_id, message);
+            state
+                .transition_from_public_transaction(&tx, 1, GENESIS_TIMESTAMP_MS)
+                .expect("Initialize should succeed");
+        }
+        assert_eq!(config(&state).tree_id, TREE_ID);
+        let other: rln_layouts::ConfigState =
+            borsh::from_slice(&actor_state(&state, config_actor(&other_tree)))
+                .expect("config state decodes");
+        assert_eq!(other.tree_id, other_tree);
     }
 
     /// SECURITY (callee substitution): the config messages the merkle program

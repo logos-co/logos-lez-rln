@@ -1,6 +1,7 @@
 //! The RLN registration program: one message handler, run once per delivery
-//! to one of the program's actors — the config PDA of a tree or one of its
-//! membership PDAs.
+//! to one of the program's actors — the config PDA of a tree, one of its
+//! membership PDAs, or, for `Initialize` alone, the account of the registry's
+//! owner.
 //!
 //! A handler sees its own actor's state and nothing else. What it needs from
 //! another actor it asks for by message: the config tells a membership to
@@ -12,8 +13,14 @@
 //! so each handler checks `from` before it acts.
 //!
 //! The two one-shot writes (`Initialize`, `InitMembership`) are guarded by an
-//! empty pre-state, never by who sent them: authorization says the sender may
-//! write the account, not that it is unclaimed.
+//! empty pre-state: authorization says the sender may write the account, not
+//! that it is unclaimed.
+//!
+//! A registry belongs to the account that signed its `Initialize`. A handler
+//! is told who signed only for the account a message is delivered to, so
+//! `Initialize` enters at the owner's own account, where the tree id is
+//! computed (`owner_tree_id`), and is forwarded from there to the config of
+//! that tree. Nobody can initialize a tree id that names another account.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
@@ -27,7 +34,7 @@ use rln_layouts::{
         EXIT_MEMBERSHIP_EXISTS, EXIT_MEMBERSHIP_MISSING, EXIT_NOT_EXPIRED,
         EXIT_NOT_IN_GRACE_PERIOD, EXIT_RATE_LIMIT_FULL,
     },
-    is_expired, is_in_grace_period, main_seed, membership_seed, secs_to_millis,
+    is_expired, is_in_grace_period, main_seed, membership_seed, owner_tree_id, secs_to_millis,
 };
 
 use crate::{
@@ -127,8 +134,8 @@ fn native_payment(payer: [u8; 32], treasury: [u8; 32], amount: u128) -> SyncMess
 
 /// Handle one delivered message.
 ///
-/// Entry messages reach the config actor (`Initialize`,
-/// `InitializeMerkleTree`, `Register`) or a membership actor (`Slash`,
+/// Entry messages reach the owner's account (`Initialize`), the config actor
+/// (`InitializeMerkleTree`, `Register`) or a membership actor (`Slash`,
 /// `Extend`, `Erase`); the rest travel between the program's own actors.
 /// Sync messages run in emission order, each to completion before the next.
 pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
@@ -136,7 +143,7 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
     match msg {
         Message::Initialize {
             merkle_program_id,
-            tree_id,
+            tree_label,
             price_per_unit,
             treasury_account_id,
             max_total_rate_limit,
@@ -145,6 +152,41 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
             min_rate_limit,
             max_rate_limit,
         } => {
+            let Some(owner) = input.from else {
+                // Submitted by the transaction: this is the owner's account,
+                // and only its signature authorizes a root message.
+                assert!(
+                    input.is_authorized,
+                    "Initialize must be signed by the account it is sent to"
+                );
+                let tree_id = owner_tree_id(input.receiver.account_id.value(), &tree_label);
+                let seed = config_seed(&tree_id);
+                return Response::keep_state().send(
+                    SyncMessage::new(
+                        own_actor(input, seed),
+                        &Message::Initialize {
+                            merkle_program_id,
+                            tree_label,
+                            price_per_unit,
+                            treasury_account_id,
+                            max_total_rate_limit,
+                            active_duration_for_new_memberships_sec,
+                            grace_period_duration_for_new_memberships_sec,
+                            min_rate_limit,
+                            max_rate_limit,
+                        },
+                    )
+                    .with_pda_seeds([PdaSeed::new(seed)]),
+                );
+            };
+            // Forwarded. This program sends `Initialize` from one place, the
+            // branch above, so its own actor at `owner` is an account that
+            // signed.
+            assert!(
+                input.from_own_program(),
+                "Initialize may only be forwarded by this program from the owner's account"
+            );
+            let tree_id = owner_tree_id(owner.account_id.value(), &tree_label);
             require_receiver(input, config_seed(&tree_id), "config");
             assert!(
                 pre_state.is_empty(),
@@ -466,6 +508,10 @@ mod tests {
     use super::*;
 
     const TREE_ID: [u8; 32] = [0x11; 32];
+    /// The account that signs `Initialize`, and the label it names its
+    /// registry by.
+    const OWNER: [u8; 32] = [0x66; 32];
+    const LABEL: [u8; 32] = [0x77; 32];
     const MERKLE: [u8; 32] = [0x22; 32];
     const TREASURY: [u8; 32] = [0x33; 32];
     const PAYER: [u8; 32] = [0x44; 32];
@@ -507,6 +553,31 @@ mod tests {
 
     fn stranger() -> Actor {
         Actor::new(AccountId::new([0x99; 32]), AccountId::new([0x98; 32]))
+    }
+
+    /// This program at the owner's own account, where `Initialize` enters.
+    fn owner_actor() -> Actor {
+        Actor::new(AccountId::new(OWNER), registration_program())
+    }
+
+    fn owned_tree_id() -> [u8; 32] {
+        owner_tree_id(&OWNER, &LABEL)
+    }
+
+    /// The config of the tree `OWNER` creates under `LABEL`.
+    fn owned_config_actor() -> Actor {
+        Actor::new(
+            pda(&registration_program(), config_seed(&owned_tree_id())),
+            registration_program(),
+        )
+    }
+
+    /// `input`, delivered to an account that signed the transaction.
+    fn signed(input: ReceiveInput) -> ReceiveInput {
+        ReceiveInput {
+            is_authorized: true,
+            ..input
+        }
     }
 
     /// A valid, non-zero BN254 field element.
@@ -565,7 +636,7 @@ mod tests {
     fn initialize() -> Message {
         Message::Initialize {
             merkle_program_id: MERKLE,
-            tree_id: TREE_ID,
+            tree_label: LABEL,
             price_per_unit: PRICE,
             treasury_account_id: TREASURY,
             max_total_rate_limit: 1_000,
@@ -626,9 +697,42 @@ mod tests {
     // ─── Initialize ────────────────────────────────────────────────────
 
     #[test]
-    fn initialize_writes_the_config_and_sends_nothing() {
-        let response = handle_message(&empty(config_actor(), None), initialize());
+    fn initialize_at_the_owners_account_forwards_to_the_owned_config() {
+        let response = handle_message(&signed(empty(owner_actor(), None)), initialize());
+        assert_eq!(response.post_state, None);
+        assert_eq!(
+            response.sync_messages,
+            vec![
+                SyncMessage::new(owned_config_actor(), &initialize())
+                    .with_pda_seeds([PdaSeed::new(config_seed(&owned_tree_id()))])
+            ]
+        );
+        assert!(response.async_messages.is_empty());
+        assert_unbounded(&response);
+    }
+
+    #[test]
+    #[should_panic(expected = "Initialize must be signed by the account it is sent to")]
+    fn initialize_refuses_an_account_that_did_not_sign() {
+        let _ = handle_message(&empty(owner_actor(), None), initialize());
+    }
+
+    /// The route an unsigned `Initialize` used to take: straight to the
+    /// config. A PDA has no key, so nothing can sign for it.
+    #[test]
+    #[should_panic(expected = "Initialize must be signed by the account it is sent to")]
+    fn initialize_refuses_a_transaction_that_targets_the_config() {
+        let _ = handle_message(&empty(owned_config_actor(), None), initialize());
+    }
+
+    #[test]
+    fn initialize_forwarded_from_the_owner_writes_the_config() {
+        let response = handle_message(
+            &empty(owned_config_actor(), Some(owner_actor())),
+            initialize(),
+        );
         let mut expected = config_state();
+        expected.tree_id = owned_tree_id();
         expected.total_registrations = 0;
         expected.current_total_rate_limit = 0;
         assert_eq!(post_state(&response), encode(&expected));
@@ -637,17 +741,35 @@ mod tests {
         assert_unbounded(&response);
     }
 
+    /// Another program, even at the owner's account, is not this one.
+    #[test]
+    #[should_panic(expected = "Initialize may only be forwarded by this program")]
+    fn initialize_refuses_a_forward_from_another_program() {
+        let foreign = Actor::new(AccountId::new(OWNER), AccountId::new([0x98; 32]));
+        let _ = handle_message(&empty(owned_config_actor(), Some(foreign)), initialize());
+    }
+
+    /// The tree id follows the sender: another account's `Initialize` with
+    /// the same label belongs at another config.
     #[test]
     #[should_panic(expected = "config message delivered to the wrong actor")]
-    fn initialize_refuses_a_foreign_actor() {
-        let _ = handle_message(&empty(stranger(), None), initialize());
+    fn initialize_refuses_the_config_of_another_owner() {
+        let other = Actor::new(AccountId::new([0x67; 32]), registration_program());
+        let _ = handle_message(&empty(owned_config_actor(), Some(other)), initialize());
+    }
+
+    /// The owner cannot aim its registry at a tree id of its choosing.
+    #[test]
+    #[should_panic(expected = "config message delivered to the wrong actor")]
+    fn initialize_refuses_the_config_of_another_tree() {
+        let _ = handle_message(&empty(config_actor(), Some(owner_actor())), initialize());
     }
 
     #[test]
     #[should_panic(expected = "config already exists")]
     fn initialize_refuses_a_replay() {
         let _ = handle_message(
-            &receive(config_actor(), None, &config_state()),
+            &receive(owned_config_actor(), Some(owner_actor()), &config_state()),
             initialize(),
         );
     }
@@ -655,7 +777,7 @@ mod tests {
     fn initialize_with(min_rate_limit: u64, max_rate_limit: u64) -> Message {
         let Message::Initialize {
             merkle_program_id,
-            tree_id,
+            tree_label,
             price_per_unit,
             treasury_account_id,
             max_total_rate_limit,
@@ -668,7 +790,7 @@ mod tests {
         };
         Message::Initialize {
             merkle_program_id,
-            tree_id,
+            tree_label,
             price_per_unit,
             treasury_account_id,
             max_total_rate_limit,
@@ -682,14 +804,17 @@ mod tests {
     #[test]
     #[should_panic(expected = "Min rate limit must be positive")]
     fn initialize_rejects_zero_min_rate() {
-        let _ = handle_message(&empty(config_actor(), None), initialize_with(0, MAX_RATE));
+        let _ = handle_message(
+            &empty(owned_config_actor(), Some(owner_actor())),
+            initialize_with(0, MAX_RATE),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Min rate limit 601 exceeds max rate limit 600")]
     fn initialize_rejects_min_above_max() {
         let _ = handle_message(
-            &empty(config_actor(), None),
+            &empty(owned_config_actor(), Some(owner_actor())),
             initialize_with(MAX_RATE + 1, MAX_RATE),
         );
     }

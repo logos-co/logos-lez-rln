@@ -23,10 +23,11 @@
 - Builds are reproducible but LINE-SENSITIVE: panic `Location` metadata
   embeds file:line, so adding a blank line or editing a comment in the guest
   produces a different image id. The program's ACCOUNT id (and so every PDA)
-  is the deployer-chosen header account, not the image id, so a rebuilt guest
-  can be redeployed under the same ids with `UpdateHeader` — but the image id
-  the host compares against changes, so finish guest comment churn BEFORE
-  provisioning.
+  is the deployer-chosen header account, not the image id — but the tools
+  deploy every header IMMUTABLE (`deploy_program` passes `immutable = true`,
+  and the loader refuses `UpdateHeader` on an immutable header), so a rebuilt
+  guest cannot replace a deployed one: it needs a new header account, hence
+  new ids. Finish guest comment churn BEFORE provisioning.
 - The same metadata embeds the cargo git-checkout path of every dependency,
   which contains the pinned commit hash. Bumping the LEZ tag therefore changes
   both image ids even when `lee_core` and `clock_core` are byte-identical
@@ -63,7 +64,8 @@
   PDA seed, or carry `admission_evidence` (`Pda { program, seed }` /
   `Key(pk)`). The host declares config, membership, tree_main, payer-native
   and treasury-native, with `Pda` evidence for a membership PDA that does not
-  exist yet (and for the config at `Initialize`). The treasury is a plain
+  exist yet (and for the config at `Initialize`, though the program's own
+  forward carries the seed and admits it). The treasury is a plain
   keyed account nobody but the deployer holds the key of, so `run_setup`
   seeds it with one unit: from then on it exists and needs no evidence. An
   undeclared actor, an unadmitted one, or an async credit to an undeclared
@@ -128,6 +130,25 @@ says the sender may write the account, never that the account is unclaimed.
 Do not use `lee_core::program::write_once` for these: it tolerates an
 identical rewrite.
 
+## A registry has an owner, and the tree id is the owner's
+One-shot is not enough for `Initialize`: an unsigned one let whoever knew a
+tree id initialize it first, with a treasury and a merkle program of their
+own. A handler learns who signed only for its RECEIVER (`is_authorized`), and
+a config is a PDA nobody signs for, so `Initialize` enters at the owner's own
+keyed account (root message, `from == None`, `is_authorized`), where the tree
+id is computed as `owner_tree_id(owner, tree_label)`, and is forwarded to
+that tree's config, which takes it only from this program's actor at the
+owner (`from_own_program`, and the PDA re-derived from `from.account_id`).
+A tree id is therefore never an input to setup: `run_setup` prints it,
+`LEZ_RLN_TREE_LABEL` picks among one owner's registries, and a
+`LEZ_RLN_TREE_ID_HEX` naming another tree is refused before anything is
+sent. The `Initialize` variant kept its position and byte layout (the
+32-byte `tree_id` became `tree_label`), and no other message or state layout
+changed, so clients built against the earlier `rln-layouts` still register
+against the new program. Regressions:
+`an_unsigned_initialize_at_the_config_is_refused`,
+`another_account_cannot_take_the_owners_tree`.
+
 History: `initialize_merkle_tree` once shipped with authorization only, so
 replaying it against a live tree reset `next_index` and the root history —
 invalidating every member's proof while their membership PDAs survived.
@@ -165,6 +186,24 @@ address. `run_setup` creates the two header accounts and records them; every
 PDA hangs off those ids, and every tool must be told them (deployment
 descriptor, `~/.logos-lez-rln/programs_<tree_hex>.json`, or `LEZ_RLN_REGISTRATION_PROGRAM_ID` / `LEZ_RLN_MERKLE_PROGRAM_ID`), never derive them from the `.bin`. The `.bin`
 still determines the IMAGE id the header must carry.
+
+They can be fixed in advance, though: with `LEZ_RLN_DEPLOY_SECRET_FILE` and
+`LEZ_RLN_DEPLOY_NAME` the header, segment, owner and treasury keys derive
+from a secret (`rln::deploy_keys`), so every id is known before the chain
+exists (`plan_deployment`, `deploy_plan`, `tools/deployments/plan.sh` and
+`deploy.sh`). No address depends on the chain, and none on the image.
+- The key-chain path cannot do this: it takes the next account whose loader
+  shard is empty, which depends on the wallet's history and on how many
+  segments the guest uploads as.
+- The wallet's `[profile.dev]` here comes from a cargo config ABOVE the
+  checkout (`~/Waku/Logos/.cargo/config.toml` on the machine these notes
+  were written on). A worktree outside that folder builds another profile
+  and shares nothing with the checkout's `target/`: pass
+  `CARGO_PROFILE_DEV_DEBUG=line-tables-only
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked` to reuse it.
+- A local guest build takes the rzup DEFAULT rust toolchain, and
+  `rust-poseidon-bn254-pure` at the pinned rev does not compile with 1.97:
+  build with 1.91.1 or the docker builder (1.88).
 
 ## Renewal is priced, not permissioned
 `extend` deliberately does not check caller identity — `MembershipState`

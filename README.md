@@ -77,6 +77,11 @@ cargo run --bin run_rln_proof    # generate + verify RLN proof against on-chain 
 
 `run_rln_proof` is the canonical end-to-end smoke test: it registers an identity, fetches the merkle proof from the chain, generates an RLN proof via zerokit, and verifies it. Pass = the on-chain Poseidon merkle root matches what zerokit computes.
 
+`run_setup` creates the registry its payer owns under `LEZ_RLN_TREE_LABEL`
+(unset: the empty label) and prints the tree id. The other tools name the
+tree either by that id (`LEZ_RLN_TREE_ID_HEX`) or by its owner and label
+(`LEZ_RLN_REGISTRY_OWNER=<account id>`, `LEZ_RLN_TREE_LABEL`).
+
 ### Wallets
 
 The host tools open a `WalletCore` from `LEE_WALLET_HOME_DIR`
@@ -189,7 +194,11 @@ via PDA authorization on the tree account.
 
 All accounts are PDAs derived from the registration program's account id — the
 header account the deployer created, recorded in the deployment descriptor —
-and a 32-byte `tree_id`. Each PDA's address is
+and a 32-byte `tree_id`. The tree id is not chosen: the program computes it
+as `SHA-256("tree" || owner || label)` from the account that signed
+`Initialize` and a 32-byte label, so a registry has an owner, an owner can
+hold one registry per label, and nobody can initialize a registry that is
+not theirs. Each PDA's address is
 `for_public_pda(program, SHA-256(seed_1 || seed_2 || ...))` where each seed is
 zero-padded to 32 bytes (string labels) or passed through (32-byte args).
 
@@ -215,9 +224,13 @@ shared by the guest (`methods/guest/src/program.rs`, entry point
 there says which actor each entry message is for and which messages are
 internal to the program's own actors.
 
-**Initialize** (to the config) — Writes the config PDA: merkle program ID,
-tree ID, price, treasury, rate-limit cap and bounds, membership durations.
-One-shot: a non-empty state is refused. **InitializeMerkleTree** (to the
+**Initialize** (to the owner's own account, which signs) — Writes the config
+PDA of the registry that account owns under the message's label: merkle
+program ID, tree ID, price, treasury, rate-limit cap and bounds, membership
+durations. A program is told who signed only for the account a message is
+delivered to, so the message enters at the owner's account, where the tree id
+is computed, and the program forwards it to that tree's config, which accepts
+it from nowhere else. One-shot: a non-empty state is refused. **InitializeMerkleTree** (to the
 config) — the config messages the merkle program it stores to initialize the
 tree, granting it the `main` PDA seed.
 
@@ -270,6 +283,11 @@ fees and becomes the deployment's `payer_account`), `stage.sh` stages an
 existing profile into the flat files consumers expect, and `verify.sh` guards
 against guest drift. See that README for the profile format and the
 run-against-existing / redeploy-fresh workflows.
+
+`plan.sh` and `deploy.sh` are for a deployment whose ids must be known before
+its chain exists, such as the registry id a network preset names: the first
+computes every id from a secret, the second makes a chain hold exactly that
+plan. The same README lists what to know before relying on one.
 
 **Security note:** a profile's `storage.json` contains signing keys and may be
 committed to a repo. That warning is stronger now than it was: the key it

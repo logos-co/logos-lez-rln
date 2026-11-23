@@ -2,15 +2,24 @@
 # Provision an RLN deployment on a sequencer and capture it as a deployment profile.
 # FEATURE: deployment-profile tooling — the fresh/adopt entry point.
 #
-#   bash provision.sh --name <name> --payer <account-id> [--tree <64hex>]
+#   bash provision.sh --name <name> --payer <account-id> [--label <label>]
 #                     [--adopt-wallet <storage.json>] [--sequencer <url>]
 #                     [--outdir <dir>]
 #
-# tree_id is the single knob: --tree targets/redeploys a specific tree, omit for a
-# fresh random one. --adopt-wallet reuses an existing wallet (its seed, hence account
-# ids) so multiple sims share accounts. --outdir writes deployments/<name>/ somewhere
+# A registry belongs to the account that signs its Initialize, and its tree id
+# is what the program makes of that account and a label: the tree id is this
+# script's result, not its input. The owner is LEZ_RLN_REGISTRY_OWNER, or the
+# payer. --label (at most 32 bytes, default: the name) tells the owner's
+# registries apart: the same owner and label name the same registry, so this
+# never makes a second one by accident. A registry that is already
+# initialized is refused here (its treasury and bounds are on chain, not in
+# run_setup's output, and its descriptor exists); a new one takes a new label.
+# --adopt-wallet reuses an existing wallet (its seed, hence account ids) so
+# multiple sims share accounts. --outdir writes deployments/<name>/ somewhere
 # other than this repo's deployments/ (e.g. a consumer's build context). Writes
 # {deployment.json, storage.json} and runs verify.sh.
+#
+# For ids that are known before the chain exists, plan.sh and deploy.sh.
 #
 # Program ids are deployment state: each program's account id is the header
 # account run_setup creates and signs, not a function of the guest .bin.
@@ -39,15 +48,16 @@
 # balance must cover that x base fee, not only the fee actually charged.
 set -euo pipefail
 
-usage(){ echo "usage: provision.sh --name <name> --payer <account-id> [--tree <64hex>] [--adopt-wallet <storage.json>] [--sequencer <url>] [--outdir <dir>]" >&2; }
+usage(){ echo "usage: provision.sh --name <name> --payer <account-id> [--label <label>] [--adopt-wallet <storage.json>] [--sequencer <url>] [--outdir <dir>]" >&2; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"                    # logos-lez-rln root
-NAME=""; TREE=""; ADOPT=""; SEQUENCER="https://testnet.lez.logos.co/"; OUTROOT="$REPO/deployments"
+NAME=""; LABEL=""; ADOPT=""; SEQUENCER="https://testnet.lez.logos.co/"; OUTROOT="$REPO/deployments"
 PAYER=""
 while [ $# -gt 0 ]; do case "$1" in
   --name) NAME="$2"; shift 2;;
-  --tree) TREE="$2"; shift 2;;
+  --label) LABEL="$2"; shift 2;;
+  --tree) echo "provision.sh: --tree is gone: a tree id is no longer chosen, it follows from the account that signs Initialize and --label" >&2; exit 1;;
   --adopt-wallet) ADOPT="$2"; shift 2;;
   --sequencer) SEQUENCER="$2"; shift 2;;
   --outdir) OUTROOT="$2"; shift 2;;
@@ -59,13 +69,15 @@ esac; done
 # Not a warning any more: every deploy, init and registration transaction is
 # charged, and a deployment whose payer is unknown cannot be registered against.
 [ -n "$PAYER" ] || { echo "provision.sh: --payer is required — it pays the deploy fees and is recorded as the deployment's payer_account" >&2; exit 1; }
-[ -n "$TREE" ] || TREE=$(python3 -c "import secrets;print(secrets.token_hex(32))")
-[[ "$TREE" =~ ^[0-9a-f]{64}$ ]] || { echo "--tree must be 64 hex chars" >&2; exit 1; }
+[ -n "$LABEL" ] || LABEL="$NAME"
+[ "$(printf %s "$LABEL" | wc -c)" -le 32 ] || { echo "--label is at most 32 bytes (the name is the default label: pass a shorter --label)" >&2; exit 1; }
 
 LEZ="$REPO/lez-rln"
-RUN_SETUP="$LEZ/target/release/run_setup"
-DERIVE="$LEZ/target/release/derive_accounts"
-MINT_PAYER="$LEZ/target/release/mint_payer"
+# The release build, unless LEZ_RLN_BIN_DIR names another (verify.sh reads it too).
+BIN_DIR="${LEZ_RLN_BIN_DIR:-$LEZ/target/release}"
+RUN_SETUP="$BIN_DIR/run_setup"
+DERIVE="$BIN_DIR/derive_accounts"
+MINT_PAYER="$BIN_DIR/mint_payer"
 for b in "$RUN_SETUP" "$DERIVE" "$MINT_PAYER"; do [ -x "$b" ] || { echo "missing $b — build: (cd $LEZ && PYO3_PYTHON=\$(command -v python3) cargo build --release --bin run_setup --bin derive_accounts --bin mint_payer)" >&2; exit 1; }; done
 
 WS=$(mktemp -d); trap 'rm -rf "$WS"' EXIT
@@ -99,16 +111,27 @@ fi
 # whatever this says, and the payer's reserve must cover that x base fee.
 jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencer:{sequencer_addr:$s}, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
-echo "provision: tree=$TREE sequencer=$SEQUENCER payer=$PAYER (deploying via run_setup — several min)"
+echo "provision: label=$LABEL sequencer=$SEQUENCER payer=$PAYER (deploying via run_setup — several min)"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS"
 # Headless: an unencrypted storage opens with the empty password and the
 # tools never prompt.
 export LEE_WALLET_PASSWORD="${LEE_WALLET_PASSWORD:-}"
-export LEZ_RLN_TREE_ID_HEX="$TREE" RISC0_DEV_MODE=1
+# The tree id comes out of run_setup; one inherited from the caller's shell
+# would name another tree and be refused.
+unset LEZ_RLN_TREE_ID_HEX
+export LEZ_RLN_TREE_LABEL="$LABEL" RISC0_DEV_MODE=1
 export LEZ_RLN_PAYER="$PAYER"
 export DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-/Library/Developer/CommandLineTools/Library/Frameworks}"
 LOG="$WS/run_setup.log"
 ( cd "$LEZ" && "$RUN_SETUP" ) | tee "$LOG"
+TREE=$(grep -E "^Tree id:" "$LOG" | awk '{print $NF}')
+[[ "$TREE" =~ ^[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no tree id" >&2; exit 1; }
+OWNER=$(grep -E "^Registry owner:" "$LOG" | awk '{print $NF}')
+[ -n "$OWNER" ] || { echo "provision: FAIL: run_setup printed no registry owner" >&2; exit 1; }
+if grep -q "^Registry already initialized" "$LOG"; then
+  echo "provision: FAIL: $OWNER already holds an initialized registry under '$LABEL' (tree $TREE); it was described when it was provisioned. A new registry takes a new --label." >&2; exit 1
+fi
+export LEZ_RLN_TREE_ID_HEX="$TREE"
 CFG=$(grep -E "^Config account:" "$LOG" | awk '{print $NF}')
 # The program ids come from run_setup's record, the same file every tool reads
 # back; the printed lines must agree with it.
@@ -147,7 +170,8 @@ jq -n \
   --arg cfg "$CFG" --arg pay "$PAY" --arg treasury "$TREASURY" \
   --argjson min_rate "$MIN_RATE" --argjson max_rate "$MAX_RATE" \
   --arg treasury_pk "$TREASURY_PK" --arg payer_pk "$PAYER_PK" \
-  '{name:$name, tree_id:$tree, sequencer:$seq, registration_program_id:$reg, merkle_program_id:$mrk, config_account:$cfg, payer_account:$pay, treasury_account:$treasury, min_rate_limit:$min_rate, max_rate_limit:$max_rate, payer_public_key:$payer_pk, treasury_public_key:$treasury_pk}' \
+  --arg owner "$OWNER" --arg label "$LABEL" \
+  '{name:$name, tree_id:$tree, sequencer:$seq, registration_program_id:$reg, merkle_program_id:$mrk, config_account:$cfg, payer_account:$pay, treasury_account:$treasury, min_rate_limit:$min_rate, max_rate_limit:$max_rate, payer_public_key:$payer_pk, treasury_public_key:$treasury_pk, owner_account:$owner, tree_label:$label}' \
   > "$DEP_DIR/deployment.json"
 
 echo "provision: wrote $DEP_DIR/{deployment.json,storage.json}"

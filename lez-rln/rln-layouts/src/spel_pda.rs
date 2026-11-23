@@ -23,6 +23,16 @@ pub fn u32_seed(v: u32) -> [u8; 32] {
     out
 }
 
+/// The id of the tree `owner` creates under `label`: `["tree", owner, label]`.
+///
+/// The registration program computes it from the account that signed
+/// `Initialize`, so a tree id names its creator: nobody else can initialize
+/// that registry, and its id is known before anything is deployed. A string
+/// label goes through `label_seed`.
+pub fn owner_tree_id(owner: &[u8; 32], label: &[u8; 32]) -> [u8; 32] {
+    combine_seeds(&[&label_seed("tree"), owner, label])
+}
+
 /// Seed of a tree's config PDA: `["config", tree_id]`.
 pub fn config_seed(tree_id: &[u8; 32]) -> [u8; 32] {
     combine_seeds(&[&label_seed("config"), tree_id])
@@ -80,5 +90,21 @@ mod tests {
             membership_seed(&tree_id, &[1; 32]),
             membership_seed(&tree_id, &[2; 32])
         );
+    }
+
+    /// Pinned: a deployment plan is computed from this before the chain
+    /// exists, so the value must never drift.
+    #[test]
+    fn owner_tree_id_is_pinned() {
+        let owner = [0x11; 32];
+        let relay = owner_tree_id(&owner, &label_seed("relay"));
+        let pinned = [
+            0x74, 0x38, 0xd4, 0xe1, 0xe3, 0xd0, 0x9a, 0x58, 0x0b, 0xe6, 0x6f, 0x11, 0xcc, 0x88,
+            0xbb, 0x88, 0x5c, 0x81, 0xde, 0x22, 0x84, 0x74, 0x67, 0x40, 0xd7, 0x65, 0xcc, 0x40,
+            0xb0, 0x59, 0x60, 0x46,
+        ];
+        assert_eq!(relay, pinned);
+        assert_ne!(relay, owner_tree_id(&owner, &label_seed("mix")));
+        assert_ne!(relay, owner_tree_id(&[0x12; 32], &label_seed("relay")));
     }
 }
