@@ -25,17 +25,28 @@ in `LEZ_REF`; move all three together.
 ### Build
 
 ```bash
-cd lez-rln
-cargo risczero build --manifest-path methods/guest/Cargo.toml   # reproducible deploy guest bins
-cargo build                                                     # host + strips the deploy bins' user ELF
+# from the repo root: the guest programs, in docker
+cargo risczero build --manifest-path lez-rln/methods/guest/Cargo.toml
+# strip the user ELF inside both .bin files (no local guest build)
+(cd lez-rln/methods && touch build.rs && RISC0_SKIP_BUILD=1 cargo build --release)
+# the host tools
+(cd lez-rln && cargo build)
 ```
 
-Order matters: `cargo risczero build` produces the deploy artifacts under
-`methods/guest/target/.../docker/`, and the subsequent `cargo build` runs
-`methods/build.rs`, which strips the user ELF inside them (and the local
-build). The kernel ELF is left untouched — the program loader only accepts the
-canonical `risc0_zkos_v1compat` kernel. Re-run `cargo build` after any
-`cargo risczero build`.
+The guest build starts at the repo root. A panic location embeds its source
+file's path below the docker context, so the directory the build is started
+in is part of the image id: from `lez-rln/` the same source gives other
+image ids. CI and the deployed programs use the root. Everything under the
+root that is not a `target/` goes into the docker context, untracked files
+included; an export of the commit (`git archive`) builds the same binaries
+without them.
+
+The artifacts land in
+`lez-rln/methods/guest/target/riscv32im-risc0-zkvm-elf/docker/`.
+`methods/build.rs` strips the user ELF inside them; building the host crate
+does not run it, so strip after every `cargo risczero build`. The kernel ELF
+is left untouched — the program loader only accepts the canonical
+`risc0_zkos_v1compat` kernel.
 
 ### Test
 

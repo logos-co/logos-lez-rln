@@ -28,6 +28,19 @@
   and the loader refuses `UpdateHeader` on an immutable header), so a rebuilt
   guest cannot replace a deployed one: it needs a new header account, hence
   new ids. Finish guest comment churn BEFORE provisioning.
+- The docker CONTEXT directory is part of the image id: the same metadata
+  embeds each source file's path below it (`/src/lez-rln/rln-layouts/src/…`
+  from the repo root, `/src/rln-layouts/src/…` from `lez-rln/`). CI and the
+  deployed programs are built from the repo root (`cargo risczero build
+  --manifest-path lez-rln/methods/guest/Cargo.toml`); from `lez-rln/` the
+  same commit gives two other image ids. `strings` on a `.bin` shows which.
+- The strip step alone: `(cd methods && touch build.rs && RISC0_SKIP_BUILD=1
+  cargo build --release)`. `RISC0_SKIP_BUILD` skips the local guest build
+  and `build.rs` still strips; without `touch` cargo may not rerun it. The
+  `llvm-strip` of the 1.91.1 and 1.97.0 risc0 toolchains give the same bytes.
+- A build from an export of the commit (`git archive <commit> | tar -x`)
+  reproduces the binaries of a checkout and keeps untracked files (the
+  `dev/` wallet) out of the docker context.
 - The same metadata embeds the cargo git-checkout path of every dependency,
   which contains the pinned commit hash. Bumping the LEZ tag therefore changes
   both image ids even when `lee_core` and `clock_core` are byte-identical
