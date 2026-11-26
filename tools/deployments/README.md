@@ -140,23 +140,39 @@ network is up.
 
 # once: the deployment secret. Keep it; never commit it.
 (umask 077; openssl rand -hex 32 > ~/secrets/testnet-x.secret)
+# optional: a payer key of its own (see "Two files" below)
+(umask 077; openssl rand -hex 32 > ~/secrets/testnet-x.payer)
 
 # any time, no chain needed: every id, as public descriptors
 bash tools/deployments/plan.sh --secret-file ~/secrets/testnet-x.secret \
+     --payer-key-file ~/secrets/testnet-x.payer \
      --name testnet-x --reference <network> --sequencer <url> \
      --registry relay:100:600 --registry mix:20:100
 
 # when the chain is up and the payer is funded
 bash tools/deployments/deploy.sh --plan-dir deployments/testnet-x \
-     --secret-file ~/secrets/testnet-x.secret --check     # checks only
+     --secret-file ~/secrets/testnet-x.secret \
+     --payer-key-file ~/secrets/testnet-x.payer --check    # checks only
 bash tools/deployments/deploy.sh --plan-dir deployments/testnet-x \
-     --secret-file ~/secrets/testnet-x.secret
+     --secret-file ~/secrets/testnet-x.secret \
+     --payer-key-file ~/secrets/testnet-x.payer
 ```
 
 `plan.sh` writes `deployments/<name>/plan.json` and one planned descriptor per
 registry, `deployments/<name>-<label>/deployment.json`, with the `registry_id`
 a preset needs. `deploy.sh` turns each into a deployed
 `{deployment.json, storage.json}`.
+
+**Two files.** `--secret-file` is the deployment secret: the program header
+keys, the registries' owner and the treasuries derive from it, and with them
+every id. `--payer-key-file` is optional and holds the private key of the
+account that pays, 64 hex characters like the secret, but the key itself:
+nothing is derived from it, so it can be the key of an account that is
+already funded. Without it the payer is one more key the deployment secret
+derives. The ids are the same either way; the plan only names another
+`payer_account` / `payer_public_key` to fund, and `deploy.sh` needs the same
+file to sign with. The two files must differ: the payer's key is stored in
+the deployed `storage.json`.
 
 **Where the ids come from.** Every key derives from the secret, the name and
 a role (`lez-rln/src/rln/deploy_keys.rs`). A program lives at the account its
@@ -194,10 +210,12 @@ deployed there.
 - *The code is not part of the id.* `plan.json` records the image ids of the
   guest binaries present when it was made, and `deploy.sh` refuses others
   unless told `--allow-image-change`.
-- *A name is one deployment.* The name is part of every key, so a rehearsal
-  under another name shares no account with the real one. Use that: a LEZ
-  transaction names no chain, so one signed on a rehearsal chain could be
-  replayed where the same accounts are funded.
+- *A name is one deployment.* The name is part of every key the secret
+  derives, so a rehearsal under another name shares no account with the real
+  one. Use that: a LEZ transaction names no chain, so one signed on a
+  rehearsal chain could be replayed where the same accounts are funded. A
+  payer key of its own is one account under every name: fund it on one chain
+  only, or its rehearsal transactions can be replayed at its expense.
 - *A reset chain reproduces the same ids,* which keeps presets valid but
   leaves every keystore holding memberships the new chain does not have.
   Clear them, or plan the reset under a new name.
@@ -205,9 +223,16 @@ deployed there.
   account ids, PDAs or program addresses differently gives other ids.
   `deploy.sh` recomputes the plan with the build it runs and refuses a
   `plan.json` that differs.
-- *Funding.* The plan names a payer derived from the secret and its public
-  key, for a genesis to fund. Any other funded account can pay instead
-  (`--payer`, `--adopt-wallet`); no id depends on who pays.
+- *Funding.* The plan names a payer and its public key, for a genesis to
+  fund: the key in `--payer-key-file`, else one derived from the secret. Any
+  other funded account can pay instead: name it with `--payer` and give its
+  key as a key file (`--payer-key-file`) or in a wallet (`--adopt-wallet`).
+  No id depends on who pays, and `deploy.sh` refuses a payer it holds no key
+  for before it sends anything.
+- *One sender per payer.* A transaction names its payer's nonce, read from
+  the chain when it is sent. A payer key that something else sends from
+  during the deploy (a relay, another deploy) can lose a transaction to it;
+  the run stops, and running `deploy.sh` again finishes it.
 
 ## verify.sh — descriptor consistency guard
 

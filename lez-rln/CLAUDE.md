@@ -192,6 +192,12 @@ They can be fixed in advance, though: with `LEZ_RLN_DEPLOY_SECRET_FILE` and
 from a secret (`rln::deploy_keys`), so every id is known before the chain
 exists (`plan_deployment`, `deploy_plan`, `tools/deployments/plan.sh` and
 `deploy.sh`). No address depends on the chain, and none on the image.
+- The payer is the one key that need not come from that secret:
+  `LEZ_RLN_PAYER_KEY_FILE` (`--payer-key-file`) holds a private key as it
+  is, 64 hex, nothing derived. So `deploy_plan` does not hold a plan file to
+  the secret's payer (`differences` skips `payer_*`), and resolves the key
+  of `LEZ_RLN_PAYER` itself: the key file, else the secret's payer, else the
+  wallet. `run_setup` and `deploy_programs` do not read the key file.
 - The key-chain path cannot do this: it takes the next account whose loader
   shard is empty, which depends on the wallet's history and on how many
   segments the guest uploads as.

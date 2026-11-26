@@ -23,9 +23,12 @@
 //! - `--allow-image-change` deploys local guest binaries whose image ids are not the plan's. The
 //!   ids stay the plan's; the code does not.
 //!
-//! `LEZ_RLN_PAYER` pays for everything and may be any funded account of the
-//! wallet. Named as the plan's own `payer_account`, its key comes from the
-//! secret. Exits 0 when the chain holds the plan, 1 when it cannot, 2 on a
+//! `LEZ_RLN_PAYER` pays for everything and names any funded account. Its key
+//! is the one in `LEZ_RLN_PAYER_KEY_FILE` when that is set (the file must
+//! hold the key of that very account), else the deployment secret's own
+//! payer key when that is the account named, else a key the wallet already
+//! holds. A payer nothing here can sign for is refused before anything is
+//! sent. Exits 0 when the chain holds the plan, 1 when it cannot, 2 on a
 //! malformed invocation.
 
 use std::path::PathBuf;
@@ -38,7 +41,10 @@ use logos_lez_rln::rln::{
         is_initialized, is_tree_initialized, load_programs, program_deployed_at, public_key_of,
         read_config, read_program_header, registry_owner, resolve_payer,
     },
-    deploy_keys::{DEPLOY_NAME_ENV, DEPLOY_SECRET_FILE_ENV, DeployKeys},
+    deploy_keys::{
+        DEPLOY_NAME_ENV, DEPLOY_SECRET_FILE_ENV, DeployKeys, PAYER_KEY_FILE_ENV, account_of,
+        payer_key_from_env,
+    },
     deploy_plan::{
         DeploymentPlan, PlannedRegistry, config_differences, differences, image_mismatch, specs_of,
     },
@@ -52,7 +58,8 @@ fn usage() -> ! {
         "usage: deploy_plan --plan <plan.json> [--check] [--out <file>] [--allow-image-change]\n\
          \n\
          {DEPLOY_SECRET_FILE_ENV} names the deployment secret; LEE_WALLET_HOME_DIR the wallet;\n\
-         LEZ_RLN_PAYER the funded account that pays."
+         LEZ_RLN_PAYER the funded account that pays; {PAYER_KEY_FILE_ENV}, when set, a file\n\
+         holding that account's private key."
     );
     std::process::exit(2);
 }
@@ -179,9 +186,32 @@ async fn main() {
 
     // ── the chain, before anything is sent ────────────────────────────
     let payer = resolve_payer();
+    let payer_key = payer_key_from_env().unwrap_or_else(|e| refuse(&e));
     let mut wallet = init_wallet().await;
-    if payer == plan.payer {
-        import_key(&mut wallet, keys.payer());
+    // `plan` is derived from the secret alone, so `plan.payer` is the
+    // secret's own payer, whatever the plan file names.
+    match payer_key {
+        Some(key) => {
+            let signs_for = account_of(&key);
+            if signs_for != payer {
+                refuse(&format!(
+                    "the key {PAYER_KEY_FILE_ENV} names signs for {signs_for}, and the payer is \
+                     {payer}: name that account as the payer to pay from it"
+                ));
+            }
+            import_key(&mut wallet, key);
+        }
+        None if payer == plan.payer => {
+            import_key(&mut wallet, keys.payer());
+        }
+        None => {}
+    }
+    if wallet.get_account_public_signing_key(payer).is_none() {
+        refuse(&format!(
+            "nothing here signs for the payer {payer}: it is not the deployment secret's payer \
+             ({}), {PAYER_KEY_FILE_ENV} names no key, and the wallet holds none for it",
+            plan.payer
+        ));
     }
     println!("=== Deployment {name} ===\n");
     let registration_found = program_found(

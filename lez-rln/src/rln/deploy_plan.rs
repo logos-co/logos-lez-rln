@@ -15,7 +15,7 @@
 //! account from its public key, a PDA from a program's account id and a
 //! seed, a program at its header account).
 
-use nssa::{AccountId, PublicKey};
+use nssa::{AccountId, PrivateKey, PublicKey};
 use nssa_core::program::ProgramId;
 use rln_layouts::ConfigState;
 use serde_json::{Value, json};
@@ -159,6 +159,15 @@ impl DeploymentPlan {
         })
     }
 
+    /// The plan with the account of `key` as the payer to fund, in place of
+    /// the one the deployment secret derives. Nothing else changes.
+    #[must_use]
+    pub fn paid_by(mut self, key: &PrivateKey) -> Self {
+        self.payer = account_of(key);
+        self.payer_public_key = PublicKey::new_from_private_key(key);
+        self
+    }
+
     /// The plan as JSON. `images` are the image ids of the registration and
     /// the merkle binary, when the binaries are at hand.
     pub fn to_json(&self, images: Option<(&ProgramId, &ProgramId)>) -> Value {
@@ -254,13 +263,16 @@ pub fn specs_of(plan: &Value) -> Result<(String, Vec<RegistrySpec>), String> {
 /// Where `derived` and a plan `file` differ, one line per field: empty when
 /// the file is the plan these keys derive. The file may carry fields of its
 /// own (a network reference, a sequencer). Image ids are compared apart
-/// (`image_mismatch`): they describe the binaries, not the keys.
+/// (`image_mismatch`): they describe the binaries, not the keys. The payer is
+/// not compared: no id depends on it, and the file may name a key of its own
+/// (`DeploymentPlan::paid_by`).
 pub fn differences(derived: &Value, file: &Value) -> Vec<String> {
     fn walk(path: &str, derived: &Value, file: &Value, out: &mut Vec<String>) {
         match (derived, file) {
             (Value::Object(derived), Value::Object(file)) => {
                 for (key, value) in derived {
-                    if path.is_empty() && key.ends_with("_image_id") {
+                    if path.is_empty() && (key.ends_with("_image_id") || key.starts_with("payer_"))
+                    {
                         continue;
                     }
                     let at = if path.is_empty() {
@@ -453,6 +465,28 @@ mod tests {
         assert_eq!(
             image_mismatch(&derived, "merkle_image_id", &[3u32; 8]),
             None
+        );
+    }
+
+    /// A payer of its own moves the payer and nothing else, and the file
+    /// naming it is still the plan the deployment secret derives.
+    #[test]
+    fn a_payer_of_its_own_changes_no_id() {
+        let derived = DeploymentPlan::derive(&keys(), &specs()).unwrap();
+        let payer = PrivateKey::try_new([5u8; 32]).unwrap();
+        let paid = derived.clone().paid_by(&payer);
+        assert_eq!(paid.payer, account_of(&payer));
+        assert_ne!(paid.payer, derived.payer);
+        assert_ne!(paid.payer_public_key, derived.payer_public_key);
+        assert_eq!(paid.programs, derived.programs);
+        assert_eq!(paid.owner, derived.owner);
+        assert_eq!(paid.registries, derived.registries);
+
+        let file = paid.to_json(None);
+        assert_eq!(file["payer_account"], json!(paid.payer.to_string()));
+        assert_eq!(
+            differences(&derived.to_json(None), &file),
+            Vec::<String>::new()
         );
     }
 

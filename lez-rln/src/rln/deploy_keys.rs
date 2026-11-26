@@ -27,6 +27,11 @@
 //! account: a rehearsal on another chain signs nothing that the real one's
 //! accounts could be replayed with (a LEZ transaction names no chain).
 //!
+//! The payer is the one key that need not come from the secret: no id
+//! depends on it, so it can be a key of its own, read from a second file
+//! (`PAYER_KEY_FILE_ENV`). That file holds the private key itself, not a
+//! secret to derive from, so its account is the same under every name.
+//!
 //! The secret is read from a file and never printed. A header key signs only
 //! its own deploy: a signature authorizes every actor on the account for the
 //! whole transaction, and a segment written into a header account closes it
@@ -42,6 +47,9 @@ use rln_layouts::{combine_seeds, label_seed, u32_seed};
 pub const DEPLOY_SECRET_FILE_ENV: &str = "LEZ_RLN_DEPLOY_SECRET_FILE";
 /// The deployment's name: at most 32 bytes of `[a-z0-9._-]`.
 pub const DEPLOY_NAME_ENV: &str = "LEZ_RLN_DEPLOY_NAME";
+/// Names a file holding the fee payer's own private key: 64 hex characters.
+/// Unset, the payer is the one the deployment secret derives.
+pub const PAYER_KEY_FILE_ENV: &str = "LEZ_RLN_PAYER_KEY_FILE";
 
 const DOMAIN: &str = "lez-rln/deploy-key/v1";
 
@@ -64,6 +72,26 @@ impl ProgramRole {
 /// The account `key` signs for.
 pub fn account_of(key: &PrivateKey) -> AccountId {
     AccountId::from(&PublicKey::new_from_private_key(key))
+}
+
+/// The private key `path` holds (64 hex characters, surrounding whitespace
+/// ignored). An error never quotes the file's content.
+pub fn key_from_file(path: &Path) -> Result<PrivateKey, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read the key file {}: {e}", path.display()))?;
+    raw.trim().parse().map_err(|_| {
+        format!(
+            "{} does not hold a private key (64 hex characters, a valid secp256k1 scalar)",
+            path.display()
+        )
+    })
+}
+
+/// The payer key the environment names, or `None` when it names none.
+pub fn payer_key_from_env() -> Result<Option<PrivateKey>, String> {
+    std::env::var_os(PAYER_KEY_FILE_ENV)
+        .map(|path| key_from_file(Path::new(&path)))
+        .transpose()
 }
 
 /// A deployment's secret and name. Holds the secret: not `Debug`, not
@@ -173,7 +201,8 @@ impl DeployKeys {
     }
 
     /// A fee payer to fund at genesis. No id depends on it: any funded
-    /// account can pay for the deploy instead.
+    /// account can pay for the deploy instead, and a plan can name a key of
+    /// its own (`payer_key_from_env`).
     pub fn payer(&self) -> PrivateKey {
         self.key(&[&label_seed("payer")])
     }
@@ -266,6 +295,30 @@ mod tests {
         std::fs::write(&path, format!("{}\n", "07".repeat(32))).unwrap();
         let from_file = DeployKeys::from_secret_file(&path, "testnet").unwrap();
         assert_eq!(every_account(&from_file), every_account(&keys("testnet")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A payer key file holds the key itself: its account is the key's own,
+    /// whatever the deployment is called.
+    #[test]
+    fn a_key_file_holds_the_key_itself() {
+        let dir = std::env::temp_dir().join(format!("lez-rln-payer-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payer.key");
+        std::fs::write(&path, format!("{}\n", "07".repeat(32))).unwrap();
+        let key = key_from_file(&path).unwrap();
+        assert_eq!(
+            account_of(&key),
+            account_of(&PrivateKey::try_new([7u8; 32]).unwrap())
+        );
+        assert_ne!(account_of(&key), account_of(&keys("testnet").payer()));
+
+        for content in ["not-a-key-value", &"00".repeat(32), &"07".repeat(31)] {
+            std::fs::write(&path, content).unwrap();
+            let error = key_from_file(&path).err().unwrap();
+            assert!(!error.contains(content), "{error}");
+        }
+        assert!(key_from_file(&dir.join("absent")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

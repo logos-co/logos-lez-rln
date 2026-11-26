@@ -15,13 +15,19 @@
 //! `LEZ_RLN_MAX_RATE_LIMIT`, durations to `LEZ_RLN_ACTIVE_DURATION_SECS` /
 //! `LEZ_RLN_GRACE_PERIOD_DURATION_SECS`, as `run_setup` reads them.
 //!
+//! `LEZ_RLN_PAYER_KEY_FILE` names a file holding the payer's own private key
+//! (64 hex characters): the plan then names that key's account as the payer
+//! to fund, in place of the one the deployment secret derives. No id changes.
+//!
 //! Run from `lez-rln/` with the guest binaries built and the plan records
 //! their image ids, which `deploy_plan` then holds a deploy to. Without them
 //! the plan records none: the ids do not depend on the code.
 
 use logos_lez_rln::rln::{
     client::{MERKLE_TREE_BINARY, REGISTRATION_BINARY, RegistryParams},
-    deploy_keys::{DEPLOY_NAME_ENV, DEPLOY_SECRET_FILE_ENV, DeployKeys},
+    deploy_keys::{
+        DEPLOY_NAME_ENV, DEPLOY_SECRET_FILE_ENV, DeployKeys, PAYER_KEY_FILE_ENV, payer_key_from_env,
+    },
     deploy_plan::{DeploymentPlan, RegistrySpec},
 };
 use nssa::program::Program;
@@ -31,7 +37,8 @@ fn usage() -> ! {
         "usage: plan_deployment --registry <label>[:<min rate>:<max rate>] [--registry ...]\n\
          \n\
          {DEPLOY_SECRET_FILE_ENV} names the file holding the deployment secret (64 hex\n\
-         characters); {DEPLOY_NAME_ENV} names the deployment."
+         characters); {DEPLOY_NAME_ENV} names the deployment; {PAYER_KEY_FILE_ENV},\n\
+         when set, a file holding the payer's own private key."
     );
     std::process::exit(2);
 }
@@ -65,7 +72,12 @@ fn main() {
     let keys = DeployKeys::from_env()
         .unwrap_or_else(|e| fail(&e))
         .unwrap_or_else(|| fail(&format!("{DEPLOY_SECRET_FILE_ENV} is not set")));
+    let payer_key = payer_key_from_env().unwrap_or_else(|e| fail(&e));
     let plan = DeploymentPlan::derive(&keys, &registries).unwrap_or_else(|e| fail(&e));
+    let plan = match &payer_key {
+        Some(key) => plan.paid_by(key),
+        None => plan,
+    };
 
     let images = image_id(REGISTRATION_BINARY).zip(image_id(MERKLE_TREE_BINARY));
     if images.is_none() {

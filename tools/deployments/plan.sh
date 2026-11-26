@@ -4,12 +4,20 @@
 #
 #   bash plan.sh --secret-file <file> --name <deployment> --reference <network> \
 #                --sequencer <url> --registry <label>[:<min rate>:<max rate>] \
-#                [--registry ...] [--outdir <dir>]
+#                [--registry ...] [--payer-key-file <file>] [--outdir <dir>]
 #
 # The ids are a function of three things: the deployment secret (a file of 64
 # hex characters, `openssl rand -hex 32`), the deployment's name, and each
 # registry's label. Nothing is read from a chain or a wallet, so this runs
 # before the network exists and gives the same answer every time.
+#
+# Two files, two jobs. --secret-file is the deployment secret: the program
+# header keys, the registries' owner and the treasuries derive from it, and
+# with them every id. --payer-key-file is optional and holds the private key
+# of the account that pays for the deploy: 64 hex characters too, but the key
+# itself, not a secret to derive from. Without it the payer is one more key
+# of the deployment secret. No id depends on the payer, so the same ids come
+# out with or without it; the plan only names another account to fund.
 #
 # Writes, under <outdir> (default: this repo's deployments/):
 #
@@ -34,18 +42,21 @@
 #   - The ids hold for a LEZ that derives addresses as the pinned one does
 #     (plan.json's `lez`).
 #
-# The name is part of every key: give a rehearsal on another chain another
-# name, and it shares no account with the real deployment.
+# The name is part of every key the secret derives: give a rehearsal on
+# another chain another name, and it shares no account with the real
+# deployment. A payer key of its own is the exception: it is one account
+# under every name, so do not fund it on two chains.
 set -euo pipefail
 
-usage(){ echo "usage: plan.sh --secret-file <file> --name <deployment> --reference <network> --sequencer <url> --registry <label>[:<min>:<max>] [--registry ...] [--outdir <dir>]" >&2; }
+usage(){ echo "usage: plan.sh --secret-file <file> --name <deployment> --reference <network> --sequencer <url> --registry <label>[:<min>:<max>] [--registry ...] [--payer-key-file <file>] [--outdir <dir>]" >&2; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"                    # logos-lez-rln root
 LEZ="$REPO/lez-rln"
-SECRET=""; NAME=""; REFERENCE=""; SEQUENCER=""; OUTROOT="$REPO/deployments"; REGISTRIES=()
+SECRET=""; PAYER_KEY=""; NAME=""; REFERENCE=""; SEQUENCER=""; OUTROOT="$REPO/deployments"; REGISTRIES=()
 while [ $# -gt 0 ]; do case "$1" in
   --secret-file) SECRET="$2"; shift 2;;
+  --payer-key-file) PAYER_KEY="$2"; shift 2;;
   --name) NAME="$2"; shift 2;;
   --reference) REFERENCE="$2"; shift 2;;
   --sequencer) SEQUENCER="$2"; shift 2;;
@@ -56,6 +67,12 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 [ -n "$SECRET" ] && [ -n "$NAME" ] && [ -n "$REFERENCE" ] && [ -n "$SEQUENCER" ] && [ ${#REGISTRIES[@]} -gt 0 ] || { usage; exit 1; }
 [ -f "$SECRET" ] || { echo "plan: FAIL: no secret file at $SECRET (make one: (umask 077; openssl rand -hex 32 > $SECRET))" >&2; exit 1; }
+if [ -n "$PAYER_KEY" ]; then
+  [ -f "$PAYER_KEY" ] || { echo "plan: FAIL: no payer key file at $PAYER_KEY (make one: (umask 077; openssl rand -hex 32 > $PAYER_KEY))" >&2; exit 1; }
+  # The payer's key ends up in the deployed wallet (storage.json), which is
+  # handed around; the deployment secret must not be readable from there.
+  ! cmp -s "$SECRET" "$PAYER_KEY" || { echo "plan: FAIL: --payer-key-file is the deployment secret; the payer needs a key of its own" >&2; exit 1; }
+fi
 # The reference becomes part of every registry id, and keystores file
 # memberships under that id: the lez module's table takes this alphabet.
 [[ "$REFERENCE" =~ ^[-_a-z0-9]{1,32}$ ]] || { echo "plan: FAIL: --reference must match [-_a-z0-9]{1,32}: $REFERENCE" >&2; exit 1; }
@@ -66,6 +83,15 @@ PLAN_BIN="$BIN_DIR/plan_deployment"
 [ -x "$PLAN_BIN" ] || { echo "plan: FAIL: missing $PLAN_BIN — build: (cd $LEZ && PYO3_PYTHON=\$(command -v python3) cargo build --release --bin plan_deployment)" >&2; exit 1; }
 
 SECRET="$(cd "$(dirname "$SECRET")" && pwd)/$(basename "$SECRET")"
+# Only the flag names a payer key: one inherited from the caller's shell
+# would change who the plan asks a genesis to fund.
+unset LEZ_RLN_PAYER_KEY_FILE
+PAYER_NOTE="a key of the deployment secret"
+if [ -n "$PAYER_KEY" ]; then
+  PAYER_KEY="$(cd "$(dirname "$PAYER_KEY")" && pwd)/$(basename "$PAYER_KEY")"
+  export LEZ_RLN_PAYER_KEY_FILE="$PAYER_KEY"
+  PAYER_NOTE="the key in $PAYER_KEY"
+fi
 ARGS=(); for r in "${REGISTRIES[@]}"; do ARGS+=(--registry "$r"); done
 export DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-/Library/Developer/CommandLineTools/Library/Frameworks}"
 # From lez-rln/, so the guest binaries are found and their image ids recorded.
@@ -98,8 +124,8 @@ done
 
 echo "plan: registration program $(jq -r .registration_program_id "$PLAN_DIR/plan.json")"
 echo "plan: merkle program       $(jq -r .merkle_program_id "$PLAN_DIR/plan.json")"
-echo "plan: fund at genesis      public key $(jq -r .payer_public_key "$PLAN_DIR/plan.json") (account $(jq -r .payer_account "$PLAN_DIR/plan.json")), or pay from another account: deploy.sh --payer"
+echo "plan: fund at genesis      public key $(jq -r .payer_public_key "$PLAN_DIR/plan.json") (account $(jq -r .payer_account "$PLAN_DIR/plan.json"), $PAYER_NOTE), or pay from another account: deploy.sh --payer"
 if jq -e '.registration_image_id == null' "$PLAN_DIR/plan.json" >/dev/null; then
   echo "plan: no guest binaries found, so the plan holds a deploy to no particular image"
 fi
-echo "plan: DONE — $PLAN_DIR/plan.json; deploy with: bash $HERE/deploy.sh --plan-dir $PLAN_DIR --secret-file <file>"
+echo "plan: DONE — $PLAN_DIR/plan.json; deploy with: bash $HERE/deploy.sh --plan-dir $PLAN_DIR --secret-file <file>${PAYER_KEY:+ --payer-key-file <file>}"

@@ -3,8 +3,8 @@
 # FEATURE: deployment-profile tooling — the planned (deterministic) entry point.
 #
 #   bash deploy.sh --plan-dir <outdir>/<name> --secret-file <file>
-#                  [--payer <account-id> --adopt-wallet <storage.json>] [--check]
-#                  [--allow-image-change]
+#                  [--payer-key-file <file>] [--payer <account-id>]
+#                  [--adopt-wallet <storage.json>] [--check] [--allow-image-change]
 #
 # Runs deploy_plan in a throwaway wallet home: it recomputes the plan from the
 # secret and refuses a plan.json these keys do not derive, checks every
@@ -20,10 +20,14 @@
 # is finished by running again; a run against a chain that already holds the
 # plan sends nothing.
 #
-# Who pays. By default the deployment's own payer: plan.json's payer_account,
-# whose key comes from the secret, funded at genesis by its public key. To
-# pay from another funded account, pass its wallet and its id
-# (--adopt-wallet, --payer). No id depends on the payer.
+# Who pays. By default plan.json's payer_account, funded at genesis by its
+# public key. Its key is the deployment secret's own payer key, unless the
+# plan was made with --payer-key-file: then pass the same file here (64 hex
+# characters, the payer's private key itself). To pay from another funded
+# account, name it with --payer and give its key: as a key file
+# (--payer-key-file) or in a wallet that holds it (--adopt-wallet). A payer
+# this run has no key for is refused before anything is sent. No id depends
+# on the payer.
 #
 # The code. plan.json records the image ids of the guest binaries it was made
 # beside, and a deploy of other binaries is refused: the ids would be the
@@ -32,15 +36,16 @@
 # The sequencer is plan.json's. LEE_WALLET_PASSWORD seals the wallet if set.
 set -euo pipefail
 
-usage(){ echo "usage: deploy.sh --plan-dir <outdir>/<name> --secret-file <file> [--payer <account-id> --adopt-wallet <storage.json>] [--check] [--allow-image-change]" >&2; }
+usage(){ echo "usage: deploy.sh --plan-dir <outdir>/<name> --secret-file <file> [--payer-key-file <file>] [--payer <account-id>] [--adopt-wallet <storage.json>] [--check] [--allow-image-change]" >&2; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"                    # logos-lez-rln root
 LEZ="$REPO/lez-rln"
-PLAN_DIR=""; SECRET=""; PAYER=""; ADOPT=""; CHECK=""; IMAGES=""
+PLAN_DIR=""; SECRET=""; PAYER_KEY=""; PAYER=""; ADOPT=""; CHECK=""; IMAGES=""
 while [ $# -gt 0 ]; do case "$1" in
   --plan-dir) PLAN_DIR="$2"; shift 2;;
   --secret-file) SECRET="$2"; shift 2;;
+  --payer-key-file) PAYER_KEY="$2"; shift 2;;
   --payer) PAYER="$2"; shift 2;;
   --adopt-wallet) ADOPT="$2"; shift 2;;
   --check) CHECK="--check"; shift;;
@@ -52,14 +57,21 @@ esac; done
 PLAN="$PLAN_DIR/plan.json"
 [ -f "$PLAN" ] || { echo "deploy: FAIL: no plan at $PLAN (plan.sh writes it)" >&2; exit 1; }
 [ -f "$SECRET" ] || { echo "deploy: FAIL: no secret file at $SECRET" >&2; exit 1; }
+if [ -n "$PAYER_KEY" ]; then
+  [ -f "$PAYER_KEY" ] || { echo "deploy: FAIL: no payer key file at $PAYER_KEY" >&2; exit 1; }
+  # The payer's key is stored in the deployed wallet (storage.json), which is
+  # handed around; the deployment secret must not be readable from there.
+  ! cmp -s "$SECRET" "$PAYER_KEY" || { echo "deploy: FAIL: --payer-key-file is the deployment secret; the payer needs a key of its own" >&2; exit 1; }
+  PAYER_KEY="$(cd "$(dirname "$PAYER_KEY")" && pwd)/$(basename "$PAYER_KEY")"
+fi
 command -v jq >/dev/null || { echo "deploy: FAIL: jq not found" >&2; exit 1; }
 PLAN_DIR="$(cd "$PLAN_DIR" && pwd)"; PLAN="$PLAN_DIR/plan.json"
 SECRET="$(cd "$(dirname "$SECRET")" && pwd)/$(basename "$SECRET")"
 OUTROOT="$(dirname "$PLAN_DIR")"
 NAME=$(jq -re .name "$PLAN"); SEQUENCER=$(jq -re .sequencer "$PLAN")
 [ "$(basename "$PLAN_DIR")" = "$NAME" ] || { echo "deploy: FAIL: $PLAN is the plan of '$NAME', not of $(basename "$PLAN_DIR")" >&2; exit 1; }
-if [ -n "$PAYER" ] && [ -z "$ADOPT" ]; then
-  echo "deploy: FAIL: --payer names an account of another wallet; pass that wallet with --adopt-wallet" >&2; exit 1
+if [ -n "$PAYER" ] && [ -z "$ADOPT" ] && [ -z "$PAYER_KEY" ]; then
+  echo "deploy: FAIL: --payer names an account this run holds no key for; give its key with --payer-key-file, or a wallet that holds it with --adopt-wallet" >&2; exit 1
 fi
 [ -n "$PAYER" ] || PAYER=$(jq -re .payer_account "$PLAN")
 
@@ -75,10 +87,13 @@ fi
 # The wallet config provision.sh writes; see there for each field.
 jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencer:{sequencer_addr:$s}, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
-echo "deploy: deployment=$NAME sequencer=$SEQUENCER payer=$PAYER"
+echo "deploy: deployment=$NAME sequencer=$SEQUENCER payer=$PAYER${PAYER_KEY:+ (key file $PAYER_KEY)}"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS"
 export LEE_WALLET_PASSWORD="${LEE_WALLET_PASSWORD:-}"
 export LEZ_RLN_DEPLOY_SECRET_FILE="$SECRET" LEZ_RLN_PAYER="$PAYER" RISC0_DEV_MODE=1
+# Only the flag names a payer key, never the caller's shell.
+unset LEZ_RLN_PAYER_KEY_FILE
+[ -z "$PAYER_KEY" ] || export LEZ_RLN_PAYER_KEY_FILE="$PAYER_KEY"
 export DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-/Library/Developer/CommandLineTools/Library/Frameworks}"
 # From lez-rln/: the guest binaries are read by a relative path.
 ( cd "$LEZ" && "$DEPLOY_BIN" --plan "$PLAN" --out "$WS/deployed.json" $CHECK $IMAGES )
