@@ -49,8 +49,9 @@ jq -e '.key_chain.accounts' "$WALLET" >/dev/null 2>&1 \
   || fail "wallet schema unrecognised (expected top-level 'key_chain.accounts')"
 # wallet<->deployment binding: the wallet must actually hold the payer, since
 # nothing else can sign a registration against this deployment. The treasury is
-# only ever credited, so no wallet need hold it.
-holds(){ jq -e --arg a "$1" 'any(.key_chain.accounts[]; .Public.account_id == $a)' "$WALLET" >/dev/null 2>&1; }
+# only ever credited, so no wallet need hold it. A planned deployment's payer
+# is a key the wallet imported rather than one of its key chain.
+holds(){ jq -e --arg a "$1" 'any(.key_chain.accounts[]; (.Public.account_id // .ImportedPublic.account_id) == $a)' "$WALLET" >/dev/null 2>&1; }
 holds "$PAY" || fail "wallet does not contain payer_account=$PAY — descriptor and storage.json are mismatched (wrong wallet)"
 
 mkdir -p "$OUT"

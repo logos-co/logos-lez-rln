@@ -12,7 +12,10 @@
 #   2. when the tree's record (~/.logos-lez-rln/programs_<tree>.json) exists,
 #      asserts it names the descriptor's program ids, so a descriptor and the
 #      ids every tool reads back cannot silently diverge;
-#   3. runs stage.sh's wallet binding.
+#   3. when the descriptor names the registry's owner and label, asserts the
+#      tree id is the one the registration program makes of them;
+#   4. runs stage.sh's wallet binding — unless the descriptor is a plan
+#      (`"planned": true`, from plan.sh), which has no wallet yet.
 # The image ids the program headers carry are checked by run_setup at deploy
 # time, not here.
 set -euo pipefail
@@ -21,7 +24,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"                    # logos-lez-rln root
 case "${1:-}" in -h|--help) echo "usage: verify.sh <deployment_dir>" >&2; exit 0;; esac
 DEP_DIR="${1:?usage: verify.sh <deployment_dir>}"
-DERIVE="${DERIVE_BIN:-$REPO/lez-rln/target/release/derive_accounts}"
+DERIVE="${DERIVE_BIN:-${LEZ_RLN_BIN_DIR:-$REPO/lez-rln/target/release}/derive_accounts}"
 export DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-/Library/Developer/CommandLineTools/Library/Frameworks}"
 
 [ -x "$DERIVE" ] || { echo "verify: FAIL: derive_accounts not built at $DERIVE
@@ -33,9 +36,21 @@ TREE=$(f tree_id); WANT_REG=$(f registration_program_id); WANT_MRK=$(f merkle_pr
 fail(){ echo "verify: FAIL: $1" >&2; exit 1; }
 
 # The descriptor's ids go in through the env overrides, so derive_accounts
-# reads them instead of whatever record the running HOME holds.
+# reads them instead of whatever record the running HOME holds. Given the
+# owner and the label beside the tree id, it refuses a tree id that is not
+# theirs; a descriptor from before owned registries names neither.
+OWNER=$(jq -r '.owner_account // empty' "$DEP_DIR/deployment.json")
+LABEL=$(jq -r '.tree_label // empty' "$DEP_DIR/deployment.json")
+unset LEZ_RLN_REGISTRY_OWNER LEZ_RLN_TREE_LABEL
+if [ -n "$OWNER" ]; then
+  export LEZ_RLN_REGISTRY_OWNER="$OWNER" LEZ_RLN_TREE_LABEL="$LABEL"
+  OWNER_NOTE="tree id is the owner's under '$LABEL'"
+else
+  OWNER_NOTE="no owner recorded (tree id not cross-checked)"
+fi
 DERIVED=$(cd "$REPO/lez-rln" && LEZ_RLN_TREE_ID_HEX="$TREE" \
-  LEZ_RLN_REGISTRATION_PROGRAM_ID="$WANT_REG" LEZ_RLN_MERKLE_PROGRAM_ID="$WANT_MRK" "$DERIVE")
+  LEZ_RLN_REGISTRATION_PROGRAM_ID="$WANT_REG" LEZ_RLN_MERKLE_PROGRAM_ID="$WANT_MRK" "$DERIVE") \
+  || fail "tree id is not the one owner $OWNER holds under label '$LABEL'"
 GOT_CFG=$(echo "$DERIVED" | jq -r .config_account)
 [ "$GOT_CFG" = "$WANT_CFG" ] || fail "config account mismatch (tree_id/program_id inconsistent)
   descriptor: $WANT_CFG
@@ -55,7 +70,12 @@ else
   RECORD_NOTE="no record at $RECORD (program ids not cross-checked)"
 fi
 
+if jq -e '.planned == true' "$DEP_DIR/deployment.json" >/dev/null; then
+  echo "verify: OK  $(f name)  PLANNED, not deployed: config re-derives from the descriptor's ids; $OWNER_NOTE; $RECORD_NOTE."
+  exit 0
+fi
+
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 bash "$HERE/stage.sh" "$DEP_DIR" "$tmp" >/dev/null
 
-echo "verify: OK  $(f name)  config re-derives from the descriptor's ids; $RECORD_NOTE; wallet binding holds."
+echo "verify: OK  $(f name)  config re-derives from the descriptor's ids; $OWNER_NOTE; $RECORD_NOTE; wallet binding holds."

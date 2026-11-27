@@ -7,6 +7,10 @@
 //! `LEZ_RLN_PAYER`. A named id whose header is empty or carries another image
 //! fails. `run_setup` then takes the printed ids through the same variables.
 //!
+//! With `LEZ_RLN_DEPLOY_SECRET_FILE` and `LEZ_RLN_DEPLOY_NAME` each program
+//! is deployed at the account that deployment's key signs for
+//! (`rln::deploy_keys`), so its id is known beforehand.
+//!
 //! The last lines on stdout, one `key=value` each (the wallet prints its own
 //! progress lines before them):
 //!
@@ -23,12 +27,17 @@
 
 use logos_lez_rln::rln::{
     client::{ensure_programs, init_wallet, load_programs},
+    deploy_keys::DeployKeys,
     program_ids::{env_program_ids, hex_id},
 };
 
 #[tokio::main]
 async fn main() {
     let known = env_program_ids().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
+    let keys = DeployKeys::from_env().unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2);
     });
@@ -41,6 +50,7 @@ async fn main() {
         &registration_program,
         &merkle_program,
         known,
+        keys.as_ref(),
     )
     .await;
 

@@ -21,10 +21,16 @@
 //! another actor of its own program. There are no claims: the config knows
 //! its price, treasury, durations, bounds and the merkle program; a
 //! membership knows its rate limit and dates. What a transaction submits is
-//! the ENTRY variant for the actor it targets (the config for `Initialize`,
-//! `InitializeMerkleTree` and `Register`; the membership for `Slash`,
-//! `Extend` and `Erase`); the INTERNAL variants are sent between the
-//! program's own actors and are refused from anyone else.
+//! the ENTRY variant for the actor it targets (the registry owner's own
+//! account for `Initialize`; the config for `InitializeMerkleTree` and
+//! `Register`; the membership for `Slash`, `Extend` and `Erase`); the
+//! INTERNAL variants are sent between the program's own actors and are
+//! refused from anyone else.
+//!
+//! A registry belongs to the account that signed its `Initialize`: the tree
+//! id is `owner_tree_id(owner, tree_label)`, computed by the program, never
+//! submitted. The program forwards the message from the owner's account to
+//! the config PDA of that tree, which accepts it from nowhere else.
 //!
 //! The leaf index is NOT carried for a registration. The tree assigns it on
 //! insert (its own `next_index`), so registrations built from the same chain
@@ -51,13 +57,16 @@ use crate::state::MembershipState;
 /// Messages of the registration program.
 #[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    // ── entry: sent to the config actor ──────────────────────────────────
-    /// Write the registry's config. One-shot: refused on a non-empty state.
+    // ── entry: sent to the registry owner's own account, which signs ─────
+    /// Write the config of the registry the signing account owns under
+    /// `tree_label`. One-shot: refused on a non-empty state.
     Initialize {
         /// Account id of the deployed merkle program: the header account the
         /// deployer created and signed, not a hash of its bytecode.
         merkle_program_id: [u8; 32],
-        tree_id: [u8; 32],
+        /// Tells apart the registries of one owner. Not a tree id: that is
+        /// `owner_tree_id(owner, tree_label)`.
+        tree_label: [u8; 32],
         /// Native atomic units charged per unit of rate limit.
         price_per_unit: u128,
         /// Plain public account the price is credited to. Deliberately not a
@@ -72,6 +81,7 @@ pub enum Message {
         min_rate_limit: u64,
         max_rate_limit: u64,
     },
+    // ── entry: sent to the config actor ──────────────────────────────────
     /// Initialize the tree: the config grants the merkle program its `main`
     /// PDA. One-shot on the tree's side.
     InitializeMerkleTree { tree_id: [u8; 32] },

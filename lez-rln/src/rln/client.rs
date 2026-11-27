@@ -11,14 +11,14 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use nssa::{AccountId, Actor, program::Program};
+use nssa::{AccountId, Actor, PrivateKey, program::Program};
 use nssa_core::program::{
     MAX_PROGRAM_SEGMENTS, MessageData, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramId,
 };
 use program_loader_core::{MAX_SEGMENT_DATA_LEN, ProgramHeader};
 use rand_chacha::ChaCha20Rng;
 use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
-use rln_layouts::{ConfigState, MembershipState};
+use rln_layouts::{ConfigState, MembershipState, label_seed, owner_tree_id};
 use sequencer_service_protocol::FeeStateQuote;
 use wallet::{
     AccountIdentity, AccountMention, FeeParams, WalletCore,
@@ -31,8 +31,9 @@ use crate::{
     fr_bytes::{bytes_le_to_fr, fr_to_bytes_le},
     merkle_tree::{fetch_tree_state, find_leaf_index, main_seed, tree_actor},
     rln::{
-        CONFIG_SIZE, MEMBERSHIP_SIZE, Message, ProgramIds, config_seed, derive_config_account,
-        derive_membership_account, membership_seed,
+        CONFIG_SIZE, MEMBERSHIP_SIZE, Message, ProgramIds, config_seed,
+        deploy_keys::{DeployKeys, ProgramRole, account_of},
+        derive_config_account, derive_membership_account, membership_seed,
         program_ids::{KnownProgramIds, hex_id, known_program_ids, save_program_ids},
     },
 };
@@ -97,6 +98,47 @@ pub fn rate_limit_bounds() -> (u64, u64) {
         "LEZ_RLN_MIN_RATE_LIMIT {min} exceeds LEZ_RLN_MAX_RATE_LIMIT {max}"
     );
     (min, max)
+}
+
+/// What a registry is created with. `Initialize` fixes all of it for the
+/// registry's life, and none of it is part of the registry's id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegistryParams {
+    pub price_per_unit: u128,
+    pub max_total_rate_limit: u64,
+    pub active_duration_sec: u32,
+    pub grace_period_duration_sec: u32,
+    pub min_rate_limit: u64,
+    pub max_rate_limit: u64,
+}
+
+impl RegistryParams {
+    /// The defaults, with the durations and the bounds the environment names
+    /// (`membership_durations`, `rate_limit_bounds`).
+    pub fn from_env() -> Self {
+        let (active_duration_sec, grace_period_duration_sec) = membership_durations();
+        let (min_rate_limit, max_rate_limit) = rate_limit_bounds();
+        Self {
+            price_per_unit: PRICE_PER_UNIT,
+            max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
+            active_duration_sec,
+            grace_period_duration_sec,
+            min_rate_limit,
+            max_rate_limit,
+        }
+    }
+
+    /// What `config` was initialized with.
+    pub fn of(config: &ConfigState) -> Self {
+        Self {
+            price_per_unit: config.price_per_unit,
+            max_total_rate_limit: config.max_total_rate_limit,
+            active_duration_sec: config.active_duration_for_new_memberships_sec,
+            grace_period_duration_sec: config.grace_period_duration_for_new_memberships_sec,
+            min_rate_limit: config.min_rate_limit,
+            max_rate_limit: config.max_rate_limit,
+        }
+    }
 }
 
 pub const REGISTRATION_BINARY: &str =
@@ -296,30 +338,80 @@ pub fn wait_account_attempts() -> u32 {
         .unwrap_or(360)
 }
 
-/// RLN tree id, read from `LEZ_RLN_TREE_ID_HEX` (32 bytes, 64 hex chars).
-/// Strict: aborts with an actionable error if unset or malformed. Kept out of
-/// source because shell scripts key persistent caches off the hex form, and a
-/// bump here would silently desync them.
-pub fn tree_id_from_env() -> [u8; 32] {
-    let hex = std::env::var("LEZ_RLN_TREE_ID_HEX").unwrap_or_else(|_| {
-        eprintln!(
-            "LEZ_RLN_TREE_ID_HEX not set (expected 64 hex chars).\n\
-             Example: LEZ_RLN_TREE_ID_HEX=000102030405060708090a0b0c0d0e0f\
-             1011121314151617a0cba6e85ca1e26e cargo run --bin run_setup"
-        );
-        std::process::exit(2);
-    });
-    let bytes = hex::decode(&hex).unwrap_or_else(|e| {
-        eprintln!("LEZ_RLN_TREE_ID_HEX is not valid hex: {e}");
-        std::process::exit(2);
-    });
-    bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
-        eprintln!(
-            "LEZ_RLN_TREE_ID_HEX must decode to exactly 32 bytes, got {}",
-            v.len()
-        );
+pub const TREE_ID_ENV: &str = "LEZ_RLN_TREE_ID_HEX";
+/// Tells apart the registries of one owner: at most 32 bytes. Unset is the
+/// empty label.
+pub const TREE_LABEL_ENV: &str = "LEZ_RLN_TREE_LABEL";
+/// The account that owns a registry: it signed `Initialize`, and with the
+/// label it is what the tree id is made of.
+pub const REGISTRY_OWNER_ENV: &str = "LEZ_RLN_REGISTRY_OWNER";
+
+/// A registry's label as the program takes it: zero-padded to 32 bytes.
+pub fn tree_label(label: &str) -> Result<[u8; 32], String> {
+    if label.len() > 32 {
+        return Err(format!(
+            "a tree label is at most 32 bytes, {label:?} is {}",
+            label.len()
+        ));
+    }
+    Ok(label_seed(label))
+}
+
+/// The label `LEZ_RLN_TREE_LABEL` names.
+pub fn tree_label_from_env() -> [u8; 32] {
+    let label = std::env::var(TREE_LABEL_ENV).unwrap_or_default();
+    tree_label(&label).unwrap_or_else(|e| {
+        eprintln!("{TREE_LABEL_ENV}: {e}");
         std::process::exit(2);
     })
+}
+
+/// The tree id the environment names, either way it can: outright in
+/// `LEZ_RLN_TREE_ID_HEX` (32 bytes, 64 hex chars), or as the registry
+/// `LEZ_RLN_REGISTRY_OWNER` owns under `LEZ_RLN_TREE_LABEL`. Strict: aborts
+/// with an actionable error if neither is set, either is malformed, or the
+/// two disagree. Kept out of source because shell scripts key persistent
+/// caches off the hex form, and a bump here would silently desync them.
+pub fn tree_id_from_env() -> [u8; 32] {
+    let named = std::env::var(TREE_ID_ENV).ok().map(|hex| {
+        let bytes = hex::decode(&hex).unwrap_or_else(|e| {
+            eprintln!("{TREE_ID_ENV} is not valid hex: {e}");
+            std::process::exit(2);
+        });
+        <[u8; 32]>::try_from(bytes).unwrap_or_else(|v: Vec<u8>| {
+            eprintln!(
+                "{TREE_ID_ENV} must decode to exactly 32 bytes, got {}",
+                v.len()
+            );
+            std::process::exit(2);
+        })
+    });
+    let owned = std::env::var(REGISTRY_OWNER_ENV).ok().map(|raw| {
+        let owner = parse_account_id(&raw).unwrap_or_else(|e| {
+            eprintln!("{REGISTRY_OWNER_ENV} is {e}");
+            std::process::exit(2);
+        });
+        owner_tree_id(owner.value(), &tree_label_from_env())
+    });
+    match (named, owned) {
+        (Some(named), Some(owned)) if named != owned => {
+            eprintln!(
+                "{TREE_ID_ENV} is {}, but the registry {REGISTRY_OWNER_ENV} owns under \
+                 {TREE_LABEL_ENV} is {}",
+                hex::encode(named),
+                hex::encode(owned)
+            );
+            std::process::exit(2);
+        }
+        (Some(tree_id), _) | (None, Some(tree_id)) => tree_id,
+        (None, None) => {
+            eprintln!(
+                "No tree named: set {TREE_ID_ENV} (64 hex chars), or {REGISTRY_OWNER_ENV} \
+                 (and {TREE_LABEL_ENV}) to name the registry that account owns."
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 /// Path to a per-tree account file, named `<prefix>_<tree_id>.txt`.
@@ -478,8 +570,20 @@ pub fn header_deployed(loader_shard: &[u8], image_id: &ProgramId) -> Result<bool
     }
 }
 
+/// The program header at `header`, or `None` for an account whose loader
+/// shard is empty or holds something else.
+pub async fn read_program_header(wallet_core: &Wallet, header: AccountId) -> Option<ProgramHeader> {
+    let state = read_actor_state(
+        wallet_core,
+        Actor::new(header, PROGRAM_LOADER_ACCOUNT_ID),
+        "program header",
+    )
+    .await;
+    ProgramHeader::from_loader_actor_state(&state)
+}
+
 /// Read `header`'s loader state and judge it against `image_id`.
-async fn program_deployed_at(
+pub async fn program_deployed_at(
     wallet_core: &Wallet,
     header: AccountId,
     image_id: &ProgramId,
@@ -527,9 +631,126 @@ async fn fresh_loader_account(wallet_core: &mut Wallet, label: &str) -> AccountI
     );
 }
 
-/// Deploy `program` to a fresh keyed header account, uploading its user ELF
-/// to fresh keyed segment accounts. Returns the header, which is the
-/// program's account id.
+/// Put `key` in the wallet, which from then on signs for its account. Not
+/// stored until the wallet is (`store_persistent_data`).
+pub fn import_key(wallet_core: &mut Wallet, key: PrivateKey) -> AccountId {
+    let account = account_of(&key);
+    wallet_core
+        .storage_mut()
+        .key_chain_mut()
+        .add_imported_public_account(key);
+    account
+}
+
+/// Whether the tree of `tree_id` has been initialized.
+pub async fn is_tree_initialized(
+    wallet_core: &Wallet,
+    programs: &ProgramIds,
+    tree_id: &[u8; 32],
+) -> bool {
+    !read_actor_state(wallet_core, tree_actor(programs, tree_id), "tree")
+        .await
+        .is_empty()
+}
+
+/// An upper estimate of what deploying `segments` loader segments and
+/// initializing `registries` registries costs the payer, at the fee the
+/// sequencer quotes for the next block.
+///
+/// Sized from deploys measured on LEZ v0.4.0-rc3: a program costs about 2.6
+/// fee units per uploaded byte (storage for the upload, then one cycle per
+/// byte the loader reads back), a registry about 38,000. Both are rounded
+/// up, to 3 per byte of a full segment and 100,000.
+pub async fn deploy_cost_estimate(
+    wallet_core: &Wallet,
+    segments: usize,
+    registries: usize,
+) -> u128 {
+    use sequencer_service_rpc::RpcClient as _;
+    const UNITS_PER_SEGMENT: u128 = 3 * MAX_SEGMENT_DATA_LEN as u128;
+    const UNITS_PER_REGISTRY: u128 = 100_000;
+    /// The base fee the wallet assumes when the sequencer quotes none.
+    const ASSUMED_BASE_FEE: u128 = 64;
+    let base_fee = match wallet_core.client().get_fee_state().await {
+        Ok(quote) => u128::from(
+            quote
+                .next_base_fee_exec_ceiling
+                .max(quote.next_base_fee_stor_ceiling),
+        ),
+        Err(e) => {
+            eprintln!("getFeeState failed ({e}); assuming a base fee of {ASSUMED_BASE_FEE}");
+            ASSUMED_BASE_FEE
+        }
+    };
+    (UNITS_PER_SEGMENT.saturating_mul(segments as u128))
+        .saturating_add(UNITS_PER_REGISTRY.saturating_mul(registries as u128))
+        .saturating_mul(base_fee)
+}
+
+/// How many segment sets of one image a derived deploy steps past before
+/// giving up on it.
+const SEGMENT_SET_ATTEMPTS: u32 = 16;
+
+/// The header and segment accounts of `role` in the deployment `keys` name,
+/// their keys imported.
+///
+/// The header is one account, whatever is uploaded. Segments are write-once
+/// and the wallet's loader cannot resume, so an interrupted upload leaves a
+/// set partly written: the first set with nothing written is taken.
+async fn derived_loader_accounts(
+    wallet_core: &mut Wallet,
+    keys: &DeployKeys,
+    role: ProgramRole,
+    image_id: &ProgramId,
+    segment_count: usize,
+    label: &str,
+) -> (AccountId, Vec<AccountId>) {
+    let segment_count =
+        u32::try_from(segment_count).expect("a program has at most MAX_PROGRAM_SEGMENTS");
+    let header = import_key(wallet_core, keys.program_header(role));
+    for attempt in 0..SEGMENT_SET_ATTEMPTS {
+        let mut written = false;
+        for index in 0..segment_count {
+            let account = account_of(&keys.program_segment(role, image_id, attempt, index));
+            let state = read_actor_state(
+                wallet_core,
+                Actor::new(account, PROGRAM_LOADER_ACCOUNT_ID),
+                label,
+            )
+            .await;
+            if !state.is_empty() {
+                written = true;
+                break;
+            }
+        }
+        if written {
+            println!("  {label}: segment set {attempt} is already written, taking the next");
+            continue;
+        }
+        let segments = (0..segment_count)
+            .map(|index| {
+                import_key(
+                    wallet_core,
+                    keys.program_segment(role, image_id, attempt, index),
+                )
+            })
+            .collect();
+        return (header, segments);
+    }
+    panic!(
+        "{label}: {SEGMENT_SET_ATTEMPTS} segment sets of this image are already written; the \
+         deploy keeps failing after its uploads — read the sequencer's log"
+    );
+}
+
+/// Deploy `program`, uploading its user ELF to keyed segment accounts and
+/// writing its header. Returns the header, which is the program's account
+/// id.
+///
+/// With `derived`, the header and the segments are the deployment's own
+/// accounts (`derived_loader_accounts`): the program id is known before the
+/// deploy. Without, they are the next unused accounts of the wallet's key
+/// chain.
 ///
 /// The wallet's loader cannot resume a partial upload, and segments are
 /// write-once, so every call uploads to accounts that are empty on chain; a
@@ -540,6 +761,7 @@ pub async fn deploy_program(
     program: &Program,
     bytecode_path: &str,
     program_name: &str,
+    derived: Option<(&DeployKeys, ProgramRole)>,
 ) -> AccountId {
     let bytecode = std::fs::read(bytecode_path)
         .unwrap_or_else(|e| panic!("Failed to read {program_name} binary {bytecode_path}: {e}"));
@@ -556,11 +778,27 @@ pub async fn deploy_program(
         panic!("{program_name}: deploying needs a funded payer — set LEZ_RLN_PAYER")
     });
 
-    let header = fresh_loader_account(wallet_core, program_name).await;
-    let mut segments = Vec::with_capacity(segment_count);
-    for _ in 0..segment_count {
-        segments.push(fresh_loader_account(wallet_core, program_name).await);
-    }
+    let (header, segments) = match derived {
+        Some((keys, role)) => {
+            derived_loader_accounts(
+                wallet_core,
+                keys,
+                role,
+                &program.id(),
+                segment_count,
+                program_name,
+            )
+            .await
+        }
+        None => {
+            let header = fresh_loader_account(wallet_core, program_name).await;
+            let mut segments = Vec::with_capacity(segment_count);
+            for _ in 0..segment_count {
+                segments.push(fresh_loader_account(wallet_core, program_name).await);
+            }
+            (header, segments)
+        }
+    };
     // The header and segment keys have to outlive a failed deploy: the header
     // key is what `UpdateHeader` would sign with.
     wallet_core
@@ -587,20 +825,36 @@ pub async fn deploy_program(
 
 /// The program at `known`, if its header carries `program`'s image id, else
 /// a fresh deploy.
+///
+/// With `derived`, the program belongs at the deployment's own header
+/// account and nowhere else: it is deployed there if the account is empty,
+/// and a `known` id naming another account is refused.
 async fn ensure_program(
     wallet_core: &mut Wallet,
     known: Option<AccountId>,
     program: &Program,
     bytecode_path: &str,
     program_name: &str,
+    derived: Option<(&DeployKeys, ProgramRole)>,
 ) -> AccountId {
-    let Some(header) = known else {
-        return deploy_program(wallet_core, program, bytecode_path, program_name).await;
+    let planned = derived.map(|(keys, role)| account_of(&keys.program_header(role)));
+    if let (Some(known), Some(planned)) = (known, planned) {
+        assert_eq!(
+            known, planned,
+            "{program_name}: the recorded program id {known} is not the one this deployment's \
+             key signs for, {planned}"
+        );
+    }
+    let Some(header) = known.or(planned) else {
+        return deploy_program(wallet_core, program, bytecode_path, program_name, None).await;
     };
     match program_deployed_at(wallet_core, header, &program.id(), program_name).await {
         Ok(true) => {
             println!("  {program_name} already deployed at {header}");
             header
+        }
+        Ok(false) if planned.is_some() => {
+            deploy_program(wallet_core, program, bytecode_path, program_name, derived).await
         }
         Ok(false) => panic!(
             "{program_name}: the recorded program id {header} holds no header. Unset its \
@@ -723,8 +977,9 @@ async fn confirm_effect(
 }
 
 /// Build, submit, and confirm one registration-program init transaction:
-/// no signers, paid by `LEZ_RLN_PAYER`, its root the first mention. Blocks
-/// until `wait_on` is non-empty.
+/// paid by `LEZ_RLN_PAYER`, its root the first mention, signed by whichever
+/// mentions name a keyed account of this wallet. Blocks until `wait_on` is
+/// non-empty.
 async fn send_init_tx(
     wallet_core: &Wallet,
     accounts: Vec<AccountMention>,
@@ -795,11 +1050,15 @@ async fn seed_treasury(wallet_core: &Wallet, payer: AccountId, treasury: Account
 /// Reuse each program `known` names when its header carries the local
 /// binary's image id, and deploy whichever is not named. Merkle first, then
 /// registration. Initializes nothing and records nothing.
+///
+/// With `keys`, each program lives at the account the deployment's key
+/// signs for (`ensure_program`).
 pub async fn ensure_programs(
     wallet_core: &mut Wallet,
     registration_program: &Program,
     merkle_program: &Program,
     known: KnownProgramIds,
+    keys: Option<&DeployKeys>,
 ) -> ProgramIds {
     let merkle = ensure_program(
         wallet_core,
@@ -807,6 +1066,7 @@ pub async fn ensure_programs(
         merkle_program,
         MERKLE_TREE_BINARY,
         "Merkle tree program",
+        keys.map(|keys| (keys, ProgramRole::Merkle)),
     )
     .await;
     let registration = ensure_program(
@@ -815,6 +1075,7 @@ pub async fn ensure_programs(
         registration_program,
         REGISTRATION_BINARY,
         "Registration program",
+        keys.map(|keys| (keys, ProgramRole::Registration)),
     )
     .await;
     ProgramIds {
@@ -823,97 +1084,197 @@ pub async fn ensure_programs(
     }
 }
 
+/// The account that owns the registries this wallet sets up: the
+/// deployment's own owner with `keys`, else `LEZ_RLN_REGISTRY_OWNER`, else
+/// the payer. It signs `Initialize`, so the wallet must hold its key.
+pub fn registry_owner(wallet_core: &mut Wallet, keys: Option<&DeployKeys>) -> AccountId {
+    let named = std::env::var(REGISTRY_OWNER_ENV).ok().map(|raw| {
+        parse_account_id(&raw).unwrap_or_else(|e| panic!("{REGISTRY_OWNER_ENV} is {e}"))
+    });
+    let owner = match keys {
+        Some(keys) => {
+            let owner = import_key(wallet_core, keys.registry_owner());
+            if let Some(named) = named {
+                assert_eq!(
+                    named, owner,
+                    "{REGISTRY_OWNER_ENV} names {named}, the deployment's owner is {owner}"
+                );
+            }
+            owner
+        }
+        None => named.or_else(fee_payer).unwrap_or_else(|| {
+            panic!("a registry needs an owner — set LEZ_RLN_PAYER or {REGISTRY_OWNER_ENV}")
+        }),
+    };
+    assert!(
+        wallet_core.get_account_public_signing_key(owner).is_some(),
+        "the registry owner {owner} is not in this wallet, and Initialize is signed by it"
+    );
+    owner
+}
+
+/// A registry as it was set up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Registry {
+    pub programs: ProgramIds,
+    pub owner: AccountId,
+    pub tree_id: [u8; 32],
+}
+
+/// Initialize the registry `owner` owns under `tree_label` on `programs`,
+/// and its tree. Returns the tree id.
+///
+/// Each step is skipped when its effect is already on chain, so a run that
+/// was interrupted is finished by running again. The parameters apply only
+/// to a config this call writes: an existing one keeps what it was
+/// initialized with.
+///
+/// The treasury is the account of `treasury_key` when given, else the next
+/// account of the wallet's key chain.
+pub async fn initialize_registry(
+    wallet_core: &mut Wallet,
+    programs: &ProgramIds,
+    owner: AccountId,
+    tree_label: &[u8; 32],
+    params: &RegistryParams,
+    treasury_key: Option<PrivateKey>,
+) -> [u8; 32] {
+    let tree_id = owner_tree_id(owner.value(), tree_label);
+    println!("  Registry owner: {owner}");
+    println!("  Tree id: {}", hex::encode(tree_id));
+    let config = config_actor(programs, &tree_id);
+    let tree_main = tree_actor(programs, &tree_id);
+    let config_mention = || {
+        pda_mention(
+            programs.registration,
+            config_seed(&tree_id),
+            programs.registration,
+        )
+    };
+
+    if is_initialized(wallet_core, programs, &tree_id).await {
+        println!("Registry already initialized for this tree");
+    } else {
+        // The treasury is a plain public account, deliberately not a PDA: a
+        // PDA is spendable only by its owning program, and this program has
+        // no message that would spend it.
+        println!("Setup Step 2: Creating the treasury account...");
+        let treasury_id = match treasury_key {
+            Some(key) => import_key(wallet_core, key),
+            None => wallet_core.create_new_account_public(None).0,
+        };
+        wallet_core
+            .store_persistent_data()
+            .expect("Failed to store wallet");
+        println!("  Treasury: {treasury_id}");
+        println!(
+            "  Treasury public key: {}",
+            public_key_of(wallet_core, treasury_id, "treasury")
+        );
+        let payer = fee_payer().expect("initializing needs a funded payer — set LEZ_RLN_PAYER");
+        seed_treasury(wallet_core, payer, treasury_id).await;
+
+        println!("Setup Step 3: Initializing registration program...");
+        println!(
+            "  Rate limit bounds: {}..={}",
+            params.min_rate_limit, params.max_rate_limit
+        );
+        // Sent to the owner's own account, which signs: the program reads
+        // the tree id off the signer and forwards to the config itself.
+        send_init_tx(
+            wallet_core,
+            vec![
+                AccountIdentity::Public(owner).select_program_actor_state(programs.registration),
+                config_mention(),
+            ],
+            Message::Initialize {
+                merkle_program_id: *programs.merkle.value(),
+                tree_label: *tree_label,
+                price_per_unit: params.price_per_unit,
+                treasury_account_id: *treasury_id.value(),
+                max_total_rate_limit: params.max_total_rate_limit,
+                active_duration_for_new_memberships_sec: params.active_duration_sec,
+                grace_period_duration_for_new_memberships_sec: params.grace_period_duration_sec,
+                min_rate_limit: params.min_rate_limit,
+                max_rate_limit: params.max_rate_limit,
+            },
+            "InitializeConfig",
+            config,
+        )
+        .await;
+    }
+
+    // Two transactions rather than one: a fused Initialize+merkle exceeds the
+    // gas the wallet declares once the tree's default hashes run inline.
+    if !is_tree_initialized(wallet_core, programs, &tree_id).await {
+        send_init_tx(
+            wallet_core,
+            vec![
+                config_mention(),
+                pda_mention(programs.registration, main_seed(&tree_id), programs.merkle),
+            ],
+            Message::InitializeMerkleTree { tree_id },
+            "InitializeMerkleTree",
+            tree_main,
+        )
+        .await;
+        println!("  Registration initialized");
+    }
+    tree_id
+}
+
 /// Deploy (or reuse) both programs, record their ids, create the treasury, and
-/// initialize the registry for `tree_id`. Returns the program ids.
+/// initialize the registry the owner holds under `tree_label`.
+///
+/// The owner is `registry_owner`, and the tree id follows from it and the
+/// label: it is this call's result, not its input.
 ///
 /// Programs are reused from `LEZ_RLN_{REGISTRATION,MERKLE}_PROGRAM_ID` or the
 /// tree's record when their headers carry the local binaries' image ids;
 /// whatever is missing is deployed. The record is written as soon as both ids
-/// are known, before initialization.
+/// are known, before initialization. With `keys`, the programs, the owner and
+/// the treasury are the deployment's own accounts.
 pub async fn run_setup(
     wallet_core: &mut Wallet,
     registration_program: &Program,
     merkle_program: &Program,
-    tree_id: &[u8; 32],
-) -> ProgramIds {
-    let known = known_program_ids(tree_id).unwrap_or_else(|e| panic!("{e}"));
+    tree_label: &[u8; 32],
+    params: &RegistryParams,
+    keys: Option<&DeployKeys>,
+) -> Registry {
+    let owner = registry_owner(wallet_core, keys);
+    let tree_id = owner_tree_id(owner.value(), tree_label);
+    let known = known_program_ids(&tree_id).unwrap_or_else(|e| panic!("{e}"));
 
     println!("Setup Step 1: Checking/deploying programs...");
-    let programs = ensure_programs(wallet_core, registration_program, merkle_program, known).await;
-    save_program_ids(tree_id, &programs);
+    let programs = ensure_programs(
+        wallet_core,
+        registration_program,
+        merkle_program,
+        known,
+        keys,
+    )
+    .await;
+    save_program_ids(&tree_id, &programs);
     println!(
         "  Program ids recorded in {}",
-        crate::rln::program_ids::record_path(tree_id).display()
+        crate::rln::program_ids::record_path(&tree_id).display()
     );
 
-    if is_initialized(wallet_core, &programs, tree_id).await {
-        println!("Registry already initialized for this tree");
-        return programs;
+    initialize_registry(
+        wallet_core,
+        &programs,
+        owner,
+        tree_label,
+        params,
+        keys.map(|keys| keys.treasury(tree_label)),
+    )
+    .await;
+    Registry {
+        programs,
+        owner,
+        tree_id,
     }
-
-    // The treasury is a plain public account, deliberately not a PDA: a PDA is
-    // spendable only by its owning program, and this program has no message
-    // that would spend it.
-    println!("Setup Step 2: Creating the treasury account...");
-    let (treasury_id, _) = wallet_core.create_new_account_public(None);
-    wallet_core
-        .store_persistent_data()
-        .expect("Failed to store wallet");
-    println!("  Treasury: {treasury_id}");
-    println!(
-        "  Treasury public key: {}",
-        public_key_of(wallet_core, treasury_id, "treasury")
-    );
-    let payer = fee_payer().expect("initializing needs a funded payer — set LEZ_RLN_PAYER");
-    seed_treasury(wallet_core, payer, treasury_id).await;
-
-    println!("Setup Step 3: Initializing registration program...");
-    let (active_duration_sec, grace_period_duration_sec) = membership_durations();
-    let (min_rate_limit, max_rate_limit) = rate_limit_bounds();
-    println!("  Rate limit bounds: {min_rate_limit}..={max_rate_limit}");
-    let config = config_actor(&programs, tree_id);
-    let tree_main = tree_actor(&programs, tree_id);
-    let config_mention = || {
-        pda_mention(
-            programs.registration,
-            config_seed(tree_id),
-            programs.registration,
-        )
-    };
-    // Two transactions rather than one: a fused Initialize+merkle exceeds the
-    // gas the wallet declares once the tree's default hashes run inline.
-    send_init_tx(
-        wallet_core,
-        vec![config_mention()],
-        Message::Initialize {
-            merkle_program_id: *programs.merkle.value(),
-            tree_id: *tree_id,
-            price_per_unit: PRICE_PER_UNIT,
-            treasury_account_id: *treasury_id.value(),
-            max_total_rate_limit: MAX_TOTAL_RATE_LIMIT,
-            active_duration_for_new_memberships_sec: active_duration_sec,
-            grace_period_duration_for_new_memberships_sec: grace_period_duration_sec,
-            min_rate_limit,
-            max_rate_limit,
-        },
-        "InitializeConfig",
-        config,
-    )
-    .await;
-
-    send_init_tx(
-        wallet_core,
-        vec![
-            config_mention(),
-            pda_mention(programs.registration, main_seed(tree_id), programs.merkle),
-        ],
-        Message::InitializeMerkleTree { tree_id: *tree_id },
-        "InitializeMerkleTree",
-        tree_main,
-    )
-    .await;
-    println!("  Registration initialized");
-    programs
 }
 
 /// An account id as either 64 hex chars or base58.
