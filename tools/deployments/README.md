@@ -163,6 +163,11 @@ registry, `deployments/<name>-<label>/deployment.json`, with the `registry_id`
 a preset needs. `deploy.sh` turns each into a deployed
 `{deployment.json, storage.json}`.
 
+Every transaction of a deploy costs one poll interval, 30 s by default,
+whatever the block time: the wallet sleeps that long before it looks for the
+transaction again. On a local chain pass its block time
+(`deploy.sh --poll-interval 1s`).
+
 **Two files.** `--secret-file` is the deployment secret: the program header
 keys, the registries' owner and the treasuries derive from it, and with them
 every id. `--payer-key-file` is optional and holds the private key of the

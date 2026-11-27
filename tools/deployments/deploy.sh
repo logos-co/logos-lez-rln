@@ -5,6 +5,7 @@
 #   bash deploy.sh --plan-dir <outdir>/<name> --secret-file <file>
 #                  [--payer-key-file <file>] [--payer <account-id>]
 #                  [--adopt-wallet <storage.json>] [--check] [--allow-image-change]
+#                  [--poll-interval <duration>]
 #
 # Runs deploy_plan in a throwaway wallet home: it recomputes the plan from the
 # secret and refuses a plan.json these keys do not derive, checks every
@@ -33,16 +34,23 @@
 # beside, and a deploy of other binaries is refused: the ids would be the
 # plan's, the code would not. --allow-image-change deploys them anyway.
 #
+# Waiting. The wallet looks for a transaction it sent and, while no block
+# holds it, sleeps --poll-interval before the next look, 14 times at most:
+# every transaction costs one interval, whatever the block time. The default
+# is 30s (7 minutes for a transaction to land). On a local chain pass its
+# block time, e.g. --poll-interval 1s.
+#
 # The sequencer is plan.json's. LEE_WALLET_PASSWORD seals the wallet if set.
 set -euo pipefail
 
-usage(){ echo "usage: deploy.sh --plan-dir <outdir>/<name> --secret-file <file> [--payer-key-file <file>] [--payer <account-id>] [--adopt-wallet <storage.json>] [--check] [--allow-image-change]" >&2; }
+usage(){ echo "usage: deploy.sh --plan-dir <outdir>/<name> --secret-file <file> [--payer-key-file <file>] [--payer <account-id>] [--adopt-wallet <storage.json>] [--check] [--allow-image-change] [--poll-interval <duration>]" >&2; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"                    # logos-lez-rln root
 LEZ="$REPO/lez-rln"
-PLAN_DIR=""; SECRET=""; PAYER_KEY=""; PAYER=""; ADOPT=""; CHECK=""; IMAGES=""
+PLAN_DIR=""; SECRET=""; PAYER_KEY=""; PAYER=""; ADOPT=""; CHECK=""; IMAGES=""; POLL="30s"
 while [ $# -gt 0 ]; do case "$1" in
+  --poll-interval) POLL="$2"; shift 2;;
   --plan-dir) PLAN_DIR="$2"; shift 2;;
   --secret-file) SECRET="$2"; shift 2;;
   --payer-key-file) PAYER_KEY="$2"; shift 2;;
@@ -54,6 +62,7 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 1;;
 esac; done
 [ -n "$PLAN_DIR" ] && [ -n "$SECRET" ] || { usage; exit 1; }
+[[ "$POLL" =~ ^[1-9][0-9]*(ms|s)$ ]] || { echo "deploy: FAIL: --poll-interval takes whole seconds or milliseconds (30s, 1s, 500ms): $POLL" >&2; exit 1; }
 PLAN="$PLAN_DIR/plan.json"
 [ -f "$PLAN" ] || { echo "deploy: FAIL: no plan at $PLAN (plan.sh writes it)" >&2; exit 1; }
 [ -f "$SECRET" ] || { echo "deploy: FAIL: no secret file at $SECRET" >&2; exit 1; }
@@ -85,7 +94,7 @@ if [ -n "$ADOPT" ]; then
   cp "$ADOPT" "$WS/storage.json"; echo "deploy: adopting wallet $ADOPT"
 fi
 # The wallet config provision.sh writes; see there for each field.
-jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencer:{sequencer_addr:$s}, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
+jq -n --arg s "$SEQUENCER" --arg p "$POLL" '{sequencer_addr:$s, sequencer:{sequencer_addr:$s}, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:$p, seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
 echo "deploy: deployment=$NAME sequencer=$SEQUENCER payer=$PAYER${PAYER_KEY:+ (key file $PAYER_KEY)}"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS"
