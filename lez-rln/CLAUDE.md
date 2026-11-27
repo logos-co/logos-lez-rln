@@ -147,10 +147,16 @@
   adds a hash to slash does not fit.
 - Those figures are of a tree with ONE leaf. A merkle session also pays about
   10 cycles per byte of tree state, and a removed leaf's nodes stay in the
-  state. Measured on these binaries with synthetic tree states (not yet
-  through the chain tests): Remove costs 8,404,880 after 128 registrations in
-  the tree's life and 8,504,041 after 256, so slash passes the ceiling at
-  about 190; register on a full tree is about 9.60M and fits.
+  state, so cost follows the registrations a tree has had in its LIFE.
+  Measured on these binaries through the in-process chain, with real Register
+  transactions and a 10M budget per transaction: slash is first refused at
+  185 lifetime registrations and always from 196 (`OutOfGas`, the declared
+  gas charged, state unchanged); register is refused at leaves 384, 448 and
+  480, the leaves that open a new subtree, and since the next index only
+  advances, a tree takes no registration from leaf 384 on; erase always fits
+  (9,623,711 at most). The gas-ceiling tests and `cycle_harness` measure the
+  one-leaf tree, and `TestSetup::apply` runs at a 32M budget, so neither
+  shows this.
 - A guest PANIC is charged the transaction's full declared gas; a guest that
   halts with `env::exit(code != 0)` is charged the cycles it ran
   (`ProgramExitedWithCode`, `validated_state_diff::from_public_transaction_metered`,
