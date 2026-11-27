@@ -27,6 +27,10 @@ export LEE_WALLET_HOME_DIR="$E2E/wallet"
 # A throwaway wallet, unencrypted: the tools never prompt.
 export LEE_WALLET_PASSWORD=""
 export RUST_LOG="${RUST_LOG:-warn}"
+# The executor needs the r0vm that matches risc0-zkvm (3.1.0); a machine whose
+# default r0vm is older names the newer one in RISC0_SERVER_PATH.
+R0VM_310="$(ls -d "$HOME"/.risc0/extensions/v3.1.0-cargo-risczero-*/r0vm 2>/dev/null | head -n 1 || true)"
+[ -n "${RISC0_SERVER_PATH:-}" ] || [ -z "$R0VM_310" ] || export RISC0_SERVER_PATH="$R0VM_310"
 
 if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
   echo "error: port $PORT is already in use; stop that sequencer first" >&2
@@ -49,13 +53,13 @@ echo "Building host binaries and the lifecycle test..."
 cargo build --manifest-path "$REPO/lez-rln/Cargo.toml" --bin mint_payer
 cargo test --manifest-path "$REPO/lez-rln/Cargo.toml" --test local_sequencer --no-run
 
-# mint_payer prints the account id, then its public key: the id is what
+# mint_payer prints the account id, then its initial key: the id is what
 # signs and pays, the key is what genesis credits.
 PAYER_LINES="$("$REPO/lez-rln/target/debug/mint_payer")"
 PAYER="$(printf '%s\n' "$PAYER_LINES" | sed -n 1p)"
 PAYER_PK="$(printf '%s\n' "$PAYER_LINES" | sed -n 2p)"
 export LEZ_RLN_PAYER="$PAYER"
-echo "Payer: $PAYER (public key $PAYER_PK)"
+echo "Payer: $PAYER (initial key $PAYER_PK)"
 
 echo "Starting the sequencer (log: $SEQ_LOG)..."
 LEZ_RLN_GENESIS_FUND="$PAYER_PK" "$REPO/dev.sh" > "$SEQ_LOG" 2>&1 &

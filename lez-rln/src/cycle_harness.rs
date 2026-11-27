@@ -24,12 +24,12 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use nssa::{
-        AccountId, Actor, ActorState, PublicTransaction, ValidatedStateDiff,
+        AccountId, Actor, ActorState, Authority, PublicTransaction, ValidatedStateDiff,
         program::{DEFAULT_PUBLIC_CYCLE_BUDGET, Program},
     };
     use nssa_core::{
         native_token::NATIVE_TOKEN_PROGRAM_ID,
-        program::{PdaSeed, ReceiveInput, Transition},
+        program::{ReceiveInput, Transition},
     };
     use risc0_zkvm::{ExecutorEnv, default_executor};
 
@@ -80,19 +80,17 @@ mod tests {
     /// Actor states keyed by actor, seeded from a state.
     type States = HashMap<Actor, ActorState>;
 
-    /// Deliver one message to `to`, then its sync messages depth-first in
-    /// emission order, recording every session. `is_authorized` is what lee
-    /// grants: the receiver signed, or the sender issued one of its PDA
-    /// seeds. Native actors run as Rust in lee — no session — and are
-    /// skipped.
-    #[allow(clippy::too_many_arguments)]
+    /// Deliver one message holding `grants` to `to`, then its sync messages
+    /// depth-first in emission order, recording every session. A sync message
+    /// holds what lee grants it: the grants its sender attaches, and its
+    /// receiver when the sender issued that receiver's PDA seed. Native actors
+    /// run as Rust in lee — no session — and are skipped.
     fn deliver(
         programs: &HashMap<AccountId, Program>,
         states: &mut States,
-        signers: &BTreeSet<AccountId>,
         to: Actor,
         from: Option<Actor>,
-        seeds: &BTreeSet<PdaSeed>,
+        grants: BTreeSet<Actor>,
         message: Vec<u8>,
         log: &mut Vec<(String, u64)>,
     ) {
@@ -105,16 +103,10 @@ mod tests {
         } else {
             "merkle"
         };
-        let is_authorized = signers.contains(&to.account_id)
-            || from.is_some_and(|from| {
-                seeds.iter().any(|seed| {
-                    AccountId::for_public_pda(&from.program_account_id, seed) == to.account_id
-                })
-            });
         let input = ReceiveInput {
             receiver: to,
             from,
-            is_authorized,
+            grants,
             pre_state: states.get(&to).cloned().unwrap_or_default(),
             message,
         };
@@ -124,13 +116,18 @@ mod tests {
             states.insert(to, post);
         }
         for next in transition.response.sync_messages {
+            let mut grants = next.grants;
+            if next.pda_seeds.iter().any(|seed| {
+                AccountId::for_public_pda(&to.program_account_id, seed) == next.to.account_id
+            }) {
+                grants.insert(next.to);
+            }
             deliver(
                 programs,
                 states,
-                signers,
                 next.to,
                 Some(to),
-                &next.pda_seeds,
+                grants,
                 next.message,
                 log,
             );
@@ -146,7 +143,7 @@ mod tests {
         tx.message()
             .public_context
             .actors
-            .iter()
+            .keys()
             .map(|actor| {
                 (
                     *actor,
@@ -180,16 +177,26 @@ mod tests {
         let programs = programs();
         let mut states = states_of(setup, tx);
         let message = tx.message();
-        let signers = message.public_context.authorized_accounts.clone();
+        let context = &message.public_context;
+        // The root holds a grant over every actor declared `Signer` whose
+        // account signs.
+        let root_grants = context
+            .actors
+            .iter()
+            .filter(|(actor, authority)| {
+                **authority == Authority::Signer
+                    && context.authorized_accounts.contains(&actor.account_id)
+            })
+            .map(|(actor, _)| *actor)
+            .collect();
         let root = &message.execution.root;
         let mut log = Vec::new();
         deliver(
             &programs,
             &mut states,
-            &signers,
             root.to,
             None,
-            &BTreeSet::new(),
+            root_grants,
             root.message.clone(),
             &mut log,
         );

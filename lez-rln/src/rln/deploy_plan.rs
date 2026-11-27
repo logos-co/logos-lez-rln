@@ -1,7 +1,7 @@
 //! A deployment as it will be: every id a client or a preset needs, computed
 //! from the deployment's keys before anything is on chain.
 //!
-//! A plan is public. It names accounts and public keys, never a private key,
+//! A plan is public. It names accounts and their initial keys, never a secret,
 //! and a registry it names cannot be taken by anyone else: the programs live
 //! at accounts only the deployment's header keys sign for, and a tree id is
 //! `owner_tree_id(owner, label)`, which only the owner can initialize.
@@ -12,11 +12,14 @@
 //! binaries that differ from the plan's.
 //!
 //! The ids hold for a LEZ that derives addresses as `LEZ_TAG` does (a keyed
-//! account from its public key, a PDA from a program's account id and a
+//! account from its initial key, a PDA from a program's account id and a
 //! seed, a program at its header account).
 
-use nssa::{AccountId, PrivateKey, PublicKey};
-use nssa_core::program::ProgramId;
+use nssa::{
+    AccountId,
+    signature::{PublicAccountSecret, initial_key},
+};
+use nssa_core::{program::ProgramId, signing_key::SigningKeyState};
 use rln_layouts::ConfigState;
 use serde_json::{Value, json};
 
@@ -32,7 +35,7 @@ pub const PLAN_FORMAT: &str = "lez-rln-deployment-plan";
 pub const PLAN_VERSION: u64 = 1;
 /// The LEZ whose address derivation the plan's ids come from: the tag this
 /// crate builds against.
-pub const LEZ_TAG: &str = "v0.4.0-rc3";
+pub const LEZ_TAG: &str = "v0.4.0";
 
 /// A program's image id as risc0 prints a digest.
 pub fn hex_image_id(image_id: &ProgramId) -> String {
@@ -99,7 +102,7 @@ pub struct PlannedRegistry {
     pub config_account: AccountId,
     pub tree_main_account: AccountId,
     pub treasury_account: AccountId,
-    pub treasury_public_key: PublicKey,
+    pub treasury_public_key: SigningKeyState,
     pub params: RegistryParams,
 }
 
@@ -109,11 +112,11 @@ pub struct DeploymentPlan {
     pub name: String,
     pub programs: ProgramIds,
     pub owner: AccountId,
-    pub owner_public_key: PublicKey,
+    pub owner_public_key: SigningKeyState,
     /// The deployment's own fee payer, for a genesis to fund. No id depends
     /// on it.
     pub payer: AccountId,
-    pub payer_public_key: PublicKey,
+    pub payer_public_key: SigningKeyState,
     pub registries: Vec<PlannedRegistry>,
 }
 
@@ -144,7 +147,7 @@ impl DeploymentPlan {
                 config_account: derive_config_account(&programs.registration, &tree_id),
                 tree_main_account: derive_tree_main_account(&programs.registration, &tree_id),
                 treasury_account: account_of(&treasury_key),
-                treasury_public_key: PublicKey::new_from_private_key(&treasury_key),
+                treasury_public_key: initial_key(&treasury_key),
                 params: spec.params,
             });
         }
@@ -152,9 +155,9 @@ impl DeploymentPlan {
             name: keys.name().to_string(),
             programs,
             owner,
-            owner_public_key: PublicKey::new_from_private_key(&owner_key),
+            owner_public_key: initial_key(&owner_key),
             payer: account_of(&payer_key),
-            payer_public_key: PublicKey::new_from_private_key(&payer_key),
+            payer_public_key: initial_key(&payer_key),
             registries: planned,
         })
     }
@@ -162,9 +165,9 @@ impl DeploymentPlan {
     /// The plan with the account of `key` as the payer to fund, in place of
     /// the one the deployment secret derives. Nothing else changes.
     #[must_use]
-    pub fn paid_by(mut self, key: &PrivateKey) -> Self {
+    pub fn paid_by(mut self, key: &PublicAccountSecret) -> Self {
         self.payer = account_of(key);
-        self.payer_public_key = PublicKey::new_from_private_key(key);
+        self.payer_public_key = initial_key(key);
         self
     }
 
@@ -473,7 +476,7 @@ mod tests {
     #[test]
     fn a_payer_of_its_own_changes_no_id() {
         let derived = DeploymentPlan::derive(&keys(), &specs()).unwrap();
-        let payer = PrivateKey::try_new([5u8; 32]).unwrap();
+        let payer = PublicAccountSecret::new([5u8; 32]);
         let paid = derived.clone().paid_by(&payer);
         assert_eq!(paid.payer, account_of(&payer));
         assert_ne!(paid.payer, derived.payer);

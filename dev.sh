@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 
 # Keep this in sync with the logos-execution-zone git dep pin in
 # lez-rln/Cargo.toml and lez-rln/methods/guest/Cargo.toml.
-LEZ_REF="v0.4.0-rc3"
+LEZ_REF="v0.4.0"
 LEZ_REPO="https://github.com/logos-blockchain/logos-execution-zone.git"
 # The source checkout is keyed by LEZ_REF so two checkouts of this repo on
 # different tags stop re-cloning over each other; it is immutable and shared.
@@ -52,11 +52,12 @@ fi
 #
 # 1. Fund a payer at genesis. Public transactions carry a fee, and no program
 #    can mint native balance, so nothing a fresh wallet creates can ever hold
-#    any. Provisioning therefore mints its payer first and names its PUBLIC
+#    any. Provisioning therefore mints its payer first and names its INITIAL
 #    KEY here (genesis credits a key, not an account id — `mint_payer` prints
-#    both), and the chain starts owing that account a balance. The stock
-#    supply accounts in the shipped config belong to whoever generated them,
-#    so their keys are no use to us.
+#    both; the initial key is the key type byte `00` followed by the account's
+#    32-byte key commitment, 66 hex characters), and the chain starts owing
+#    that account a balance. The stock supply accounts in the shipped config
+#    belong to whoever generated them, so their keys are no use to us.
 #
 # 2. Shorten the block interval. The shipped cadence is a testnet one; a
 #    devnet's confirmation waits, and the block timestamps every
@@ -70,9 +71,9 @@ import json, re, sys
 src, dst, public_key, balance, block_time = sys.argv[1:6]
 cfg = json.load(open(src))
 if public_key:
-    if not re.fullmatch(r"[0-9a-f]{64}", public_key):
+    if not re.fullmatch(r"00[0-9a-f]{64}", public_key):
         sys.exit(
-            "LEZ_RLN_GENESIS_FUND must be the payer's PUBLIC KEY (64 hex chars), not its "
+            "LEZ_RLN_GENESIS_FUND must be the payer's INITIAL KEY (66 hex chars, starting 00), not its "
             f"account id: got {public_key!r}. mint_payer prints the key on its second line."
         )
     actions = cfg.setdefault("genesis", {}).setdefault("actions", [])
@@ -89,7 +90,7 @@ json.dump(cfg, open(dst, "w"), indent=2)
 PY
 echo "Block interval $BLOCK_TIME"
 if [ -n "${LEZ_RLN_GENESIS_FUND:-}" ]; then
-  echo "Genesis funds the account of public key $LEZ_RLN_GENESIS_FUND with $BALANCE"
+  echo "Genesis funds the account of initial key $LEZ_RLN_GENESIS_FUND with $BALANCE"
 fi
 
 # --- Check port is free ---

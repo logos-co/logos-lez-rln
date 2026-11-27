@@ -3,7 +3,7 @@
 //!
 //! The ids are a function of the deployment's secret, its name and the
 //! registries' labels (`rln::deploy_keys`, `rln::deploy_plan`). The output is
-//! public: account ids and public keys, safe to commit into a network preset.
+//! public: account ids and initial keys, safe to commit into a network preset.
 //!
 //! ```bash
 //! LEZ_RLN_DEPLOY_SECRET_FILE=<file> LEZ_RLN_DEPLOY_NAME=<name> \
@@ -15,8 +15,8 @@
 //! `LEZ_RLN_MAX_RATE_LIMIT`, durations to `LEZ_RLN_ACTIVE_DURATION_SECS` /
 //! `LEZ_RLN_GRACE_PERIOD_DURATION_SECS`, as `run_setup` reads them.
 //!
-//! `LEZ_RLN_PAYER_KEY_FILE` names a file holding the payer's own private key
-//! (64 hex characters): the plan then names that key's account as the payer
+//! `LEZ_RLN_PAYER_KEY_FILE` names a file holding the payer's own account
+//! secret (64 hex characters): the plan then names that account as the payer
 //! to fund, in place of the one the deployment secret derives. No id changes.
 //!
 //! Run from `lez-rln/` with the guest binaries built and the plan records
@@ -38,7 +38,7 @@ fn usage() -> ! {
          \n\
          {DEPLOY_SECRET_FILE_ENV} names the file holding the deployment secret (64 hex\n\
          characters); {DEPLOY_NAME_ENV} names the deployment; {PAYER_KEY_FILE_ENV},\n\
-         when set, a file holding the payer's own private key."
+         when set, a file holding the payer's own account secret."
     );
     std::process::exit(2);
 }

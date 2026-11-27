@@ -13,9 +13,9 @@
 #
 # Two files, two jobs. --secret-file is the deployment secret: the program
 # header keys, the registries' owner and the treasuries derive from it, and
-# with them every id. --payer-key-file is optional and holds the private key
-# of the account that pays for the deploy: 64 hex characters too, but the key
-# itself, not a secret to derive from. Without it the payer is one more key
+# with them every id. --payer-key-file is optional and holds the account secret
+# of the account that pays for the deploy: 64 hex characters too, but that
+# account's own secret, not one to derive from. Without it the payer is one more key
 # of the deployment secret. No id depends on the payer, so the same ids come
 # out with or without it; the plan only names another account to fund.
 #
@@ -27,7 +27,7 @@
 # A planned descriptor has the fields of a deployed one plus
 # `"planned": true`, `registry_id` (logos:<reference>:<64 hex>, what a network
 # preset names), `owner_account` and `tree_label`. Everything written is
-# public: account ids and public keys. The secret never leaves its file.
+# public: account ids and initial keys. The secret never leaves its file.
 #
 # What a plan fixes, and what it does not:
 #   - The program ids, tree ids and config accounts are fixed. Nobody else can
@@ -124,7 +124,7 @@ done
 
 echo "plan: registration program $(jq -r .registration_program_id "$PLAN_DIR/plan.json")"
 echo "plan: merkle program       $(jq -r .merkle_program_id "$PLAN_DIR/plan.json")"
-echo "plan: fund at genesis      public key $(jq -r .payer_public_key "$PLAN_DIR/plan.json") (account $(jq -r .payer_account "$PLAN_DIR/plan.json"), $PAYER_NOTE), or pay from another account: deploy.sh --payer"
+echo "plan: fund at genesis      initial key $(jq -r .payer_public_key "$PLAN_DIR/plan.json") (account $(jq -r .payer_account "$PLAN_DIR/plan.json"), $PAYER_NOTE), or pay from another account: deploy.sh --payer"
 if jq -e '.registration_image_id == null' "$PLAN_DIR/plan.json" >/dev/null; then
   echo "plan: no guest binaries found, so the plan holds a deploy to no particular image"
 fi

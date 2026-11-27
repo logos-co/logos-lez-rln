@@ -16,11 +16,16 @@
 //! empty pre-state: authorization says the sender may write the account, not
 //! that it is unclaimed.
 //!
-//! A registry belongs to the account that signed its `Initialize`. A handler
-//! is told who signed only for the account a message is delivered to, so
-//! `Initialize` enters at the owner's own account, where the tree id is
-//! computed (`owner_tree_id`), and is forwarded from there to the config of
-//! that tree. Nobody can initialize a tree id that names another account.
+//! A registry belongs to the account that signed its `Initialize`. A config
+//! is a PDA nobody signs for, so `Initialize` enters at the owner's own
+//! account, which holds the grant over itself only if that account signed,
+//! computes the tree id there (`owner_tree_id`) and forwards it to the config
+//! of that tree. Nobody can initialize a tree id that names another account.
+//!
+//! A signature yields grants on the transaction's root call only, and a sync
+//! message carries no grant its sender does not attach. A payment therefore
+//! carries the grant over the payer's native balance from the root call down
+//! to the native program, which debits nothing without it.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
@@ -97,7 +102,8 @@ fn decode_membership(pre_state: &[u8], empty_msg: &str) -> MembershipState {
 
 // ─── outgoing messages ─────────────────────────────────────────────────
 
-/// Message the merkle program on the tree's main PDA, granting it the PDA.
+/// Message the merkle program on the tree's main PDA, with the seed that
+/// grants the merkle program's actor there.
 ///
 /// The callee is the config's stored `merkle_program_id` and the seed makes
 /// its program the tree's writer, so only the config actor ever issues this
@@ -117,10 +123,28 @@ fn merkle_message(
     .with_pda_seeds([PdaSeed::new(seed)])
 }
 
+/// The grant over `payer`'s native balance, if this delivery holds one.
+///
+/// Passed on only when held: attaching a grant the sender does not hold
+/// fails the transaction as the sender's fault, while a payment that arrives
+/// without one is refused by the native program as an unauthorized sender.
+fn payer_grant(input: &ReceiveInput, payer: [u8; 32]) -> Option<Actor> {
+    input
+        .grants
+        .get(&Actor::native_balance(AccountId::new(payer)))
+        .copied()
+}
+
 /// Move `amount` of the native asset from `payer` to `treasury`. The native
-/// program refuses an unauthorized sender (one who did not sign) and an
-/// insufficient balance; the destination is the config's treasury.
-fn native_payment(payer: [u8; 32], treasury: [u8; 32], amount: u128) -> SyncMessage {
+/// program refuses a payer whose grant did not reach it (one who did not
+/// sign) and an insufficient balance; the destination is the config's
+/// treasury.
+fn native_payment(
+    input: &ReceiveInput,
+    payer: [u8; 32],
+    treasury: [u8; 32],
+    amount: u128,
+) -> SyncMessage {
     SyncMessage::new(
         Actor::native_balance(AccountId::new(payer)),
         &native_token::Message::Transfer {
@@ -128,6 +152,7 @@ fn native_payment(payer: [u8; 32], treasury: [u8; 32], amount: u128) -> SyncMess
             amount,
         },
     )
+    .with_grants(payer_grant(input, payer))
 }
 
 // ─── handler ───────────────────────────────────────────────────────────
@@ -156,7 +181,7 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
                 // Submitted by the transaction: this is the owner's account,
                 // and only its signature authorizes a root message.
                 assert!(
-                    input.is_authorized,
+                    input.is_authorized(),
                     "Initialize must be signed by the account it is sent to"
                 );
                 let tree_id = owner_tree_id(input.receiver.account_id.value(), &tree_label);
@@ -284,7 +309,7 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
             // the same tree state do not contend.
             let membership_seed = membership_seed(&tree_id, &id_commitment);
             time_window(Response::set_state(encode(&config)), now_ms)
-                .send(native_payment(payer, treasury, amount))
+                .send(native_payment(input, payer, treasury, amount))
                 .send(
                     SyncMessage::new(
                         own_actor(input, membership_seed),
@@ -467,15 +492,19 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
                 .saturating_add(secs_to_millis(membership.grace_period_duration_sec))
                 .saturating_add(secs_to_millis(membership.active_duration_sec));
             let rate_limit = membership.rate_limit;
-            time_window(Response::set_state(encode(&membership)), now_ms).send(SyncMessage::new(
-                own_actor(input, config_seed(&tree_id)),
-                &Message::ChargeRenewal {
-                    tree_id,
-                    id_commitment,
-                    rate_limit,
-                    payer,
-                },
-            ))
+            // The config makes the payment, so the payer's grant goes with it.
+            time_window(Response::set_state(encode(&membership)), now_ms).send(
+                SyncMessage::new(
+                    own_actor(input, config_seed(&tree_id)),
+                    &Message::ChargeRenewal {
+                        tree_id,
+                        id_commitment,
+                        rate_limit,
+                        payer,
+                    },
+                )
+                .with_grants(payer_grant(input, payer)),
+            )
         }
         Message::ChargeRenewal {
             tree_id,
@@ -492,6 +521,7 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
             );
             let config = decode_config(pre_state);
             Response::keep_state().send(native_payment(
+                input,
                 payer,
                 config.treasury_account_id,
                 calculate_payment_amount(rate_limit, config.price_per_unit),
@@ -502,7 +532,11 @@ pub fn handle_message(input: &ReceiveInput, msg: Message) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
+    use std::collections::BTreeSet;
+
+    use lee_core::native_token::{
+        NATIVE_TOKEN_PROGRAM_ID, TransferError, decode_balance, encode_balance,
+    };
     use rln_layouts::CLOCK_CLAIM_TOLERANCE_MS;
 
     use super::*;
@@ -515,6 +549,7 @@ mod tests {
     const MERKLE: [u8; 32] = [0x22; 32];
     const TREASURY: [u8; 32] = [0x33; 32];
     const PAYER: [u8; 32] = [0x44; 32];
+    const PAYER_BALANCE: u128 = 1_000_000;
     const PRICE: u128 = 10;
     const ACTIVE_SEC: u32 = 100;
     const GRACE_SEC: u32 = 50;
@@ -572,12 +607,34 @@ mod tests {
         )
     }
 
-    /// `input`, delivered to an account that signed the transaction.
-    fn signed(input: ReceiveInput) -> ReceiveInput {
+    /// `input`, holding the grants over `actors`.
+    fn holding(input: ReceiveInput, actors: impl IntoIterator<Item = Actor>) -> ReceiveInput {
         ReceiveInput {
-            is_authorized: true,
+            grants: actors.into_iter().collect(),
             ..input
         }
+    }
+
+    /// `input`, delivered to an account that signed the transaction.
+    fn signed(input: ReceiveInput) -> ReceiveInput {
+        let receiver = input.receiver;
+        holding(input, [receiver])
+    }
+
+    fn payer_balance() -> Actor {
+        Actor::native_balance(AccountId::new(PAYER))
+    }
+
+    /// The native balance of an account that is not the payer.
+    fn other_balance() -> Actor {
+        Actor::native_balance(AccountId::new([0x45; 32]))
+    }
+
+    /// `input`, a root call of a transaction the payer signed beside another
+    /// signer: a root call holds the grant of every actor marked signer, and
+    /// only the payer's may travel with the payment.
+    fn paying(input: ReceiveInput) -> ReceiveInput {
+        holding(input, [payer_balance(), other_balance()])
     }
 
     /// A valid, non-zero BN254 field element.
@@ -617,7 +674,7 @@ mod tests {
         ReceiveInput {
             receiver,
             from,
-            is_authorized: false,
+            grants: BTreeSet::new(),
             pre_state: ActorState::from(encode(pre)),
             message: Vec::new(),
         }
@@ -627,10 +684,46 @@ mod tests {
         ReceiveInput {
             receiver,
             from,
-            is_authorized: false,
+            grants: BTreeSet::new(),
             pre_state: ActorState::empty(),
             message: Vec::new(),
         }
+    }
+
+    /// The input the runtime builds for `msg`, sent by the receiver of
+    /// `sender`: the grants the sender attached, each of which it must hold
+    /// (the transaction fails with `UnheldGrant` otherwise), plus the grant
+    /// over the destination when a seed derives it from the sender's program.
+    fn deliver(sender: &ReceiveInput, msg: &SyncMessage, pre_state: ActorState) -> ReceiveInput {
+        assert!(
+            msg.grants.is_subset(&sender.grants),
+            "the sender attaches a grant it does not hold"
+        );
+        let mut grants = msg.grants.clone();
+        if msg.pda_seeds.iter().any(|seed| {
+            AccountId::for_public_pda(&sender.receiver.program_account_id, seed)
+                == msg.to.account_id
+        }) {
+            grants.insert(msg.to);
+        }
+        ReceiveInput {
+            receiver: msg.to,
+            from: Some(sender.receiver),
+            grants,
+            pre_state,
+            message: msg.message.clone(),
+        }
+    }
+
+    /// The payer's balance after the native program handles `payment`, sent
+    /// by the receiver of `sender` from a balance of `PAYER_BALANCE`.
+    fn settle(sender: &ReceiveInput, payment: &SyncMessage) -> Result<u128, TransferError> {
+        let input = deliver(sender, payment, encode_balance(PAYER_BALANCE));
+        let post_state = native_token::handle_message(&input)?
+            .response
+            .post_state
+            .expect("a debit writes the balance");
+        Ok(decode_balance(&post_state).expect("a canonical balance"))
     }
 
     fn initialize() -> Message {
@@ -661,14 +754,16 @@ mod tests {
         SyncMessage::new(tree_actor(), msg).with_pda_seeds([PdaSeed::new(main_seed(&TREE_ID))])
     }
 
+    /// The payment of a payer that signed.
     fn payment(amount: u128) -> SyncMessage {
         SyncMessage::new(
-            Actor::native_balance(AccountId::new(PAYER)),
+            payer_balance(),
             &native_token::Message::Transfer {
                 to: AccountId::new(TREASURY),
                 amount,
             },
         )
+        .with_grants([payer_balance()])
     }
 
     fn post_state(response: &Response) -> Vec<u8> {
@@ -834,6 +929,16 @@ mod tests {
         );
     }
 
+    /// The seed is the only source of the grant the merkle program requires.
+    #[test]
+    fn the_tree_seed_grants_the_merkle_programs_actor() {
+        let config = receive(config_actor(), None, &config_state());
+        let response = handle_message(&config, Message::InitializeMerkleTree { tree_id: TREE_ID });
+        let tree = deliver(&config, &response.sync_messages[0], ActorState::empty());
+        assert!(tree.is_authorized());
+        let _ = crate::merkle_tree::handle_message(&tree, MerkleMessage::Initialize);
+    }
+
     #[test]
     #[should_panic(expected = "config not initialized")]
     fn initialize_merkle_tree_needs_a_config() {
@@ -848,7 +953,7 @@ mod tests {
     #[test]
     fn register_counts_pays_inits_the_membership_then_inserts() {
         let response = handle_message(
-            &receive(config_actor(), None, &config_state()),
+            &paying(receive(config_actor(), None, &config_state())),
             register(RATE),
         );
 
@@ -878,6 +983,35 @@ mod tests {
             ]
         );
         assert!(response.async_messages.is_empty());
+    }
+
+    #[test]
+    fn register_debits_a_payer_that_signed() {
+        let config = paying(receive(config_actor(), None, &config_state()));
+        let payment = &handle_message(&config, register(RATE)).sync_messages[0];
+        assert_eq!(
+            settle(&config, payment),
+            Ok(PAYER_BALANCE - RATE as u128 * PRICE)
+        );
+    }
+
+    /// Another account signed and the message names `PAYER`: the config
+    /// holds no grant over the payer's balance, attaches none, and the native
+    /// program refuses the debit.
+    #[test]
+    fn register_for_a_payer_that_did_not_sign_is_refused_by_the_native_program() {
+        let config = holding(
+            receive(config_actor(), None, &config_state()),
+            [other_balance()],
+        );
+        let payment = &handle_message(&config, register(RATE)).sync_messages[0];
+        assert!(payment.grants.is_empty());
+        assert_eq!(
+            settle(&config, payment),
+            Err(TransferError::UnauthorizedSender {
+                account_id: AccountId::new(PAYER)
+            })
+        );
     }
 
     #[test]
@@ -1176,11 +1310,11 @@ mod tests {
     fn extend_in_grace_renews_and_asks_the_config_to_charge() {
         let grace_start = NOW_MS - 10;
         let response = handle_message(
-            &receive(
+            &paying(receive(
                 membership_actor(&commitment()),
                 None,
                 &membership_state(grace_start),
-            ),
+            )),
             extend(NOW_MS),
         );
         let mut expected = membership_state(grace_start);
@@ -1190,15 +1324,60 @@ mod tests {
         assert_window(&response, NOW_MS);
         assert_eq!(
             response.sync_messages,
-            vec![SyncMessage::new(
-                config_actor(),
-                &Message::ChargeRenewal {
-                    tree_id: TREE_ID,
-                    id_commitment: commitment(),
-                    rate_limit: RATE,
-                    payer: PAYER,
-                },
-            )]
+            vec![
+                SyncMessage::new(
+                    config_actor(),
+                    &Message::ChargeRenewal {
+                        tree_id: TREE_ID,
+                        id_commitment: commitment(),
+                        rate_limit: RATE,
+                        payer: PAYER,
+                    },
+                )
+                .with_grants([payer_balance()])
+            ]
+        );
+    }
+
+    /// The payer's balance after Extend at `membership`, ChargeRenewal at
+    /// the config and the payment it sends.
+    fn extend_and_settle(membership: &ReceiveInput) -> Result<u128, TransferError> {
+        let charge = &handle_message(membership, extend(NOW_MS)).sync_messages[0];
+        let config = deliver(
+            membership,
+            charge,
+            ActorState::from(encode(&config_state())),
+        );
+        let msg = Message::try_from_slice(&config.message).expect("decode ChargeRenewal");
+        let payment = &handle_message(&config, msg).sync_messages[0];
+        settle(&config, payment)
+    }
+
+    #[test]
+    fn extend_carries_the_payers_grant_through_the_config_to_the_payment() {
+        let membership = paying(receive(
+            membership_actor(&commitment()),
+            None,
+            &membership_state(NOW_MS - 10),
+        ));
+        assert_eq!(
+            extend_and_settle(&membership),
+            Ok(PAYER_BALANCE - RATE as u128 * PRICE)
+        );
+    }
+
+    #[test]
+    fn extend_for_a_payer_that_did_not_sign_is_refused_by_the_native_program() {
+        let membership = receive(
+            membership_actor(&commitment()),
+            None,
+            &membership_state(NOW_MS - 10),
+        );
+        assert_eq!(
+            extend_and_settle(&membership),
+            Err(TransferError::UnauthorizedSender {
+                account_id: AccountId::new(PAYER)
+            })
         );
     }
 
@@ -1236,11 +1415,11 @@ mod tests {
     #[test]
     fn charge_renewal_moves_the_price_to_the_stored_treasury() {
         let response = handle_message(
-            &receive(
+            &paying(receive(
                 config_actor(),
                 Some(membership_actor(&commitment())),
                 &config_state(),
-            ),
+            )),
             charge_renewal(),
         );
         assert_eq!(response.post_state, None);

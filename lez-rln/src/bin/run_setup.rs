@@ -21,7 +21,7 @@
 
 use logos_lez_rln::rln::{
     client::{
-        RegistryParams, TREE_ID_ENV, init_wallet, load_programs, public_key_of, registry_owner,
+        RegistryParams, TREE_ID_ENV, init_wallet, initial_key_of, load_programs, registry_owner,
         resolve_payer, run_setup, save_payment_account, tree_label_from_env,
     },
     deploy_keys::DeployKeys,
@@ -72,7 +72,7 @@ async fn main() {
     println!("Payment account saved: {payer}");
     println!(
         "Payer public key: {}",
-        public_key_of(&wallet_core, payer, "payer")
+        initial_key_of(&wallet_core, payer, "payer")
     );
     println!("Registry owner:       {}", registry.owner);
     println!("Tree id:              {}", hex::encode(registry.tree_id));

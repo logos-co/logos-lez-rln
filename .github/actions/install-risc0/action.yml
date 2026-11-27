@@ -7,7 +7,7 @@ description: >
 inputs:
   risc0-version:
     description: cargo-risczero and r0vm.
-    default: 3.0.5
+    default: 3.1.0
   risc0-rust-version:
     description: The risc0 Rust toolchain the guest builds with.
     default: 1.88.0

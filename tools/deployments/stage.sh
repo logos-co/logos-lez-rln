@@ -43,8 +43,8 @@ REG=$(field registration_program_id); MRK=$(field merkle_program_id)
 # Wallet schema — refuse a storage.json without the top-level 'key_chain.accounts'.
 jq -e 'has("ciphertext")' "$WALLET" >/dev/null 2>&1 \
   && fail "storage.json is encrypted (top-level 'ciphertext'); stage an unencrypted wallet"
-grep -q '"shards"' "$WALLET" \
-  && fail "storage.json was written by a pre-v0.4.0 wallet (private entries carry \"shards\") and no longer parses; mint a fresh wallet"
+grep -qE '"(shards|ssk|pub_sign_key)"' "$WALLET" \
+  && fail "storage.json was written by a wallet before LEZ v0.4.0 (it carries \"shards\", \"ssk\" or \"pub_sign_key\") and does not hold this line's accounts; mint a fresh wallet"
 jq -e '.key_chain.accounts' "$WALLET" >/dev/null 2>&1 \
   || fail "wallet schema unrecognised (expected top-level 'key_chain.accounts')"
 # wallet<->deployment binding: the wallet must actually hold the payer, since
@@ -68,8 +68,9 @@ jq '.last_synced_block = 0 | .synced_from_block = 0' "$WALLET" > "$OUT/storage.j
 # calibrates each sequencer with calibration_limit sequential getLastBlockId
 # probes (default 100) when no statistics file exists — minutes against a slow
 # chain. One sequencer needs no leader election; 3 probes suffice.
-# gas_limit: the wallet's own default is 2,000,000, and a registration costs
-# about 9.1M — an on-chain merkle insert is one Poseidon compression, roughly
+# gas_limit: the wallet's own default is 10,000,000, the block cap, and it is set
+# here so a change of default cannot lower it. A registration costs about
+# 9.1M — an on-chain merkle insert is one Poseidon compression, roughly
 # 902,000 cycles, per level of tree depth, and gas is cycles. A wallet that
 # declares too little has its transaction refused for running out of gas, with
 # nothing in the reply naming the limit it hit. MAX_GAS_EXEC (10M) is the

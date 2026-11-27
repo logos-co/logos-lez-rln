@@ -15,13 +15,14 @@
 //! LEE_WALLET_HOME_DIR=<dir> LEZ_RLN_PAYER=<from> \
 //!   cargo run --release --bin fund_account -- --to <account-id> --amount <u128>
 //! LEE_WALLET_HOME_DIR=<dir> LEZ_RLN_PAYER=<from> \
-//!   cargo run --release --bin fund_account -- --to-public-key <64 hex> --amount <u128>
+//!   cargo run --release --bin fund_account -- --to-public-key <66 hex> --amount <u128>
 //! ```
 //!
 //! A credit lands only on an account the chain admits: one that exists, or
-//! one whose public key the transaction presents. `--to` serves an account
-//! that already exists on chain (or whose key this wallet holds); an account
-//! that has never been written needs `--to-public-key`.
+//! one whose initial key the transaction presents. `--to` serves an account
+//! that already exists on chain (or whose secret this wallet holds); an
+//! account that has never been written needs `--to-public-key`, which takes
+//! the initial key as `mint_payer` prints it.
 //!
 //! The amount is atomic units. Budget `rate_limit x price_per_unit` plus the
 //! fee reserve (~6.5e8) for each registration the funded account will make —
@@ -32,6 +33,7 @@ use logos_lez_rln::rln::client::{
     TxOutcome, await_outcome, init_wallet, parse_account_id, resolve_payer, wait_account_attempts,
 };
 use nssa::AccountId;
+use nssa_core::signing_key::SigningKeyState;
 use wallet::{
     AccountIdentity,
     program_facades::{CreditDelivery, native_token_transfer::NativeTokenTransfer},
@@ -39,11 +41,11 @@ use wallet::{
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fund_account (--to <account-id> | --to-public-key <64 hex>) --amount <atomic units>\n\
+        "usage: fund_account (--to <account-id> | --to-public-key <66 hex>) --amount <atomic units>\n\
          \n\
          LEE_WALLET_HOME_DIR names the wallet holding the payer; LEZ_RLN_PAYER names\n\
-         the payer itself, and its key must be in that wallet. --to needs an account\n\
-         that exists on chain; --to-public-key funds one that never did."
+         the payer itself, and its secret must be in that wallet. --to needs an account\n\
+         that exists on chain; --to-public-key funds one that never did, by its initial key."
     );
     std::process::exit(2);
 }
@@ -82,11 +84,14 @@ async fn main() {
             AccountIdentity::Public(to)
         }
         (None, Some(key)) => {
-            let key: nssa::PublicKey = key.trim().parse().unwrap_or_else(|e| {
-                eprintln!("--to-public-key is not a public key: {e:?}");
+            let key: SigningKeyState = key.trim().parse().unwrap_or_else(|e| {
+                eprintln!("--to-public-key is not an initial key: {e}");
                 std::process::exit(2);
             });
-            AccountIdentity::PublicForeign(key)
+            AccountIdentity::public_foreign(key).unwrap_or_else(|| {
+                eprintln!("--to-public-key is a key of a type no account starts with");
+                std::process::exit(2);
+            })
         }
         _ => usage(),
     };
@@ -98,7 +103,7 @@ async fn main() {
     let wallet_core = init_wallet().await;
 
     if matches!(recipient, AccountIdentity::Public(_))
-        && wallet_core.get_account_public_signing_key(to).is_none()
+        && wallet_core.get_account_initial_key(to).is_none()
     {
         let exists = wallet_core
             .get_account_public(to)
@@ -111,7 +116,7 @@ async fn main() {
         if !exists {
             eprintln!(
                 "{to} has never existed on chain and this wallet does not hold its key: a \
-                 credit to it cannot be admitted. Pass --to-public-key <its public key> instead."
+                 credit to it cannot be admitted. Pass --to-public-key <its initial key> instead."
             );
             std::process::exit(2);
         }

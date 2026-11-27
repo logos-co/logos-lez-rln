@@ -84,22 +84,25 @@ WS=$(mktemp -d); trap 'rm -rf "$WS"' EXIT
 if [ -n "$ADOPT" ]; then
   [ -f "$ADOPT" ] || { echo "adopt wallet not found: $ADOPT" >&2; exit 1; }
   # A storage written by a wallet before LEZ v0.4.0 holds private-account
-  # entries ("shards") the v0.4 wallet cannot parse; re-mint the wallet. An
+  # entries ("shards") the v0.4 wallet cannot parse, and one written on
+  # v0.4.0-rc3 holds public keys ("ssk", "pub_sign_key") where v0.4.0 holds
+  # account secrets, so its accounts differ; re-mint the wallet. An
   # encrypted storage (top-level "ciphertext") needs LEE_WALLET_PASSWORD and
   # cannot be inspected by the jq below.
   if jq -e 'has("ciphertext")' "$ADOPT" >/dev/null 2>&1; then
     echo "provision: $ADOPT is an encrypted wallet storage; stage.sh and this script read it with jq — adopt an unencrypted one" >&2; exit 1
   fi
-  if grep -q '"shards"' "$ADOPT"; then
-    echo "provision: $ADOPT was written by a pre-v0.4.0 wallet (private entries carry \"shards\") and no longer parses; mint a fresh wallet" >&2; exit 1
+  if grep -qE '"(shards|ssk|pub_sign_key)"' "$ADOPT"; then
+    echo "provision: $ADOPT was written by a wallet before LEZ v0.4.0 (it carries \"shards\", \"ssk\" or \"pub_sign_key\") and does not hold this line's accounts; mint a fresh wallet" >&2; exit 1
   fi
   cp "$ADOPT" "$WS/storage.json"; echo "provision: adopting wallet $ADOPT"
 fi
 # Triple-shape sequencer field — see stage.sh: `sequencer` (v0.3.1 wallet),
 # `sequencers` (v0.3.0), flat `sequencer_addr` (module). calibration_limit: see
 # stage.sh — opening the wallet probes calibration_limit times (default 100).
-# gas_limit: the wallet's own default is 2,000,000, and a registration costs
-# about 9.1M — an on-chain merkle insert is one Poseidon compression, roughly
+# gas_limit: the wallet's own default is 10,000,000, the block cap, and it is set
+# here so a change of default cannot lower it. A registration costs about
+# 9.1M — an on-chain merkle insert is one Poseidon compression, roughly
 # 902,000 cycles, per level of tree depth, and gas is cycles. A wallet that
 # declares too little has its transaction refused for running out of gas, with
 # nothing in the reply naming the limit it hit. MAX_GAS_EXEC (10M) is the
@@ -112,6 +115,11 @@ fi
 jq -n --arg s "$SEQUENCER" '{sequencer_addr:$s, sequencer:{sequencer_addr:$s}, sequencers:[{sequencer_addr:$s}], seq_poll_timeout:"30s", seq_tx_poll_max_blocks:15, seq_poll_max_retries:10, seq_block_poll_max_amount:100, gas_limit:10000000, multi_sequencer_client_config:{distribution_limit:1, calibration_limit:3}}' > "$WS/wallet_config.json"
 
 echo "provision: label=$LABEL sequencer=$SEQUENCER payer=$PAYER (deploying via run_setup — several min)"
+# The executor needs the r0vm that matches risc0-zkvm (3.1.0); a machine whose
+# default r0vm is older names the newer one in RISC0_SERVER_PATH. Looked up
+# before HOME moves to the throwaway wallet.
+R0VM_310="$(ls -d "$HOME"/.risc0/extensions/v3.1.0-cargo-risczero-*/r0vm 2>/dev/null | head -n 1 || true)"
+[ -n "${RISC0_SERVER_PATH:-}" ] || [ -z "$R0VM_310" ] || export RISC0_SERVER_PATH="$R0VM_310"
 export HOME="$WS" LEE_WALLET_HOME_DIR="$WS"
 # Headless: an unencrypted storage opens with the empty password and the
 # tools never prompt.
@@ -147,12 +155,13 @@ PAY=$(tr -d '\n\r' < "$WS/.logos-lez-rln/payment_account_${TREE}.txt")
 # registry's revenue accrues.
 TREASURY=$(grep -E "^  Treasury:" "$LOG" | awk '{print $NF}')
 [ -n "$TREASURY" ] || { echo "provision: FAIL: run_setup printed no treasury account" >&2; exit 1; }
-# Public keys beside the ids: genesis funding and admission evidence name
-# a key, not an account.
+# Initial keys beside the ids: genesis funding and admission evidence name
+# a key, not an account. An initial key is the key type byte 00 and the
+# account's 32-byte key commitment (66 hex characters).
 TREASURY_PK=$(grep -E "^  Treasury public key:" "$LOG" | awk '{print $NF}')
-[[ "$TREASURY_PK" =~ ^[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no treasury public key" >&2; exit 1; }
+[[ "$TREASURY_PK" =~ ^00[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no treasury public key" >&2; exit 1; }
 PAYER_PK=$(grep -E "^Payer public key:" "$LOG" | awk '{print $NF}')
-[[ "$PAYER_PK" =~ ^[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no payer public key" >&2; exit 1; }
+[[ "$PAYER_PK" =~ ^00[0-9a-f]{64}$ ]] || { echo "provision: FAIL: run_setup printed no payer public key" >&2; exit 1; }
 BOUNDS=$(grep -E "^  Rate limit bounds:" "$LOG" | awk '{print $NF}')
 [[ "$BOUNDS" =~ ^([0-9]+)\.\.=([0-9]+)$ ]] || { echo "provision: FAIL: run_setup printed no rate limit bounds" >&2; exit 1; }
 MIN_RATE="${BASH_REMATCH[1]}"; MAX_RATE="${BASH_REMATCH[2]}"

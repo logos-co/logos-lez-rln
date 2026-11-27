@@ -32,11 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The v0.2.2 wallet dep (keycard_wallet -> pcsc-sys) links libpcsclite;
-      # its headers are not on the ubuntu runners.
-      - name: Install PCSC headers
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -85,10 +80,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # See the lint job: keycard_wallet -> pcsc-sys needs libpcsclite.
-      - name: Install PCSC headers
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -127,10 +118,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/install-risc0
 
-      # See the lint job: keycard_wallet -> pcsc-sys needs libpcsclite.
-      - name: Install PCSC headers
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -149,6 +136,10 @@ jobs:
             ${{ runner.os }}-cargo-guest-
 
       - name: Build guest programs
+        env:
+          # cargo-risczero 3.1.0 defaults to r0.1.97.0, which cannot compile the
+          # Poseidon dependency.
+          RISC0_DOCKER_CONTAINER_TAG: r0.1.88.0
         run: cargo risczero build --manifest-path lez-rln/methods/guest/Cargo.toml
 
       - name: Check guest binaries exist and are non-empty

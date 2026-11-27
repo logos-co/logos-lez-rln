@@ -1,4 +1,4 @@
-# lez-rln — non-obvious facts (LEZ v0.4.0-rc3)
+# lez-rln — non-obvious facts (LEZ v0.4.0)
 
 ## Guest binaries: two stale-binary traps
 - Building or testing the host crate NEVER rebuilds the guest — lez-rln has
@@ -50,7 +50,7 @@
 ## Execution model: actors and messages, one session per delivery
 - A program runs as actors: one `(account, program)` pair per delivered
   message (`lee_core::actor_entrypoint!`, `ReceiveInput { receiver, from,
-  is_authorized, pre_state, message }` → `Response { post_state,
+  grants, pre_state, message }` → `Response { post_state,
   sync_messages, async_messages, validity, .. }`). A handler sees its own
   state and nothing else; there is no account list and no claim. What it
   needs from another actor it asks for by message (`rln_layouts::Message`:
@@ -62,16 +62,33 @@
   membership actor (`require_from`). Every message names its tree (and
   member), and the receiver re-derives its own PDA from that and refuses a
   mismatch (`require_receiver`), so a message for another tree lands nowhere.
-- Authorization is per account: a signer, inherited down a sync subtree, or
-  a PDA grant (`for_public_pda(sender.program, seed) == receiver`). The
-  merkle program asserts `is_authorized`, which only the registration
-  program's config actor can produce (it sends with the `main` seed, and only
-  to the merkle program its config stores — "callee targets come from config"
-  survives as: the config is the only emitter). A payment is a sync
+- Authorization is per actor and explicit, nothing is inherited. A signature
+  authorizes only the actors the transaction declares as signers of its root
+  call. A called actor is authorized only by a grant: the sender attaches
+  grants to a sync message (`SyncMessage.grants`, each over an actor whose
+  grant the sender holds in `ReceiveInput.grants`; `with_lent_grant` passes
+  on the one over the destination), or the message carries the PDA seed of
+  the destination (`for_public_pda(sender.program, seed) == receiver`). The
+  merkle program asserts `is_authorized()`. At a registry's tree account (the
+  PDA of the registration program and `main_seed(tree_id)`) only that tree's
+  config actor can produce it (it sends with the `main` seed, and only to the
+  merkle program its config stores — "callee targets come from config"
+  survives as: the config is the only emitter). At any other account the
+  grant can come from elsewhere: a signer can build a tree at an account they
+  sign for, and a program at its own PDA. A reader of a registry's tree
+  therefore derives that address and checks the config's
+  `merkle_program_id`. A payment is a sync
   `native_token::Message::Transfer` to the PAYER's native actor; the native
-  program debits it only if the payer signed, whoever sent the message, and
-  credits the treasury by an async `Credit` that lands in the same
-  transaction only because the treasury's native actor is declared.
+  program debits it only if the message carries a grant over the payer, which
+  needs the payer to be a declared signer and the sending handler to attach
+  the grant, and credits the treasury by an async `Credit` that lands in the same
+  transaction only because the treasury's native actor is declared. The
+  handlers attach the payer's grant only when the delivery holds it
+  (`payer_grant`): for a payer that did not sign, the native program then
+  refuses as `UnauthorizedSender`, where an unconditional attach would fail
+  the transaction as `UnheldGrant`, a fault of our program. `Extend` carries
+  the grant two hops: membership to config (`ChargeRenewal`), config to the
+  payment.
 - Every actor a transaction touches must be declared (`public_actors`) and
   admitted: exist on chain, sign, be reached by a sync message carrying its
   PDA seed, or carry `admission_evidence` (`Pda { program, seed }` /
@@ -110,18 +127,30 @@
   nothing caps the tree's 35 KB but the session that reads and rewrites it.
 - Every delivery is a separate zkVM session, and the transaction's gas
   (`≤ MAX_GAS_EXEC = 10M`, one gas per cycle) is the SUM. Measured on
-  v0.4.0-rc3 (RISC0_DEV_MODE, `cycle_harness`): register = config 923,178
-  (one Poseidon for the leaf) + membership 13,789 + merkle Insert 8,175,134
-  (nine Poseidons) = 9,112,101, 91.1% of the ceiling; merkle Initialize
-  24,289. Poseidon is the budget, which is why the tree is depth 9 and a
-  tenth level (+~0.9M) does not fit. Re-measure with `cycle_harness` and
-  `register_transaction_fits_the_gas_ceiling` after any guest change.
+  v0.4.0 with the docker guests (image `r0.1.88.0`; RISC0_DEV_MODE,
+  `cycle_harness`, a tree holding one leaf): register = config 927,176 (one
+  Poseidon for the leaf) + membership 16,000 + merkle Insert 8,326,989 (nine
+  Poseidons) = 9,270,165, 92.7% of the ceiling; the merkle Initialize
+  transaction 27,700. Poseidon is the budget, which is why the tree is depth
+  9 and a tenth level (+~0.9M) does not fit. Re-measure with `cycle_harness`
+  and `register_transaction_fits_the_gas_ceiling` after any guest change.
+- The builder's rustc is part of the cost: the same merkle source built with
+  1.91.1 runs about 152,000 cycles cheaper per session (1.88 inlines the
+  Poseidon pair hash into `update_leaf`). The figures this file used to give
+  for v0.4.0-rc3 (register 9,112,101, slash 9,717,891) were of a local
+  1.91.1 build; the docker-built rc3 merkle program costs what this one does.
 - Slash is the tightest transaction: the membership session hashes the
   identity secret AND the member's leaf before the nine-Poseidon root update
-  — membership 1,525,134 + config 20,547 + merkle Remove 8,172,210 =
-  9,717,891, 97.2% of the ceiling (erase 9,107,121;
-  `slash_and_erase_transactions_fit_the_gas_ceiling`). Any guest change that
+  — membership 1,525,137 + config 21,175 + merkle Remove 8,324,380 =
+  9,870,692, 98.7% of the ceiling
+  (`slash_and_erase_transactions_fit_the_gas_ceiling`). Any guest change that
   adds a hash to slash does not fit.
+- Those figures are of a tree with ONE leaf. A merkle session also pays about
+  10 cycles per byte of tree state, and a removed leaf's nodes stay in the
+  state. Measured on these binaries with synthetic tree states (not yet
+  through the chain tests): Remove costs 8,404,880 after 128 registrations in
+  the tree's life and 8,504,041 after 256, so slash passes the ceiling at
+  about 190; register on a full tree is about 9.60M and fits.
 - A guest PANIC is charged the transaction's full declared gas; a guest that
   halts with `env::exit(code != 0)` is charged the cycles it ran
   (`ProgramExitedWithCode`, `validated_state_diff::from_public_transaction_metered`,
@@ -146,9 +175,10 @@ identical rewrite.
 ## A registry has an owner, and the tree id is the owner's
 One-shot is not enough for `Initialize`: an unsigned one let whoever knew a
 tree id initialize it first, with a treasury and a merkle program of their
-own. A handler learns who signed only for its RECEIVER (`is_authorized`), and
-a config is a PDA nobody signs for, so `Initialize` enters at the owner's own
-keyed account (root message, `from == None`, `is_authorized`), where the tree
+own. A handler learns that its RECEIVER signed from the grant over it
+(`is_authorized()`), and a config is a PDA nobody signs for, so `Initialize`
+enters at the owner's own keyed account (root message, `from == None`,
+`is_authorized()`, the owner's actor declared a signer), where the tree
 id is computed as `owner_tree_id(owner, tree_label)`, and is forwarded to
 that tree's config, which takes it only from this program's actor at the
 owner (`from_own_program`, and the PDA re-derived from `from.account_id`).
@@ -172,25 +202,33 @@ Duplicate registration is refused SOLELY by the membership init guard
 the merkle insert doesn't dedupe. Regression:
 `test_register_same_commitment_twice_fails`.
 
-## Wallets: passwords and the v0.4 storage
+## Wallets: passwords and the v0.4.0 storage
 - `WalletCore` is `WalletCore<SequencerClient>` here (`rln::client::Wallet`)
   and opens a storage with a password. The tools read `LEE_WALLET_PASSWORD`
   (`rln::client::wallet_password`) and never prompt; unset or empty means an
   unencrypted file, which every throwaway wallet is. An encrypted storage
   (top-level `ciphertext`) without the variable fails at open; `stage.sh`
   and `provision.sh` refuse it outright because they read the file with jq.
-- A storage written by a pre-v0.4.0 wallet no longer parses: its private
-  entries carry `shards` and `Regular(Identifier)`, both gone. `mint_payer`
-  made one such entry in every wallet it created, so every old wallet —
-  `dev/storage.json`, every consumer profile — must be re-minted.
-  `provision.sh`/`stage.sh` refuse a storage containing `"shards"`.
-- Genesis funds a PUBLIC KEY, not an account id: `mint_payer` prints the id
+- A storage written by a wallet before v0.4.0 does not work here. Before
+  v0.4.0-rc3 its private entries carry `shards` and `Regular(Identifier)` and
+  it no longer parses. A v0.4.0-rc3 storage parses no better: its public
+  entries carry `ssk` / `pub_sign_key` where v0.4.0 stores `{secret, cci}`
+  and `{account_id, secret}`. Every old wallet — `dev/storage.json`, every
+  consumer profile — must be re-minted. `provision.sh`/`stage.sh` refuse a
+  storage containing `"shards"`, `"ssk"` or `"pub_sign_key"`.
+- A private key file or wallet entry holds an account SECRET (64 hex): the
+  same 64 hex name a different account on v0.4.0 than on rc3, so a payer key
+  file funded on an rc3 chain is another, unfunded account here.
+- Genesis funds an INITIAL KEY, not an account id: the key type byte `00`
+  followed by the account's 32-byte key commitment, 66 hex characters, the
+  text a genesis file takes in `identified.key`. `mint_payer` prints the id
   on line 1 and the key on line 2 (`--public-key` prints only the key), and
-  `dev.sh` takes the key in `LEZ_RLN_GENESIS_FUND` (it refuses a base58 id).
-  `run_setup` prints the payer's and the treasury's public keys, and
-  `provision.sh` records them in `deployment.json`
-  (`payer_public_key`, `treasury_public_key`): a credit to an account that
-  has never existed needs the key (`fund_account --to-public-key`).
+  `dev.sh` takes the key in `LEZ_RLN_GENESIS_FUND` (it refuses a base58 id
+  and a 64-hex key). `run_setup` prints the payer's and the treasury's
+  keys, and `provision.sh` records them in `deployment.json`
+  (`payer_public_key`, `treasury_public_key`: the names stayed, the values are
+  initial keys): a credit to an account that has never existed needs the key
+  (`fund_account --to-public-key`).
 
 ## Program ids are deployment state
 `CreateHeader` requires an `is_authorized` target, so a program lives at a
@@ -206,7 +244,7 @@ from a secret (`rln::deploy_keys`), so every id is known before the chain
 exists (`plan_deployment`, `deploy_plan`, `tools/deployments/plan.sh` and
 `deploy.sh`). No address depends on the chain, and none on the image.
 - The payer is the one key that need not come from that secret:
-  `LEZ_RLN_PAYER_KEY_FILE` (`--payer-key-file`) holds a private key as it
+  `LEZ_RLN_PAYER_KEY_FILE` (`--payer-key-file`) holds an account secret as it
   is, 64 hex, nothing derived. So `deploy_plan` does not hold a plan file to
   the secret's payer (`differences` skips `payer_*`), and resolves the key
   of `LEZ_RLN_PAYER` itself: the key file, else the secret's payer, else the
@@ -271,7 +309,7 @@ second-long membership durations (`LEZ_RLN_ACTIVE_DURATION_SECS` /
 `LEZ_RLN_GRACE_PERIOD_DURATION_SECS`). ~5 minutes, most of it waiting for
 chain time to pass. The test is a no-op without `LEZ_RLN_LOCAL_SEQUENCER`.
 
-## dev.sh on v0.4.0-rc3
+## dev.sh on v0.4.0
 - The sequencer CLI is `setup <home> --config <file> --funding-public-key
   <hex> --create-channel`, then `start <home> --rpc-listen-address
   127.0.0.1:<port> --metrics-listen-address <addr>`; the config template is
@@ -285,7 +323,13 @@ chain time to pass. The test is a no-op without `LEZ_RLN_LOCAL_SEQUENCER`.
   keep their meanings; the release workspace's `rln up lez` drives dev.sh
   through them. Metrics default to port+6060, so a `--metrics-address` in
   `LEZ_RLN_SEQUENCER_ARGS` duplicates the flag and the sequencer never
-  starts.
+  starts. The sequencer answers RPC with error -31902 while it bootstraps;
+  `tools/e2e-local.sh` retries until it answers.
+- Executing a guest needs the r0vm of the pinned risc0-zkvm (3.1.0). The
+  scripts that execute guests export `RISC0_SERVER_PATH` from
+  `~/.risc0/extensions/v3.1.0-cargo-risczero-*/r0vm` when it is unset; a
+  `cargo test` run by hand needs it set the same way on a machine whose
+  default r0vm is older.
 
 ## Testnet operations
 - register_member's "Timeout waiting for leaf N" panic is often a FALSE
@@ -312,7 +356,7 @@ chain time to pass. The test is a no-op without `LEZ_RLN_LOCAL_SEQUENCER`.
 - Deploying new program instances to https://testnet.lez.logos.co/ is
   normal, routine development practice (`tools/deployments/provision.sh`).
 - The wallet's own send path (program deploys, inits, native transfers) simulates
-  each transaction within `WalletConfig.gas_limit` (default 2M) and declares
+  each transaction within `WalletConfig.gas_limit` (default 10M, the block cap) and declares
   the measured cycles + `public_gas_margin_percent` (25), capped at that
   limit, so the payer's reserve covers the measured gas, not the limit. A
   send whose simulation reverts is refused before submission

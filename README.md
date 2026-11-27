@@ -25,8 +25,11 @@ in `LEZ_REF`; move all three together.
 ### Build
 
 ```bash
-# from the repo root: the guest programs, in docker
-cargo risczero build --manifest-path lez-rln/methods/guest/Cargo.toml
+# from the repo root: the guest programs, in docker (cargo-risczero 3.1.0).
+# The image is named because 3.1.0's default, r0.1.97.0, cannot compile the
+# Poseidon dependency.
+RISC0_DOCKER_CONTAINER_TAG=r0.1.88.0 \
+  cargo risczero build --manifest-path lez-rln/methods/guest/Cargo.toml
 # strip the user ELF inside both .bin files (no local guest build)
 (cd lez-rln/methods && touch build.rs && RISC0_SKIP_BUILD=1 cargo build --release)
 # the host tools
@@ -99,12 +102,16 @@ The host tools open a `WalletCore` from `LEE_WALLET_HOME_DIR`
 (`wallet_config.json` + `storage.json`). A storage may be sealed with a
 password: the tools read `LEE_WALLET_PASSWORD` and never prompt, and an unset
 or empty variable means an unencrypted file (the default for every throwaway
-wallet here). A storage written by a wallet before LEZ v0.4.0 no longer parses
-— its private-account entries changed shape — so re-mint such wallets.
+wallet here). A storage written by a wallet before LEZ v0.4.0 does not work
+here: older ones no longer parse, and a v0.4.0-rc3 one holds other keys for
+the same accounts — so re-mint such wallets. The same 64 hex characters as an
+account secret name a different account on v0.4.0 than on rc3.
 
-`mint_payer` prints two lines, the payer's account id and its public key.
-`dev.sh` funds the payer at genesis from the **public key**
-(`LEZ_RLN_GENESIS_FUND=<64 hex>`); `run_setup` and the registration tools take
+`mint_payer` prints two lines, the payer's account id and its **initial key**:
+the key type byte `00` followed by the account's 32-byte key commitment, 66 hex
+characters, the text a LEZ genesis file takes in `identified.key`. `dev.sh`
+funds the payer at genesis from the initial key
+(`LEZ_RLN_GENESIS_FUND=<66 hex>`); `run_setup` and the registration tools take
 the **account id** (`LEZ_RLN_PAYER`).
 
 ## Structure

@@ -11,11 +11,14 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use nssa::{AccountId, Actor, PrivateKey, program::Program};
-use nssa_core::program::{
-    MAX_PROGRAM_SEGMENTS, MessageData, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramId,
+use nssa::{AccountId, Actor, program::Program, signature::PublicAccountSecret};
+use nssa_core::{
+    program::{MessageData, PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramId},
+    signing_key::SigningKeyState,
 };
-use program_loader_core::{MAX_SEGMENT_DATA_LEN, ProgramHeader};
+use program_loader_core::{
+    LoaderActorState as _, MAX_PROGRAM_SEGMENTS, MAX_SEGMENT_DATA_LEN, ProgramHeader,
+};
 use rand_chacha::ChaCha20Rng;
 use rln::prelude::{Fr, Hasher, IdentityKeys, PoseidonHash, SecretFr};
 use rln_layouts::{ConfigState, MembershipState, label_seed, owner_tree_id};
@@ -480,20 +483,21 @@ pub struct RlnIdentity {
     pub id_secret_hash_hex: String,
 }
 
-/// Create a new wallet account, derive an RLN identity from its signing key, and
-/// compute the rate commitment (leaf value = poseidon(id_commitment, rate_limit)).
+/// Create a new wallet account, derive an RLN identity from its account secret,
+/// and compute the rate commitment (leaf value = poseidon(id_commitment, rate_limit)).
 pub async fn create_identity(wallet_core: &mut Wallet, user_message_limit: u64) -> RlnIdentity {
     let (account_id, _chain_index) = wallet_core.create_new_account_public(None);
     wallet_core
         .store_persistent_data()
         .expect("Failed to store wallet");
 
-    let signing_key = wallet_core
-        .get_account_public_signing_key(account_id)
+    let secret = wallet_core
+        .storage()
+        .key_chain()
+        .pub_account_secret(account_id)
         .expect("Account should be self-owned public");
 
-    let seed = signing_key.value();
-    let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(seed);
+    let identity_keys = IdentityKeys::generate_seeded::<PoseidonHash, ChaCha20Rng>(secret.value());
     let identity_secret = identity_keys.identity_secret();
     let id_commitment_fr = identity_keys.id_commitment();
 
@@ -633,7 +637,7 @@ async fn fresh_loader_account(wallet_core: &mut Wallet, label: &str) -> AccountI
 
 /// Put `key` in the wallet, which from then on signs for its account. Not
 /// stored until the wallet is (`store_persistent_data`).
-pub fn import_key(wallet_core: &mut Wallet, key: PrivateKey) -> AccountId {
+pub fn import_key(wallet_core: &mut Wallet, key: PublicAccountSecret) -> AccountId {
     let account = account_of(&key);
     wallet_core
         .storage_mut()
@@ -996,12 +1000,12 @@ async fn send_init_tx(
     confirm_effect(wallet_core, hash, wait_on, |state| !state.is_empty(), label).await;
 }
 
-/// The public key of an account whose signing key this wallet holds.
-pub fn public_key_of(wallet_core: &Wallet, account: AccountId, label: &str) -> nssa::PublicKey {
-    let key = wallet_core
-        .get_account_public_signing_key(account)
-        .unwrap_or_else(|| panic!("{label}: {account} is not in this wallet"));
-    nssa::PublicKey::new_from_private_key(key)
+/// The initial key of an account whose secret this wallet holds: what a
+/// genesis or a credit to an account that never existed names it by.
+pub fn initial_key_of(wallet_core: &Wallet, account: AccountId, label: &str) -> SigningKeyState {
+    wallet_core
+        .get_account_initial_key(account)
+        .unwrap_or_else(|| panic!("{label}: {account} is not in this wallet"))
 }
 
 /// Make `treasury` exist on chain.
@@ -1107,7 +1111,7 @@ pub fn registry_owner(wallet_core: &mut Wallet, keys: Option<&DeployKeys>) -> Ac
         }),
     };
     assert!(
-        wallet_core.get_account_public_signing_key(owner).is_some(),
+        wallet_core.get_account_initial_key(owner).is_some(),
         "the registry owner {owner} is not in this wallet, and Initialize is signed by it"
     );
     owner
@@ -1137,7 +1141,7 @@ pub async fn initialize_registry(
     owner: AccountId,
     tree_label: &[u8; 32],
     params: &RegistryParams,
-    treasury_key: Option<PrivateKey>,
+    treasury_key: Option<PublicAccountSecret>,
 ) -> [u8; 32] {
     let tree_id = owner_tree_id(owner.value(), tree_label);
     println!("  Registry owner: {owner}");
@@ -1169,7 +1173,7 @@ pub async fn initialize_registry(
         println!("  Treasury: {treasury_id}");
         println!(
             "  Treasury public key: {}",
-            public_key_of(wallet_core, treasury_id, "treasury")
+            initial_key_of(wallet_core, treasury_id, "treasury")
         );
         let payer = fee_payer().expect("initializing needs a funded payer — set LEZ_RLN_PAYER");
         seed_treasury(wallet_core, payer, treasury_id).await;

@@ -37,9 +37,9 @@ use logos_lez_rln::rln::{
     ProgramIds,
     client::{
         MERKLE_TREE_BINARY, REGISTRATION_BINARY, Wallet, deploy_cost_estimate,
-        deploy_segment_count, ensure_programs, import_key, init_wallet, initialize_registry,
-        is_initialized, is_tree_initialized, load_programs, program_deployed_at, public_key_of,
-        read_config, read_program_header, registry_owner, resolve_payer,
+        deploy_segment_count, ensure_programs, import_key, init_wallet, initial_key_of,
+        initialize_registry, is_initialized, is_tree_initialized, load_programs,
+        program_deployed_at, read_config, read_program_header, registry_owner, resolve_payer,
     },
     deploy_keys::{
         DEPLOY_NAME_ENV, DEPLOY_SECRET_FILE_ENV, DeployKeys, PAYER_KEY_FILE_ENV, account_of,
@@ -59,7 +59,7 @@ fn usage() -> ! {
          \n\
          {DEPLOY_SECRET_FILE_ENV} names the deployment secret; LEE_WALLET_HOME_DIR the wallet;\n\
          LEZ_RLN_PAYER the funded account that pays; {PAYER_KEY_FILE_ENV}, when set, a file\n\
-         holding that account's private key."
+         holding that account's secret."
     );
     std::process::exit(2);
 }
@@ -206,7 +206,7 @@ async fn main() {
         }
         None => {}
     }
-    if wallet.get_account_public_signing_key(payer).is_none() {
+    if wallet.get_account_initial_key(payer).is_none() {
         refuse(&format!(
             "nothing here signs for the payer {payer}: it is not the deployment secret's payer \
              ({}), {PAYER_KEY_FILE_ENV} names no key, and the wallet holds none for it",
@@ -363,7 +363,7 @@ async fn main() {
         let mut deployed = file;
         deployed["deployed"] = json!(true);
         deployed["payer_account"] = json!(payer.to_string());
-        deployed["payer_public_key"] = json!(public_key_of(&wallet, payer, "payer").to_string());
+        deployed["payer_public_key"] = json!(initial_key_of(&wallet, payer, "payer").to_string());
         let pretty = serde_json::to_string_pretty(&deployed).expect("a plan serializes");
         std::fs::write(&out_path, pretty + "\n")
             .unwrap_or_else(|e| refuse(&format!("cannot write {}: {e}", out_path.display())));

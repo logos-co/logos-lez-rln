@@ -1,5 +1,5 @@
 //! Mint (or reuse) the account that pays a deployment's fees, and print its
-//! id and public key.
+//! id and initial key.
 //!
 //! Every public transaction we send is charged a fee, and native balance
 //! enters an account only at genesis, over the bridge, or by transfer, so
@@ -9,8 +9,9 @@
 //! as it opens. Nothing here needs a chain — it generates a key, labels it,
 //! and writes the file.
 //!
-//! Output, one per line: the payer's account id (base58), then its public
-//! key (64 hex). The caller hands the public key to `dev.sh` as
+//! Output, one per line: the payer's account id (base58), then its initial
+//! key (66 hex: the key type byte, then the key commitment), the form a
+//! genesis `identified.key` takes. The caller hands the key to `dev.sh` as
 //! `LEZ_RLN_GENESIS_FUND`, so the chain starts already owing the account a
 //! balance, and the id to `run_setup` as `LEZ_RLN_PAYER`. `--public-key`
 //! prints only the key.
@@ -64,14 +65,12 @@ fn main() {
             payer
         }
     };
-    let public_key = nssa::PublicKey::new_from_private_key(
-        storage
-            .key_chain()
-            .pub_account_signing_key(payer)
-            .expect("the payer's signing key is in this wallet"),
-    );
+    let initial_key = storage
+        .key_chain()
+        .pub_account_initial_key(payer)
+        .expect("the payer's secret is in this wallet");
     if !key_only {
         println!("{payer}");
     }
-    println!("{public_key}");
+    println!("{initial_key}");
 }

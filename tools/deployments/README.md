@@ -9,7 +9,7 @@ A **deployment** = one on-chain RLN instance, fully captured by two files:
 ```
 deployments/<name>/
   deployment.json   # tree_id + sequencer + both program ids + derived config + payer/treasury
-  storage.json      # the wallet (holds the payer's keypair); unencrypted, written by a v0.4 wallet
+  storage.json      # the wallet (holds the payer's keypair); unencrypted, written by a v0.4.0 wallet
 ```
 
 `deployment.json`:
@@ -26,8 +26,8 @@ deployments/<name>/
   "treasury_account": "<base58>",
   "min_rate_limit": 100,
   "max_rate_limit": 600,
-  "payer_public_key": "<64 hex>",
-  "treasury_public_key": "<64 hex>",
+  "payer_public_key": "<66 hex>",
+  "treasury_public_key": "<66 hex>",
   "owner_account": "<base58>",
   "tree_label": "<label>"
 }
@@ -68,8 +68,9 @@ One account, one balance, no holding to derive and nothing to claim first.
 
 That account is `payer_account`, and it must already hold native balance:
 **no program can mint native**, so it arrives at genesis (`mint_payer` prints the
-payer's id and public key; `dev.sh`'s `LEZ_RLN_GENESIS_FUND` takes the public
-key), over the L1 bridge, or by a transfer from something already funded
+payer's id and initial key, the key type byte `00` followed by the account's
+32-byte key commitment, 66 hex characters; `dev.sh`'s `LEZ_RLN_GENESIS_FUND`
+takes the initial key), over the L1 bridge, or by a transfer from something already funded
 (`fund_account`; an account that has never existed on chain is credited by
 `--to-public-key`). Budget roughly
 `rate_limit x price_per_unit + 6.5e8` per registration — the fee reserve dwarfs
@@ -163,16 +164,29 @@ registry, `deployments/<name>-<label>/deployment.json`, with the `registry_id`
 a preset needs. `deploy.sh` turns each into a deployed
 `{deployment.json, storage.json}`.
 
+Every transaction of a deploy costs one poll interval, 30 s by default,
+whatever the block time: the wallet sleeps that long before it looks for the
+transaction again. On a local chain pass its block time
+(`deploy.sh --poll-interval 1s`).
+
 **Two files.** `--secret-file` is the deployment secret: the program header
 keys, the registries' owner and the treasuries derive from it, and with them
-every id. `--payer-key-file` is optional and holds the private key of the
-account that pays, 64 hex characters like the secret, but the key itself:
+every id. `--payer-key-file` is optional and holds the account secret of the
+account that pays, 64 hex characters like the secret, but the secret itself:
 nothing is derived from it, so it can be the key of an account that is
 already funded. Without it the payer is one more key the deployment secret
 derives. The ids are the same either way; the plan only names another
 `payer_account` / `payer_public_key` to fund, and `deploy.sh` needs the same
 file to sign with. The two files must differ: the payer's key is stored in
-the deployed `storage.json`.
+the deployed `storage.json`. The same 64 hex characters name a different
+account on each LEZ line, so a payer key file funded for a plan made on the
+v0.4.0-rc3 line is another, unfunded account here.
+
+**Ids differ between LEZ lines.** A plan made on this line (LEZ v0.4.0) for a
+secret, name and label gives other ids than the plan the v0.4.0-rc3 line gives
+for the same ones, because each line derives its keys and accounts with its
+own LEZ and builds its guest programs against it. A plan is only good on the
+line that made it.
 
 **Where the ids come from.** Every key derives from the secret, the name and
 a role (`lez-rln/src/rln/deploy_keys.rs`). A program lives at the account its
@@ -201,8 +215,8 @@ deployed there.
   `--check` first. A program fix after launch means a new name, new ids and a
   new preset.
 - *A header key signs only its own deploy.* The tools never use it for
-  anything else, and neither should you: a signature authorizes every actor on
-  the account for the whole transaction.
+  anything else, and neither should you: a signature authorizes the actors the
+  transaction declares as signers.
 - *Parameters are not part of the id.* Rate bounds, durations, price and
   treasury are in `plan.json`, and `deploy.sh` initializes with exactly those
   and reads them back; changing them does not change the id. A preset's rate
@@ -223,8 +237,9 @@ deployed there.
   account ids, PDAs or program addresses differently gives other ids.
   `deploy.sh` recomputes the plan with the build it runs and refuses a
   `plan.json` that differs.
-- *Funding.* The plan names a payer and its public key, for a genesis to
-  fund: the key in `--payer-key-file`, else one derived from the secret. Any
+- *Funding.* The plan names a payer and its initial key (the key type byte
+  `00` and the account's 32-byte key commitment, 66 hex characters), for a
+  genesis to fund: the key in `--payer-key-file`, else one derived from the secret. Any
   other funded account can pay instead: name it with `--payer` and give its
   key as a key file (`--payer-key-file`) or in a wallet (`--adopt-wallet`).
   No id depends on who pays, and `deploy.sh` refuses a payer it holds no key

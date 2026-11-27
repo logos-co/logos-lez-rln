@@ -5,7 +5,7 @@
 //! actors exactly as it would be on chain.
 //!
 //! The programs sit at fixed header accounts (`REG_ID`, `MERKLE_ID`), seeded
-//! with `V03State::with_named_programs` the way a deployer's `CreateHeader`
+//! with `V03State::with_programs_at` the way a deployer's `CreateHeader`
 //! would place them; every PDA hangs off `REG_ID`. The registry belongs to
 //! `owner()`, who signs `Initialize` at its own account, and `TREE_ID` is
 //! what the program makes of that account and `TREE_LABEL`. A transaction sends one
@@ -28,12 +28,15 @@ pub(crate) mod fixtures {
 
     use borsh::BorshSerialize;
     use nssa::{
-        AccountId, Actor, ActorState, PrivateKey, PublicAccountEvidence, PublicKey,
-        PublicTransaction, V03State,
+        AccountId, Actor, ActorState, PublicAccountEvidence, PublicTransaction, V03State,
         program::Program,
-        public_transaction::{Message as TxMessage, WitnessSet},
+        public_transaction::Message as TxMessage,
+        test_utils::{TestSigner, signed_by, witness_for},
     };
-    use nssa_core::{account::Account, program::PdaSeed};
+    use nssa_core::{
+        native_token::{NATIVE_TOKEN_PROGRAM_ID, encode_balance},
+        program::PdaSeed,
+    };
     use rln_layouts::{ConfigState, MembershipState, Message};
 
     use crate::{
@@ -62,9 +65,9 @@ pub(crate) mod fixtures {
     /// `owner_tree_id(owner, TREE_LABEL)`, written out so every fixture can
     /// name it as a constant (`the_test_tree_is_the_owners`).
     pub const TREE_ID: [u8; 32] = [
-        0xdb, 0x45, 0x1b, 0x57, 0xab, 0x3f, 0x5f, 0xf8, 0xee, 0x1d, 0xc2, 0x14, 0x9a, 0xba, 0x8d,
-        0x5e, 0x54, 0x3c, 0xd8, 0x2b, 0x1d, 0xd5, 0x9c, 0x00, 0x4c, 0x79, 0xc0, 0x19, 0x45, 0xd9,
-        0xa3, 0xd2,
+        0x64, 0x69, 0x9e, 0x42, 0xc4, 0x81, 0x38, 0xb2, 0x63, 0x83, 0x88, 0xe5, 0x50, 0xff, 0x96,
+        0x1a, 0xc4, 0x22, 0x19, 0x2f, 0x42, 0x96, 0x03, 0x82, 0x89, 0x62, 0x78, 0x64, 0xf2, 0xcf,
+        0x95, 0x45,
     ];
 
     pub const PRICE_PER_UNIT: u128 = 10_000;
@@ -116,26 +119,24 @@ pub(crate) mod fixtures {
     pub fn state_with_programs() -> Option<V03State> {
         let registration = load_registration()?;
         let merkle = load_merkle()?;
-        Some(V03State::new().with_named_programs([
-            (REG_ID, registration),
-            (MERKLE_ID, merkle.clone()),
-            (ROGUE_MERKLE_ID, merkle),
+        Some(V03State::new().with_programs_at([
+            (REG_ID, registration, true),
+            (MERKLE_ID, merkle.clone(), true),
+            (ROGUE_MERKLE_ID, merkle, true),
         ]))
     }
 
     // ── keys and balances ──────────────────────────────────────────────
 
-    pub fn keypair(seed: u8) -> (PrivateKey, AccountId) {
-        let mut bytes = [0u8; 32];
-        bytes[0] = seed;
-        let key = PrivateKey::try_new(bytes).unwrap();
-        let id = AccountId::from(&PublicKey::new_from_private_key(&key));
+    pub fn keypair(seed: u8) -> (TestSigner, AccountId) {
+        let key = TestSigner::new(seed);
+        let id = key.account_id();
         (key, id)
     }
 
     /// The registry's owner: signs `Initialize`, and its account is half of
     /// what `TREE_ID` is made of.
-    pub fn owner() -> (PrivateKey, AccountId) {
+    pub fn owner() -> (TestSigner, AccountId) {
         keypair(3)
     }
 
@@ -145,17 +146,14 @@ pub(crate) mod fixtures {
         Actor::new(*account, REG_ID)
     }
 
-    /// A funded wallet account: a native balance and nothing else. No program
-    /// can mint native balance, hence the escape hatch. Keeps the nonce.
+    /// Set an account's native balance. No program can mint native balance,
+    /// hence the escape hatch. Only the balance changes: the nonce and the
+    /// signing key the account has rotated to stay.
     pub fn fund_native(state: &mut V03State, account_id: &AccountId, balance: u128) {
-        let nonce = state.get_account_by_id(*account_id).nonce;
-        state.force_insert_account(
-            *account_id,
-            Account {
-                nonce,
-                ..Account::funded(balance)
-            },
-        );
+        let account = state
+            .get_account_by_id(*account_id)
+            .with_actor_state(NATIVE_TOKEN_PROGRAM_ID, encode_balance(balance));
+        state.force_insert_account(*account_id, account);
     }
 
     pub fn native_balance(state: &V03State, account_id: &AccountId) -> u128 {
@@ -238,31 +236,32 @@ pub(crate) mod fixtures {
     // ── transactions ───────────────────────────────────────────────────
 
     /// A public transaction with one root message, signed by `signers`, each
-    /// at its current nonce.
+    /// at its current nonce. A signer's declared actors are all `Signer`, as
+    /// the host's mentions of a signing account declare them.
     pub fn public_tx(
         state: &V03State,
         root: Actor,
         public_actors: Vec<Actor>,
         evidence: Vec<PublicAccountEvidence>,
         message: impl BorshSerialize,
-        signers: &[&PrivateKey],
+        signers: &[&TestSigner],
     ) -> PublicTransaction {
         let nonces: BTreeMap<AccountId, _> = signers
             .iter()
             .map(|key| {
-                let id = AccountId::from(&PublicKey::new_from_private_key(key));
+                let id = key.account_id();
                 (id, state.get_account_by_id(id).nonce)
             })
             .collect();
         let message = TxMessage::new(
             root,
             Program::serialize_message(message).expect("message serializes"),
-            public_actors,
+            signed_by(public_actors, nonces.keys().copied()),
             nonces,
             None,
             evidence,
         );
-        let witness = WitnessSet::for_message(&message, signers);
+        let witness = witness_for(&message, signers);
         PublicTransaction::new(message, witness)
     }
 
@@ -292,11 +291,11 @@ pub(crate) mod fixtures {
     /// `tree_id` with the evidence that admits it.
     pub fn signed_init_tx(
         state: &V03State,
-        signer: &PrivateKey,
+        signer: &TestSigner,
         tree_id: &[u8; 32],
         message: Message,
     ) -> PublicTransaction {
-        let account = AccountId::from(&PublicKey::new_from_private_key(signer));
+        let account = signer.account_id();
         public_tx(
             state,
             owner_actor(&account),
@@ -355,7 +354,7 @@ pub(crate) mod fixtures {
         pub treasury_id: AccountId,
         /// Signs register/extend and pays the price from its native balance.
         pub payer_id: AccountId,
-        pub payer_key: PrivateKey,
+        pub payer_key: TestSigner,
         /// Chain time: the timestamp of the block every transaction is
         /// applied in, and the `now_ms` time-dependent messages carry.
         pub now_ms: u64,
@@ -471,7 +470,7 @@ pub(crate) mod fixtures {
     /// as the price's destination and the tree under `merkle`.
     pub fn register_tx_to(
         state: &V03State,
-        payer_key: &PrivateKey,
+        payer_key: &TestSigner,
         treasury: &AccountId,
         merkle: AccountId,
         msg: Message,
@@ -565,7 +564,7 @@ pub(crate) mod fixtures {
     }
 
     /// Renewal is paid, so `payer_key` signs and is debited.
-    pub fn extend_tx(setup: &TestSetup, payer_key: &PrivateKey, msg: Message) -> PublicTransaction {
+    pub fn extend_tx(setup: &TestSetup, payer_key: &TestSigner, msg: Message) -> PublicTransaction {
         let Message::Extend {
             tree_id,
             id_commitment,
@@ -2413,8 +2412,8 @@ mod tests {
 
     /// SECURITY (renewal is priced): the price moves from the account the
     /// message names as payer, and only its own signature authorizes that
-    /// debit — the config's `ChargeRenewal` carries no grant. A renewal naming
-    /// a payer who did not sign is refused and nothing moves.
+    /// debit: the grant over its native balance exists only if it signed. A
+    /// renewal naming a payer who did not sign is refused and nothing moves.
     #[test]
     fn extend_rejects_an_unauthorized_payer() {
         let (mut setup, idc) = registered_at_genesis(0xA8);

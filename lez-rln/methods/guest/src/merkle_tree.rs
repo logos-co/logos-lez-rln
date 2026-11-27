@@ -24,12 +24,13 @@
 //!
 //! # Authorization
 //!
-//! Every message requires `is_authorized`. The tree account is a PDA of the
-//! registration program, and a PDA is authorized only when its owning
-//! program sends to it with the PDA's seed (`with_pda_seeds`) — so only the
-//! registration program can drive the tree. Authorization says the sender may
-//! write the account, never that it is unclaimed: `Initialize` is one-shot
-//! because it refuses a non-empty state.
+//! Every message requires the grant over the receiver (`is_authorized()`), so
+//! anyone can keep a tree at an account they sign for, and any program at its
+//! own PDA. A registry's tree is the registration program's PDA of
+//! `main_seed(tree_id)`, granted only by that program's seeded messages: a
+//! reader derives that address and checks the config's `merkle_program_id`.
+//! Authorization says the sender may write the account, never that it is
+//! unclaimed: `Initialize` is one-shot because it refuses a non-empty state.
 
 use lee_core::program::{ReceiveInput, Response};
 use rln_layouts::exit::{EXIT_LEAF_MISMATCH, EXIT_TREE_FULL};
@@ -51,7 +52,7 @@ use crate::{
 /// One delivered message: the tree's new state. Every message rewrites it.
 pub fn handle_message(input: &ReceiveInput, msg: MerkleMessage) -> Response {
     assert!(
-        input.is_authorized,
+        input.is_authorized(),
         "tree account must be authorized by its owning program's pda_seeds"
     );
     let pre_data: &[u8] = &input.pre_state;
@@ -373,10 +374,11 @@ mod tests {
     }
 
     fn receive(is_authorized: bool, pre: &[u8], msg: &MerkleMessage) -> ReceiveInput {
+        let receiver = Actor::new(AccountId::new([1; 32]), merkle_program_id());
         ReceiveInput {
-            receiver: Actor::new(AccountId::new([1; 32]), merkle_program_id()),
+            receiver,
             from: Some(Actor::new(AccountId::new([2; 32]), AccountId::new([9; 32]))),
-            is_authorized,
+            grants: is_authorized.then_some(receiver).into_iter().collect(),
             pre_state: ActorState::from(pre.to_vec()),
             message: borsh::to_vec(msg).unwrap(),
         }
